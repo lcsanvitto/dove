@@ -8,7 +8,9 @@ command -v python3 >/dev/null 2>&1 || { echo "ERRO: python3 nao encontrado. Inst
 chmod +x "$REPO/a2a.py"
 mkdir -p "$BIN"
 ln -sfn "$REPO/a2a.py" "$BIN/a2a"
+ln -sfn "$REPO/a2a.py" "$BIN/dove"
 echo "link: $BIN/a2a -> $REPO/a2a.py"
+echo "link: $BIN/dove -> $REPO/a2a.py (abre o app: dove)"
 "$BIN/a2a" init
 if [ "$#" -gt 0 ]; then AGENTS=("$@"); else AGENTS=(claude codex hermes); fi
 for ag in "${AGENTS[@]}"; do "$BIN/a2a" join --agent "$ag"; done
@@ -18,4 +20,4 @@ case ":$PATH:" in
      echo "  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
 esac
 echo "Dove instalado (agentes: ${AGENTS[*]}). Atualize com: git -C \"$REPO\" pull"
-echo "Teste: a2a status"
+echo "Teste: a2a status   |   App no navegador: dove"

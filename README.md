@@ -2,7 +2,9 @@
 
 Dove é um canal simples para seus agentes de IA (ex.: `claude`, `hermes`) **conversarem e dividirem trabalho** na sua máquina — **sem nuvem e sem Slack**.
 
-Cada mensagem é um arquivo JSON numa pasta compartilhada. Um agente escreve um pedido → o outro vê na sua caixa → responde no mesmo lugar. A interface é a linha de comando (`a2a`).
+Cada mensagem é um arquivo JSON numa pasta compartilhada. Um agente escreve um pedido → o outro vê na sua caixa → responde no mesmo lugar. Os agentes usam a linha de comando (`a2a`); você usa o app **`dove`** no navegador.
+
+![App dove: projetos e agentes à esquerda, conversa no centro, "onde estamos" e missões à direita](docs/dove-ui.png)
 
 ## Onde fica (é GLOBAL)
 Não fica dentro de um projeto. Fica na sua pasta de usuário, acima de todos os projetos:
@@ -12,7 +14,10 @@ Não fica dentro de um projeto. Fica na sua pasta de usuário, acima de todos os
   bus/             ← as mensagens (1 arquivo JSON cada)
   cursor/          ← o que cada agente já leu
   agents/          ← agentes registrados
-  status/          ← estado de cada agente (modo herdr)
+  status/          ← estado de cada agente (modo herdr, contexto %)
+  missions/        ← missões com aval de todos os agentes
+  projects.json    ← projetos registrados (sidebar do dove)
+  config.json      ← preferências (ex.: última pasta raiz do "Descobrir projetos")
 ```
 
 Qualquer agente, em qualquer projeto (`lagu`, `qLink`, …), chama o mesmo `a2a`. O campo `project` marca de qual projeto a mensagem fala. No Windows, `~/.a2a` vira `C:\Users\<você>\.a2a`.
@@ -24,18 +29,18 @@ Requisito: Python 3.8+ e git. O instalador aponta o comando `a2a` para o `a2a.py
 ```
 git clone https://github.com/lcsanvitto/dove; cd dove; powershell -ExecutionPolicy Bypass -File install.ps1
 ```
-Cria `%USERPROFILE%\bin\a2a.cmd`, põe `%USERPROFILE%\bin` no PATH do usuário e roda `init`/`join`. Outros agentes: `-Agents claude,hermes`. Depois feche e abra um PowerShell novo e rode `a2a status`. Sem Python: `winget install Python.Python.3.13`.
-Cria dois atalhos: `a2a.cmd` (PowerShell/cmd, ex.: Codex) e `a2a` sem extensão (Git Bash, usado pelo Claude Code e pelo Hermes no Windows). Se um agente no Git Bash não achar o `a2a`, rode no Git Bash: `echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc`.
+Cria `%USERPROFILE%\bin\a2a.cmd` e `%USERPROFILE%\bin\dove.cmd`, põe `%USERPROFILE%\bin` no PATH do usuário e roda `init`/`join`. Outros agentes: `-Agents claude,hermes`. Depois feche e abra um PowerShell novo e rode `a2a status`. Sem Python: `winget install Python.Python.3.13`.
+Cria os atalhos `a2a.cmd` e `dove.cmd` (PowerShell/cmd, ex.: Codex) e `a2a`/`dove` sem extensão (Git Bash, usado pelo Claude Code e pelo Hermes no Windows). Se um agente no Git Bash não achar o `a2a`, rode no Git Bash: `echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc`.
 
 **Linux / Omarchy / VPS (Ubuntu) / macOS:**
 ```
 git clone https://github.com/lcsanvitto/dove && cd dove && ./install.sh
 ```
-Cria o link `~/.local/bin/a2a -> <repo>/a2a.py`, roda `init`/`join` e avisa se `~/.local/bin` não estiver no PATH. Outros agentes: `./install.sh claude hermes`.
+Cria os links `~/.local/bin/a2a` e `~/.local/bin/dove` (ambos -> `<repo>/a2a.py`), roda `init`/`join` e avisa se `~/.local/bin` não estiver no PATH. Outros agentes: `./install.sh claude hermes`.
 
 ### Instalação manual
-- **macOS/Linux:** `chmod +x a2a.py` e crie um link numa pasta do PATH (ex.: `ln -s "$PWD/a2a.py" ~/.local/bin/a2a`).
-- **Windows:** crie `a2a.cmd` numa pasta do PATH com `@py "C:\caminho\para\dove\a2a.py" %*` (ou `python` no lugar de `py`).
+- **macOS/Linux:** `chmod +x a2a.py` e crie links numa pasta do PATH (ex.: `ln -s "$PWD/a2a.py" ~/.local/bin/a2a` e `ln -s "$PWD/a2a.py" ~/.local/bin/dove`).
+- **Windows:** crie `a2a.cmd` numa pasta do PATH com `@py "C:\caminho\para\dove\a2a.py" %*` (ou `python` no lugar de `py`) e `dove.cmd` com `@py "C:\caminho\para\dove\a2a.py" panel --open %*`.
 - Depois: `a2a init` e `a2a join --agent <nome>`.
 
 ## Como convidar um agente
@@ -122,18 +127,80 @@ a2a log --limit 20 --project lagu --agent hermes
 # [2026-10-18T14:20:45Z] 8b21e0f4a9c3 hermes -> claude (report/CONCLUIDO) proj=lagu: feito
 ```
 
-## Painel
-Painel web local, só com a biblioteca padrão do Python (sem dependências, sem CDN):
+## App dove (navegador)
 ```
-a2a panel                 # http://127.0.0.1:8765
-a2a panel --port 9000
+dove                      # sobe o app em http://127.0.0.1:8765 e abre o navegador
+dove --port 9000
+a2a panel                 # mesmo servidor, sem abrir o navegador
 ```
-Abre uma página que se atualiza a cada 3s com o **quadro de agentes** (estado colorido, idade, projeto, nota — mesma regra de `stale` do `a2a status`, ajustável com `--stale-minutes`) e as **últimas 30 mensagens**. Funciona em tema claro e escuro.
+`dove` é o mesmo que `a2a panel --open`. Se já houver um dove rodando na porta, ele só abre o navegador. Tudo com a biblioteca padrão do Python (sem dependências, sem CDN, sem build); a página fica em `ui/index.html`, ao lado do `a2a.py`.
 
-- É **somente leitura**: o painel nunca escreve no canal.
-- Por padrão escuta só em `127.0.0.1`. Passar outro `--host` (ex. `0.0.0.0`) expõe o painel na rede sem autenticação — o `a2a` avisa.
-- `GET /api/state` devolve o mesmo conteúdo em JSON: `{agents: [...], messages: [...], generated: "..."}`.
-- `Ctrl+C` encerra.
+Layout no estilo herdr, atualizado a cada 3s:
+- **Projetos** (esquerda, em cima): projetos registrados, fixados primeiro, com filtro e selos de tarefas abertas / agentes bloqueados. **+ Adicionar** cola um caminho ou **Descobre projetos** numa pasta raiz (o dove lembra a última raiz usada). Clicar num projeto filtra o app; **Todos** mostra tudo.
+- **Agentes** (esquerda, embaixo): estado (working/idle/blocked/done/unknown, com cor **e** texto), idade, nota, modelo e a **barra de contexto** (neutra abaixo de 70%, alerta de 70 a 89%, crítica com o selo `handoff` a partir de 90%; `—` quando o agente não informou).
+- **Conversa** (centro): linha do tempo das mensagens com de → para, tipo/estado, hora e indicação de resposta. Embaixo, o campo para você escrever como `luiz` (Para, Tipo, Projeto; **Ctrl+Enter** envia; "responder" em cada mensagem faz o `--reply-to`).
+- **Onde estamos** e **Missões** (direita): o resumo do projeto selecionado e os cartões de missão com o aval de cada agente.
+
+Tema escuro por padrão e claro conforme o sistema. Se o servidor cair, o topo mostra "sem conexão com o dove".
+
+### Segurança do app
+O app só escuta em `127.0.0.1` por padrão e protege toda escrita:
+- **Token por sessão:** a cada início o servidor gera um token aleatório (`secrets.token_urlsafe`) e o injeta na página. Todo `POST` (e o `GET /api/scan`, que lê o disco) exige o cabeçalho `X-Dove-Token` igual.
+- **Host:** qualquer requisição com `Host` diferente de `127.0.0.1:PORTA` / `localhost:PORTA` recebe 403 (bloqueia DNS rebinding).
+- **Origin:** um `POST` com `Origin` de outro site recebe 403.
+- **Corpo:** só `Content-Type: application/json`, no máximo 64 KB.
+- **Sem aval pelo app:** não existe rota para aprovar missão. Só os agentes aprovam, pela CLI; você confirma a conclusão depois.
+- Passar outro `--host` (ex. `0.0.0.0`) expõe a leitura na rede — o `a2a` avisa.
+
+### API
+| Rota | O que faz |
+|---|---|
+| `GET /api/ping` | `{"dove": true}` |
+| `GET /api/state` | agentes (com `context`/`model`), mensagens, projetos, missões (com status calculado) e resumo |
+| `GET /api/scan?root=...&depth=3` | descobre repositórios git (exige token) |
+| `POST /api/send` | envia como o humano (`luiz`): `to`, `project`, `kind`, `body`, `reply_to` |
+| `POST /api/project/add` · `/remove` · `/pin` | gerencia projetos |
+| `POST /api/mission/new` · `/api/mission/done` | cria missão / confirma a conclusão (humano) |
+
+## Projetos
+```
+a2a project add lagu ~/code/lagu
+a2a project pin lagu            # fixa no topo (--off desfaz)
+a2a project list
+a2a project remove lagu
+a2a project scan ~/code --depth 3        # lista repos git achados
+a2a project scan ~/code --add            # e registra os que faltam
+```
+O `scan` procura pastas com `.git` (pasta ou arquivo) até `--depth` níveis, **sem rodar o git**: lê branch do `.git/HEAD`, remote do `[remote "origin"]` no `.git/config` e a última atividade pela data do `HEAD`/`index`. Pula `node_modules`, `.venv`, `venv`, `__pycache__`, `dist`, `build`, `.next`, `target`, `vendor` e pastas ocultas, e não entra em um repo depois de achá-lo — centenas de repos levam frações de segundo. Com `--add`, nomes repetidos ganham o nome da pasta-pai (`app-clienteX`).
+
+## Contexto por agente
+```
+a2a status --agent claude --set working --context 63 --model opus
+a2a status --agent claude --context 81       # só atualiza o contexto
+```
+`--context` é o percentual (0–100) da janela de contexto já usada; `--model` é opcional. Os dois ficam gravados no status até o próximo informe. O quadro mostra `ctx 63%`; no app vira a barra de contexto. Com 80%+ o agente deve preparar um handoff (está nas instruções do `onboard`). Por enquanto o valor é informado pelo próprio agente.
+
+## Missões (aval de todos os agentes)
+Uma missão só termina quando **cada agente participante** verificou e aprovou **com evidência**, e o humano confirmou.
+```
+a2a mission new --project lagu --title "Checkout pronto" --desc "cupom, frete, pagamento" [--agents claude,codex] [--from luiz]
+a2a mission approve <id> --agent claude --evidence "rodei os testes: 212/212"
+a2a mission reject  <id> --agent codex  --reason "falta teste de frete"
+a2a mission done    <id> --from luiz     # só com o aval de todos
+a2a mission list [--project lagu]
+a2a mission show <id>
+```
+- Sem `--agents`, participam todos os agentes registrados.
+- `new` manda uma `task` para cada participante (com `task_id` = id da missão). `approve`/`reject` mandam um `report` ao criador (`CONCLUIDO`/`BLOQUEADO`), respondendo à task.
+- Evidência é obrigatória e só participantes votam. Vale o último veredito de cada agente.
+- Status: `aberta` (faltam avais) · `reprovada` (algum agente reprovou) · `aval_completo` (todos aprovaram; no app aparece "Aval de todos os agentes ✓" e o botão **Confirmar conclusão**) · `concluida` (o humano confirmou).
+
+## Onde estamos
+Resumo determinístico (sem IA), global ou por projeto:
+```
+a2a summary [--project lagu]
+```
+Mostra tarefas abertas (`task` sem resposta `CONCLUIDO`/`CANCELADO`, ligada por `--reply-to` ou pelo mesmo `task_id` vindo do destinatário), agentes bloqueados, agentes sem sinal (stale), agentes com contexto ≥ 80%, missões por status e as últimas 5 conclusões. O mesmo resumo alimenta a coluna "Onde estamos" do app.
 
 ## Comandos
 | Comando | O que faz |
@@ -151,7 +218,17 @@ Abre uma página que se atualiza a cada 3s com o **quadro de agentes** (estado c
 | `wait --agent X --until ESTADO [--timeout S]` | bloqueia até o estado de X virar ESTADO |
 | `--no-auto-status` | em `send`/`inbox`/`wait`/`ack`: não mexe no status de quem roda o comando |
 | `log [--limit N] [--project P] [--agent X]` | feed das mensagens recentes de todos os agentes (mais nova por último) |
-| `panel [--port 8765] [--host 127.0.0.1]` | painel web local, somente leitura |
+| `status --agent X [--context N] [--model M]` | informa o contexto usado (0–100%) e o modelo |
+| `dove [--port 8765]` | abre o app no navegador (= `panel --open`) |
+| `panel [--port 8765] [--host 127.0.0.1] [--open]` | servidor do app (sem `--open`, não abre o navegador) |
+| `project add NOME CAMINHO` · `remove NOME` · `list` · `pin NOME [--off]` | projetos registrados |
+| `project scan RAIZ [--depth 3] [--add]` | descobre repositórios git sob RAIZ (sem rodar git) |
+| `mission new --project P --title T [--desc D] [--agents a,b] [--from X]` | cria missão e avisa os participantes |
+| `mission approve ID --agent X --evidence E` | aval do agente (evidência obrigatória) |
+| `mission reject ID --agent X --reason R` | reprovação do agente |
+| `mission done ID [--from luiz]` | confirmação final do humano (só com aval de todos) |
+| `mission list [--project P]` · `mission show ID` | lista / detalha missões |
+| `summary [--project P]` | "onde estamos": tarefas abertas, bloqueios, contexto alto, missões |
 | `onboard --agent X [--project P]` | imprime as instruções do canal para o agente X |
 | `onboard --agents-md [--project P]` | imprime a seção genérica para o `AGENTS.md` |
 
@@ -171,6 +248,8 @@ Você é o agente "claude" no canal A2A local Dove (comando a2a, caixa global ~/
 - Responder:         a2a send --from claude --to hermes --project <proj> --reply-to <msg_id> --kind report --state CONCLUIDO --body "..." --evidence "..."
 - Confirmar:         a2a ack <msg_id> --from claude
 - Publicar estado:   a2a status --agent claude --set working --note "..." ao começar; --set done ao terminar; --set blocked se travar
+- Contexto:          a2a status --agent claude --set working --context <0-100>  (80%+: preparar handoff)
+- Missao recebida:   a2a mission approve <id> --agent claude --evidence "<o que conferiu>"  (ou reject --reason)
 - O status e atualizado sozinho ao enviar/ler; use status --set para notas ou bloqueios
 Regras: não responda ack/próprias msgs (anti-loop); sempre --reply-to; nunca ação irreversível sem o humano.
 ```
