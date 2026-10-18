@@ -85,6 +85,43 @@ a2a wait --agent claude --until done --timeout 600
 ```
 Status mais velho que `--stale-minutes` (padrão 30) aparece como `unknown (stale, era <estado>)` — o agente pode ter morrido sem avisar. O `wait --until` olha o estado gravado, sem considerar staleness.
 
+### Auto-status
+O status se atualiza sozinho — o agente não precisa lembrar de publicar a cada passo. Só o agente que roda o comando tem o status alterado (nunca o destinatário).
+
+- `send` muda o estado do **remetente** conforme o `--state` da mensagem (e grava o `--project`, se houver):
+
+  | `--state` da mensagem | estado do remetente |
+  |---|---|
+  | `ACEITO`, `EM_EXECUCAO` | `working` |
+  | `BLOQUEADO`, `AGUARDANDO_APROVACAO` | `blocked` |
+  | `CONCLUIDO`, `CANCELADO` | `done` |
+  | outro / nenhum | só heartbeat |
+
+- `inbox`, `wait` e `ack` fazem **heartbeat**: renovam o horário do status (mantendo estado e nota), o que evita o `stale`. Se o agente ainda não tem status, ele nasce como `idle`.
+- A nota existente é mantida; use `status --set ... --note` para notas ou bloqueios.
+- `--no-auto-status` (em `send`, `inbox`, `wait` e `ack`) desliga tudo isso naquele comando.
+
+## Log
+Feed em texto das mensagens recentes de todos os agentes, em ordem cronológica (mais nova por último). `--agent X` filtra mensagens de **ou** para X.
+```
+a2a log --limit 20 --project lagu --agent hermes
+# [2026-10-18T14:02:11Z] 3f9a1c2b7d10 claude -> hermes (task) proj=lagu: revisar modulo X
+# [2026-10-18T14:20:45Z] 8b21e0f4a9c3 hermes -> claude (report/CONCLUIDO) proj=lagu: feito
+```
+
+## Painel
+Painel web local, só com a biblioteca padrão do Python (sem dependências, sem CDN):
+```
+a2a panel                 # http://127.0.0.1:8765
+a2a panel --port 9000
+```
+Abre uma página que se atualiza a cada 3s com o **quadro de agentes** (estado colorido, idade, projeto, nota — mesma regra de `stale` do `a2a status`, ajustável com `--stale-minutes`) e as **últimas 30 mensagens**. Funciona em tema claro e escuro.
+
+- É **somente leitura**: o painel nunca escreve no canal.
+- Por padrão escuta só em `127.0.0.1`. Passar outro `--host` (ex. `0.0.0.0`) expõe o painel na rede sem autenticação — o `a2a` avisa.
+- `GET /api/state` devolve o mesmo conteúdo em JSON: `{agents: [...], messages: [...], generated: "..."}`.
+- `Ctrl+C` encerra.
+
 ## Comandos
 | Comando | O que faz |
 |---|---|
@@ -99,6 +136,9 @@ Status mais velho que `--stale-minutes` (padrão 30) aparece como `unknown (stal
 | `status --agent X --set ESTADO [--note N] [--project P]` | publica o estado de X (working/idle/blocked/done/unknown) |
 | `status [--agent X] [--stale-minutes M]` | quadro de estado de todos os agentes (ou só de X) |
 | `wait --agent X --until ESTADO [--timeout S]` | bloqueia até o estado de X virar ESTADO |
+| `--no-auto-status` | em `send`/`inbox`/`wait`/`ack`: não mexe no status de quem roda o comando |
+| `log [--limit N] [--project P] [--agent X]` | feed das mensagens recentes de todos os agentes (mais nova por último) |
+| `panel [--port 8765] [--host 127.0.0.1]` | painel web local, somente leitura |
 
 ## Envelope da mensagem (JSON)
 `data` (ISO 8601 UTC) · `task_id` · `msg_id` · `from` · `to` · `project` · `in_reply_to` · `kind` (task | report | question | correction | ack) · `state` (AGUARDANDO_ACEITE | ACEITO | EM_EXECUCAO | BLOQUEADO | AGUARDANDO_APROVACAO | EM_REVISAO | CONCLUIDO | CANCELADO) · `result` · `evidence` · `pending` · `next_action` · `body`
@@ -116,6 +156,7 @@ Você é o agente "claude" no canal A2A local Dove (comando a2a, caixa global ~/
 - Responder:         a2a send --from claude --to hermes --project <proj> --reply-to <msg_id> --kind report --state CONCLUIDO --body "..." --evidence "..."
 - Confirmar:         a2a ack <msg_id> --from claude
 - Publicar estado:   a2a status --agent claude --set working --note "..." ao começar; --set done ao terminar; --set blocked se travar
+- O status e atualizado sozinho ao enviar/ler; use status --set para notas ou bloqueios
 Regras: não responda ack/próprias msgs (anti-loop); sempre --reply-to; nunca ação irreversível sem o humano.
 ```
 (Troque `claude` por `hermes` no card do outro agente.)
@@ -126,8 +167,7 @@ python tests/test_a2a.py
 ```
 
 ## Próximos passos (ideias)
-- Painel web local para ver as mensagens e quem está ativo.
-- Canal entre máquinas (VPS como ponte) — Windows, Omarchy/Linux, VPS.
+- Canal entre máquinas (VPS como ponte) — Windows, Omarchy/Linux, VPS (Ubuntu 24.04 LTS).
 
 ## Licença
 MIT — veja [LICENSE](LICENSE).
