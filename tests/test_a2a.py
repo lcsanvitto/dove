@@ -137,6 +137,14 @@ def main():
         assert sorted(os.listdir(os.path.join(h, ".a2a", "agents"))) == ["claude", "codex", "hermes"]
         print("OK: install.sh (symlink, shebang, agentes, idempotente)")
 
+    # install.ps1: checagem estatica (shims .cmd e Git Bash, ASCII puro)
+    raw = (ROOT / "install.ps1").read_bytes()
+    assert all(b < 128 for b in raw), "install.ps1 tem bytes nao-ASCII"
+    txt = raw.decode("ascii")
+    for needle in ("a2a.cmd", "#!/bin/sh", "UTF8Encoding($false)"):
+        assert needle in txt, needle
+    print("OK: install.ps1 (estatico: a2a.cmd, shim Git Bash, ASCII)")
+
     # install.ps1: checagem de sintaxe se houver pwsh
     import shutil
     if shutil.which("pwsh"):

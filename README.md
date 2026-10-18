@@ -25,6 +25,7 @@ Requisito: Python 3.8+ e git. O instalador aponta o comando `a2a` para o `a2a.py
 git clone https://github.com/lcsanvitto/dove; cd dove; powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 Cria `%USERPROFILE%\bin\a2a.cmd`, põe `%USERPROFILE%\bin` no PATH do usuário e roda `init`/`join`. Outros agentes: `-Agents claude,hermes`. Depois feche e abra um PowerShell novo e rode `a2a status`. Sem Python: `winget install Python.Python.3.13`.
+Cria dois atalhos: `a2a.cmd` (PowerShell/cmd, ex.: Codex) e `a2a` sem extensão (Git Bash, usado pelo Claude Code e pelo Hermes no Windows). Se um agente no Git Bash não achar o `a2a`, rode no Git Bash: `echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc`.
 
 **Linux / Omarchy / VPS (Ubuntu) / macOS:**
 ```

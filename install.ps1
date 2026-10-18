@@ -30,6 +30,14 @@ $cmdFile = Join-Path $bin "a2a.cmd"
 Set-Content -Path $cmdFile -Value "@$py `"$script`" %*" -Encoding Ascii
 Write-Host "atalho: $cmdFile"
 
+# $HOME\bin\a2a (sem extensao): shim POSIX para o Git Bash (Claude Code e Hermes no Windows),
+# que nao resolve a2a -> a2a.cmd. LF, sem BOM.
+$shFile = Join-Path $bin "a2a"
+$posixScript = $script -replace "\\", "/"
+$shContent = "#!/bin/sh`nexec $py `"$posixScript`" `"`$@`"`n"
+[System.IO.File]::WriteAllText($shFile, $shContent, (New-Object System.Text.UTF8Encoding($false)))
+Write-Host "atalho: $shFile (Git Bash)"
+
 # PATH do usuario (sem duplicar) e da sessao atual
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 $parts = @(); if ($userPath) { $parts = @($userPath -split ";" | Where-Object { $_ }) }
@@ -48,8 +56,10 @@ foreach ($ag in $Agents) { & $py $script join --agent $ag }
 Write-Host ""
 Write-Host "Dove instalado." -ForegroundColor Green
 Write-Host "  repo:    $repo"
-Write-Host "  atalho:  $cmdFile"
+Write-Host "  atalho:  $cmdFile (PowerShell/cmd)"
+Write-Host "  atalho:  $shFile (Git Bash - Claude Code e Hermes no Windows)"
 Write-Host "  agentes: $($Agents -join ', ')"
 Write-Host "  atualizar: git -C `"$repo`" pull"
 Write-Host ""
 Write-Host "Feche e abra um PowerShell novo e rode: a2a status"
+Write-Host 'Se um agente no Git Bash nao achar o a2a, rode no Git Bash: echo ''export PATH="$HOME/bin:$PATH"'' >> ~/.bashrc'
