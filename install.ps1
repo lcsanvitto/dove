@@ -1,0 +1,55 @@
+# Instalador do Dove (Windows). Idempotente - pode rodar de novo sem problema.
+# Uso: powershell -ExecutionPolicy Bypass -File install.ps1 [-Agents claude,codex,hermes]
+param([string[]]$Agents = @("claude", "codex", "hermes"))
+$ErrorActionPreference = "Stop"
+
+$repo = Split-Path -Parent $MyInvocation.MyCommand.Path
+$script = Join-Path $repo "a2a.py"
+if (-not (Test-Path $script)) { Write-Error "a2a.py nao encontrado em $repo"; exit 1 }
+
+# Python: prefere o launcher py; rejeita o atalho da Microsoft Store
+function Test-Python($cmd) {
+    if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) { return $false }
+    try { $out = (& $cmd --version 2>&1 | Out-String) } catch { return $false }
+    if ($LASTEXITCODE -ne 0 -or $out -match "Microsoft Store" -or $out -notmatch "Python 3") { return $false }
+    return $true
+}
+$py = $null
+foreach ($c in @("py", "python")) { if (Test-Python $c) { $py = $c; break } }
+if (-not $py) {
+    Write-Host "ERRO: Python 3 nao encontrado (nem 'py' nem 'python')." -ForegroundColor Red
+    Write-Host "Instale com: winget install Python.Python.3.13   e abra um PowerShell novo."
+    exit 1
+}
+Write-Host "Python: $py ($((& $py --version 2>&1 | Out-String).Trim()))"
+
+# $HOME\bin\a2a.cmd chama o a2a.py do repo (git pull atualiza a ferramenta)
+$bin = Join-Path $HOME "bin"
+if (-not (Test-Path $bin)) { New-Item -ItemType Directory -Path $bin | Out-Null }
+$cmdFile = Join-Path $bin "a2a.cmd"
+Set-Content -Path $cmdFile -Value "@$py `"$script`" %*" -Encoding Ascii
+Write-Host "atalho: $cmdFile"
+
+# PATH do usuario (sem duplicar) e da sessao atual
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$parts = @(); if ($userPath) { $parts = @($userPath -split ";" | Where-Object { $_ }) }
+if (-not ($parts | Where-Object { $_.TrimEnd("\") -ieq $bin.TrimEnd("\") })) {
+    [Environment]::SetEnvironmentVariable("Path", ((@($parts) + $bin) -join ";"), "User")
+    Write-Host "PATH do usuario: adicionado $bin"
+} else { Write-Host "PATH do usuario: $bin ja estava" }
+if (-not (($env:Path -split ";") | Where-Object { $_.TrimEnd("\") -ieq $bin.TrimEnd("\") })) {
+    $env:Path = "$env:Path;$bin"
+}
+
+# Canal e agentes
+& $py $script init
+foreach ($ag in $Agents) { & $py $script join --agent $ag }
+
+Write-Host ""
+Write-Host "Dove instalado." -ForegroundColor Green
+Write-Host "  repo:    $repo"
+Write-Host "  atalho:  $cmdFile"
+Write-Host "  agentes: $($Agents -join ', ')"
+Write-Host "  atualizar: git -C `"$repo`" pull"
+Write-Host ""
+Write-Host "Feche e abra um PowerShell novo e rode: a2a status"

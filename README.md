@@ -12,34 +12,46 @@ Não fica dentro de um projeto. Fica na sua pasta de usuário, acima de todos os
   bus/             ← as mensagens (1 arquivo JSON cada)
   cursor/          ← o que cada agente já leu
   agents/          ← agentes registrados
+  status/          ← estado de cada agente (modo herdr)
 ```
 
 Qualquer agente, em qualquer projeto (`lagu`, `qLink`, …), chama o mesmo `a2a`. O campo `project` marca de qual projeto a mensagem fala. No Windows, `~/.a2a` vira `C:\Users\<você>\.a2a`.
 
-## Instalação
-Requisito: Python 3.8+.
+## Instalação rápida
+Requisito: Python 3.8+ e git. O instalador aponta o comando `a2a` para o `a2a.py` do repo clonado — um `git pull` atualiza a ferramenta. Pode rodar de novo sem problema (idempotente). Por padrão registra os agentes `claude`, `codex` e `hermes`.
 
-1. Baixe o `a2a.py` (ou clone este repo).
-2. Deixe-o acessível:
-   - **macOS/Linux:** copie para uma pasta do PATH, ex. `~/.local/bin/a2a`, e `chmod +x`.
-   - **Windows:** mantenha `a2a.py` e chame `python a2a.py ...`, ou crie um atalho `a2a.cmd` (veja abaixo).
-3. Inicialize:
-   ```
-   a2a init     # ou: python a2a.py init
-   ```
-
-### Atalho no Windows (opcional)
-Crie `a2a.cmd` numa pasta do PATH:
-```bat
-@echo off
-python "C:\caminho\para\dove\a2a.py" %*
+**Windows (PowerShell):**
 ```
+git clone https://github.com/lcsanvitto/dove; cd dove; powershell -ExecutionPolicy Bypass -File install.ps1
+```
+Cria `%USERPROFILE%\bin\a2a.cmd`, põe `%USERPROFILE%\bin` no PATH do usuário e roda `init`/`join`. Outros agentes: `-Agents claude,hermes`. Depois feche e abra um PowerShell novo e rode `a2a status`. Sem Python: `winget install Python.Python.3.13`.
+
+**Linux / Omarchy / VPS (Ubuntu) / macOS:**
+```
+git clone https://github.com/lcsanvitto/dove && cd dove && ./install.sh
+```
+Cria o link `~/.local/bin/a2a -> <repo>/a2a.py`, roda `init`/`join` e avisa se `~/.local/bin` não estiver no PATH. Outros agentes: `./install.sh claude hermes`.
+
+### Instalação manual
+- **macOS/Linux:** `chmod +x a2a.py` e crie um link numa pasta do PATH (ex.: `ln -s "$PWD/a2a.py" ~/.local/bin/a2a`).
+- **Windows:** crie `a2a.cmd` numa pasta do PATH com `@py "C:\caminho\para\dove\a2a.py" %*` (ou `python` no lugar de `py`).
+- Depois: `a2a init` e `a2a join --agent <nome>`.
 
 ## Como convidar um agente
 1. Escolha um nome único (ex.: `claude`, `hermes`).
 2. Registre: `a2a join --agent claude`
-3. Cole o **card de onboarding** (abaixo) na sessão do agente.
+3. Cole as instruções na sessão do agente: `a2a onboard --agent claude --project <proj>` (ou use o card abaixo).
 4. Teste: `a2a send --from claude --to hermes --kind report --state ACEITO --body "online"`
+
+## Usando num projeto (AGENTS.md)
+As instruções para os agentes têm uma fonte única: o próprio `a2a`.
+
+1. Gere a seção e cole no `AGENTS.md` do projeto (lido pelo Codex e outros agentes):
+   ```
+   a2a onboard --agents-md --project <nome>
+   ```
+2. No `CLAUDE.md` do projeto, adicione a linha `@AGENTS.md` para o Claude Code carregar o mesmo texto.
+3. Para colar direto numa sessão: `a2a onboard --agent codex --project <nome>` (já com o nome do agente preenchido).
 
 ## Uso no dia a dia
 ```
@@ -139,6 +151,8 @@ Abre uma página que se atualiza a cada 3s com o **quadro de agentes** (estado c
 | `--no-auto-status` | em `send`/`inbox`/`wait`/`ack`: não mexe no status de quem roda o comando |
 | `log [--limit N] [--project P] [--agent X]` | feed das mensagens recentes de todos os agentes (mais nova por último) |
 | `panel [--port 8765] [--host 127.0.0.1]` | painel web local, somente leitura |
+| `onboard --agent X [--project P]` | imprime as instruções do canal para o agente X |
+| `onboard --agents-md [--project P]` | imprime a seção genérica para o `AGENTS.md` |
 
 ## Envelope da mensagem (JSON)
 `data` (ISO 8601 UTC) · `task_id` · `msg_id` · `from` · `to` · `project` · `in_reply_to` · `kind` (task | report | question | correction | ack) · `state` (AGUARDANDO_ACEITE | ACEITO | EM_EXECUCAO | BLOQUEADO | AGUARDANDO_APROVACAO | EM_REVISAO | CONCLUIDO | CANCELADO) · `result` · `evidence` · `pending` · `next_action` · `body`

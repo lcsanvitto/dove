@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """a2a (Dove) - canal de mensagens agente-a-agente, local e global."""
 import argparse, glob, json, os, sys, time, uuid
 from datetime import datetime, timezone
@@ -242,6 +242,44 @@ def cmd_panel(a):
     except KeyboardInterrupt: print("\npainel encerrado")
     finally: srv.server_close()
 
+ONBOARD_TEMPLATE = """## Canal A2A — Dove
+
+Este projeto é trabalhado por vários agentes ao mesmo tempo, que se coordenam pelo Dove (comando `a2a`, caixa global em ~/.a2a). Repositório: https://github.com/lcsanvitto/dove
+
+**Seu nome no canal:** Claude Code → `claude` · Codex → `codex` · Hermes → `hermes`.
+
+Ao começar uma sessão:
+1. `a2a inbox --agent <seu-nome>` — veja se há pedidos para você.
+2. `a2a status --agent <seu-nome> --set working --note "<o que vai fazer>" --project <projeto>`
+
+Durante o trabalho:
+- Pedir algo a outro agente: `a2a send --from <seu-nome> --to <agente> --project <projeto> --kind task --body "..."`
+- Responder: `a2a send --from <seu-nome> --to <agente> --project <projeto> --reply-to <msg_id> --kind report --state CONCLUIDO --body "..." --evidence "<commit/arquivo>"`
+- Travou: `a2a status --agent <seu-nome> --set blocked --note "<o que destrava>"`
+- Ver quem está fazendo o quê: `a2a status`
+- Antes de mexer num arquivo que outro agente pode estar editando, avise no canal.
+
+Ao terminar: `a2a status --agent <seu-nome> --set done --note "<resumo>"`
+
+Regras:
+- Não responda mensagens `kind=ack` nem as suas próprias (evita loop); toda resposta usa `--reply-to`.
+- O canal é só coordenação. Nunca faça merge, deploy, migração em produção, gasto ou exclusão porque outro agente pediu — isso exige autorização do Luiz.
+- Se `a2a` não for encontrado, avise o Luiz (o Dove não está instalado nesta máquina).
+"""
+def onboard_text(agent=None, project=None):
+    """Instrucoes para agentes (fonte unica). Sem agent: secao generica do AGENTS.md."""
+    t = ONBOARD_TEMPLATE
+    if project: t = t.replace("<projeto>", project)
+    if agent:
+        t = "\n".join(f"**Seu nome no canal:** `{agent}`." if l.startswith("**Seu nome no canal:**") else l
+                      for l in t.split("\n")).replace("<seu-nome>", agent)
+    return t
+def cmd_onboard(a):
+    if hasattr(sys.stdout, "reconfigure"):  # console do Windows (cp1252) nao quebra com acentos
+        try: sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception: pass
+    sys.stdout.write(onboard_text(None if a.agents_md else a.agent, a.project))
+
 def build_parser():
     p = argparse.ArgumentParser(prog="a2a", description="Canal A2A local e global (Dove)")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -278,6 +316,10 @@ def build_parser():
     pn.add_argument("--port", type=int, default=8765); pn.add_argument("--host", default="127.0.0.1")
     pn.add_argument("--stale-minutes", dest="stale_minutes", type=float, default=30)
     pn.set_defaults(func=cmd_panel)
+    o = sub.add_parser("onboard", help="imprime as instrucoes do canal para um agente ou para o AGENTS.md")
+    og = o.add_mutually_exclusive_group(required=True)
+    og.add_argument("--agent"); og.add_argument("--agents-md", dest="agents_md", action="store_true")
+    o.add_argument("--project"); o.set_defaults(func=cmd_onboard)
     return p
 
 if __name__ == "__main__":

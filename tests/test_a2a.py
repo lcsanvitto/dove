@@ -105,5 +105,48 @@ def main():
         p.terminate(); p.wait(timeout=5)
     print("OK: painel web (/api/state e /)")
 
+    # sem BOM: shebang na linha 1
+    raw = A2A.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf") and raw.startswith(b"#!/usr/bin/env python3\n"), raw[:30]
+    assert b"\r\n" not in raw
+    print("OK: a2a.py sem BOM, shebang na linha 1, LF")
+
+    # onboard
+    uenv = dict(env, PYTHONIOENCODING="utf-8")
+    ob = subprocess.run([sys.executable, str(A2A), "onboard", "--agent", "codex", "--project", "lagu"],
+                        capture_output=True, env=uenv)
+    t = ob.stdout.decode("utf-8")
+    assert ob.returncode == 0 and "`codex`" in t and "lagu" in t, t
+    assert "<seu-nome>" not in t and "<projeto>" not in t and "Claude Code →" not in t, t
+    ob = subprocess.run([sys.executable, str(A2A), "onboard", "--agents-md"], capture_output=True, env=uenv)
+    t = ob.stdout.decode("utf-8")
+    assert ob.returncode == 0 and "Claude Code → `claude`" in t and "<seu-nome>" in t and "<projeto>" in t, t
+    assert run(env, "onboard").returncode != 0
+    print("OK: a2a onboard (--agent e --agents-md)")
+
+    # install.sh num HOME temporario
+    if os.name != "nt":
+        h = tempfile.mkdtemp(); ienv = dict(os.environ, HOME=h, A2A_HOME=os.path.join(h, ".a2a"))
+        for _ in range(2):  # idempotente
+            r = subprocess.run(["bash", str(ROOT / "install.sh")], capture_output=True, text=True, env=ienv)
+            assert r.returncode == 0, r.stdout + r.stderr
+        link = os.path.join(h, ".local", "bin", "a2a")
+        assert os.path.islink(link) and os.path.realpath(link) == str(A2A.resolve()), link
+        r = subprocess.run([link, "--help"], capture_output=True, text=True, env=ienv)
+        assert r.returncode == 0 and "onboard" in r.stdout, r.stdout + r.stderr
+        assert sorted(os.listdir(os.path.join(h, ".a2a", "agents"))) == ["claude", "codex", "hermes"]
+        print("OK: install.sh (symlink, shebang, agentes, idempotente)")
+
+    # install.ps1: checagem de sintaxe se houver pwsh
+    import shutil
+    if shutil.which("pwsh"):
+        ps = ("$e=$null; [System.Management.Automation.Language.Parser]::ParseFile("
+              f"'{ROOT / 'install.ps1'}',[ref]$null,[ref]$e) | Out-Null; if($e){{$e; exit 1}}")
+        r = subprocess.run(["pwsh", "-NoProfile", "-Command", ps], capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout + r.stderr
+        print("OK: install.ps1 (sintaxe)")
+    else:
+        print("PULADO: install.ps1 (pwsh nao disponivel)")
+
 if __name__ == "__main__":
     main()
