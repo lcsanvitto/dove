@@ -64,6 +64,27 @@ a2a agents
 ```
 Você (humano) espia quando quiser: `a2a inbox --agent <qualquer>` ou abra os arquivos em `~/.a2a/bus/`.
 
+## Modo herdr (estado dos agentes)
+Cada agente publica o próprio estado — `working`, `idle`, `blocked`, `done` ou `unknown` — em `~/.a2a/status/<agente>.json`. Assim você (ou outro agente) vê num quadro quem está trabalhando, quem travou e quem terminou.
+
+```
+# publicar o estado (com nota e projeto opcionais)
+a2a status --agent claude --set working --project lagu --note "revisando modulo X"
+a2a status --agent hermes --set blocked --note "aguardando acesso ao banco"
+
+# quadro: todos os agentes (registrados ou com status)
+a2a status
+# claude       working    3m  lagu       revisando modulo X
+# hermes       blocked   12m  -          aguardando acesso ao banco
+
+# estado de um agente só
+a2a status --agent claude
+
+# esperar um agente terminar (sai 0 quando o estado vira done; 2 em timeout)
+a2a wait --agent claude --until done --timeout 600
+```
+Status mais velho que `--stale-minutes` (padrão 30) aparece como `unknown (stale, era <estado>)` — o agente pode ter morrido sem avisar. O `wait --until` olha o estado gravado, sem considerar staleness.
+
 ## Comandos
 | Comando | O que faz |
 |---|---|
@@ -75,6 +96,9 @@ Você (humano) espia quando quiser: `a2a inbox --agent <qualquer>` ou abra os ar
 | `read <id> --agent X` | mostra a mensagem e marca como lida |
 | `wait --agent X [--timeout S]` | bloqueia até chegar mensagem nova para X |
 | `ack <id> --from X` | responde um `ack` e marca como lida |
+| `status --agent X --set ESTADO [--note N] [--project P]` | publica o estado de X (working/idle/blocked/done/unknown) |
+| `status [--agent X] [--stale-minutes M]` | quadro de estado de todos os agentes (ou só de X) |
+| `wait --agent X --until ESTADO [--timeout S]` | bloqueia até o estado de X virar ESTADO |
 
 ## Envelope da mensagem (JSON)
 `data` (ISO 8601 UTC) · `task_id` · `msg_id` · `from` · `to` · `project` · `in_reply_to` · `kind` (task | report | question | correction | ack) · `state` (AGUARDANDO_ACEITE | ACEITO | EM_EXECUCAO | BLOQUEADO | AGUARDANDO_APROVACAO | EM_REVISAO | CONCLUIDO | CANCELADO) · `result` · `evidence` · `pending` · `next_action` · `body`
@@ -91,6 +115,7 @@ Você é o agente "claude" no canal A2A local Dove (comando a2a, caixa global ~/
 - Ler mensagem:      a2a read <msg_id> --agent claude
 - Responder:         a2a send --from claude --to hermes --project <proj> --reply-to <msg_id> --kind report --state CONCLUIDO --body "..." --evidence "..."
 - Confirmar:         a2a ack <msg_id> --from claude
+- Publicar estado:   a2a status --agent claude --set working --note "..." ao começar; --set done ao terminar; --set blocked se travar
 Regras: não responda ack/próprias msgs (anti-loop); sempre --reply-to; nunca ação irreversível sem o humano.
 ```
 (Troque `claude` por `hermes` no card do outro agente.)
@@ -102,7 +127,7 @@ python tests/test_a2a.py
 
 ## Próximos passos (ideias)
 - Painel web local para ver as mensagens e quem está ativo.
-- Modo `herdr` para orquestração com estado (working/blocked/done).
+- Canal entre máquinas (VPS como ponte) — Windows, Omarchy/Linux, VPS.
 
 ## Licença
 MIT — veja [LICENSE](LICENSE).

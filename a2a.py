@@ -4,14 +4,15 @@ import argparse, glob, json, os, sys, time, uuid
 from datetime import datetime, timezone
 
 HOME = os.environ.get("A2A_HOME", os.path.expanduser("~/.a2a"))
-BUS, CURSOR, AGENTS = (os.path.join(HOME, d) for d in ("bus", "cursor", "agents"))
+BUS, CURSOR, AGENTS, STATUS = (os.path.join(HOME, d) for d in ("bus", "cursor", "agents", "status"))
 STATES = ["AGUARDANDO_ACEITE","ACEITO","EM_EXECUCAO","BLOQUEADO",
           "AGUARDANDO_APROVACAO","EM_REVISAO","CONCLUIDO","CANCELADO"]
 KINDS = ["task","report","question","correction","ack"]
+AGENT_STATES = ["working","idle","blocked","done","unknown"]  # vocabulario herdr
 
 def now_iso(): return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 def ensure_dirs():
-    for d in (BUS, CURSOR, AGENTS): os.makedirs(d, exist_ok=True)
+    for d in (BUS, CURSOR, AGENTS, STATUS): os.makedirs(d, exist_ok=True)
 def seen_path(a): return os.path.join(CURSOR, a + ".json")
 def load_seen(a):
     p = seen_path(a)
@@ -66,6 +67,13 @@ def cmd_read(a):
     print("nao encontrada", file=sys.stderr); sys.exit(1)
 def cmd_wait(a):
     ensure_dirs(); deadline = time.time() + a.timeout if a.timeout else None
+    if a.until:
+        while True:
+            st = load_status(a.agent)
+            if st and st.get("state") == a.until:
+                print(json.dumps(st, ensure_ascii=False, indent=2)); return
+            if deadline and time.time() > deadline: print("(timeout)"); sys.exit(2)
+            time.sleep(a.interval)
     while True:
         seen = load_seen(a.agent)
         for m in all_messages():
@@ -83,6 +91,39 @@ def cmd_ack(a):
         project=orig.get("project"), reply_to=a.msg_id, kind="ack", state=None,
         result=None, evidence=None, pending=None, next_action=None,
         body=a.body or "recebido"))
+
+def status_path(a): return os.path.join(STATUS, a + ".json")
+def load_status(a):
+    p = status_path(a)
+    try: return json.load(open(p)) if os.path.exists(p) else None
+    except Exception: return None
+def fmt_age(ts):
+    if not ts: return "-"
+    s = max(0, time.time() - ts)
+    if s < 60: return f"{int(s)}s"
+    if s < 3600: return f"{int(s // 60)}m"
+    if s < 86400: return f"{int(s // 3600)}h"
+    return f"{int(s // 86400)}d"
+def status_line(name, st, stale_min):
+    if not st: return f"{name:<12} {'unknown':<8} {'-':>4}"
+    state, ts = st.get("state", "unknown"), st.get("ts") or 0
+    note = st.get("note", "")
+    if not ts or time.time() - ts > stale_min * 60:
+        note = (note + " " if note else "") + f"(stale, era {state})"; state = "unknown"
+    proj = st.get("project") or "-"
+    return f"{name:<12} {state:<8} {fmt_age(ts):>4}  {proj:<10} {note}".rstrip()
+def cmd_status(a):
+    ensure_dirs()
+    if a.set:
+        if not a.agent: print("--set exige --agent", file=sys.stderr); sys.exit(1)
+        st = {"agent": a.agent, "state": a.set, "note": a.note or "",
+              "project": a.project or "", "updated": now_iso(), "ts": time.time()}
+        json.dump(st, open(status_path(a.agent), "w"), ensure_ascii=False, indent=2)
+        print(f"status de '{a.agent}': {a.set}" + (f" ({a.note})" if a.note else "")); return
+    if a.agent: print(status_line(a.agent, load_status(a.agent), a.stale_minutes)); return
+    names = set(os.listdir(AGENTS)) | {f[:-5] for f in os.listdir(STATUS) if f.endswith(".json")}
+    if not names: print("(nenhum agente)"); return
+    for n in sorted(names): print(status_line(n, load_status(n), a.stale_minutes))
 
 def build_parser():
     p = argparse.ArgumentParser(prog="a2a", description="Canal A2A local e global (Dove)")
@@ -102,7 +143,13 @@ def build_parser():
     r = sub.add_parser("read"); r.add_argument("msg_id"); r.add_argument("--agent"); r.set_defaults(func=cmd_read)
     w = sub.add_parser("wait"); w.add_argument("--agent", required=True); w.add_argument("--project")
     w.add_argument("--timeout", type=float, default=0); w.add_argument("--interval", type=float, default=2.0)
+    w.add_argument("--until", choices=AGENT_STATES, help="espera o status do agente virar este estado")
     w.set_defaults(func=cmd_wait)
+    t = sub.add_parser("status")  # modo herdr
+    t.add_argument("--agent"); t.add_argument("--set", choices=AGENT_STATES)
+    t.add_argument("--note"); t.add_argument("--project")
+    t.add_argument("--stale-minutes", dest="stale_minutes", type=float, default=30)
+    t.set_defaults(func=cmd_status)
     k = sub.add_parser("ack"); k.add_argument("msg_id"); k.add_argument("--from", dest="_from", required=True)
     k.add_argument("--body"); k.set_defaults(func=cmd_ack)
     return p
