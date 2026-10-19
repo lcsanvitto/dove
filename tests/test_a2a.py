@@ -1555,8 +1555,9 @@ def files_fase():
 PROMPT_INPROC = r"""
 import os, subprocess, sys, time
 mode, root = sys.argv[1], sys.argv[2]
-if mode.startswith("clock+"):
-    real = time.time; d = float(mode[6:]); time.time = lambda: real() + d
+# relogio congelado (PROMPT_T0): as idades da cauda (0s/1s) nao mudam entre duas chamadas que cruzam um segundo
+t0 = float(os.environ["PROMPT_T0"]); d = float(mode[6:]) if mode.startswith("clock+") else 0.0
+time.time = lambda: t0 + d
 def boom(*a, **k): raise AssertionError("a2a prompt tentou executar um processo")
 subprocess.Popen = subprocess.run = subprocess.call = subprocess.check_output = os.system = boom
 for f in ("execv", "execvp", "execve", "spawnv", "spawnvp", "posix_spawn", "startfile"):
@@ -1570,7 +1571,9 @@ def prompt_fase():
     """a2a prompt (item 3): camadas na ordem, prefixo sem data/estado e com o mesmo hash apesar de bus/status/relogio,
     hash muda com o nucleo/papel/agente/--for, cauda cortada, so leitura (cursor/status/bus intactos), nunca executa nada."""
     import hashlib
-    tmp = tempfile.mkdtemp(); env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8")
+    tmp = tempfile.mkdtemp()
+    # relogio dos inproc: 10 min adiante e fixo (toda mensagem do teste fica no passado; idades iguais em toda chamada)
+    env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8", PROMPT_T0=str(time.time() + 600))
     for ag in ("claude", "codex", "hermes"): run(env, "join", "--agent", ag)
     def inproc(mode, *args):
         r = subprocess.run([sys.executable, "-c", PROMPT_INPROC, mode, str(ROOT), *args], capture_output=True, env=env)
@@ -1645,8 +1648,8 @@ def prompt_fase():
     assert p2 == run(env, *args).stdout.split(boundary)[0]
     # --max-tail-chars: corta o brief primeiro (cabecalho fica), depois a tarefa; 0 = sem corte
     for i in range(30): send("--from", "claude", "--to", "codex", "--project", "lagu", "--body", f"mensagem {i} " + "x" * 80)
-    full = run(env, *args, "--max-tail-chars", "0").stdout.split(boundary + "\n")[1]
-    assert len(full) > 1500 and "novas (a2a brief --limit 0 para todas)" in full and full == run(env, *args).stdout.split(boundary + "\n")[1], len(full)
+    full = inproc("plain", *args, "--max-tail-chars", "0").split(boundary + "\n")[1]
+    assert len(full) > 1500 and "novas (a2a brief --limit 0 para todas)" in full and full == inproc("plain", *args).split(boundary + "\n")[1], len(full)
     t4 = run(env, *args, "--max-tail-chars", "1500").stdout.split(boundary + "\n")[1]
     assert len(t4) <= 1500 and t4.startswith("@codex ") and "linhas do brief cortadas (a2a brief --agent codex --project lagu)" in t4, t4
     assert t4.endswith("segunda linha com detalhe\n"), t4
