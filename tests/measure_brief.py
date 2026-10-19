@@ -9,7 +9,7 @@ Cenario (o da proposta docs/propostas/2026-10-18-interface-agentes.md, secao "Me
 Textos fixos (corpos de 120 a 300 caracteres), ids fixos e idades fixas (horas) -> mesmo resultado a cada execucao.
 
 Antes:  inbox --agent codex + read <id> --agent codex para cada nao lida listada + mission list
-Depois: brief --agent codex --mark-read     (e a variante "depois + 1 read")
+Depois: brief --agent codex --mark-read     (e as variantes "depois + 1 read" e "depois + 1 read --compact")
 Cada sequencia roda numa copia nova do mesmo A2A_HOME. Unidade: stdout de cada comando;
 chars = len(texto), bytes = len(texto.encode("utf-8")), tokens_est = ceil(chars / 4).
 
@@ -157,12 +157,15 @@ def main():
     h = fresh("depois"); depois = [("brief --agent codex --mark-read", a2a(h, "brief", "--agent", AGENT, "--mark-read"))]
     first_n = next(l.split()[1] for l in depois[0][1].splitlines() if l.startswith("N "))
     depois_read = depois + [(f"read {first_n} --agent codex", a2a(h, "read", first_n, "--agent", AGENT))]
-    ra, rd, rr = measure(antes), measure(depois), measure(depois_read)
+    h = fresh("compact"); a2a(h, "brief", "--agent", AGENT, "--mark-read")
+    depois_compact = depois + [(f"read {first_n} --agent codex --compact", a2a(h, "read", first_n, "--agent", AGENT, "--compact"))]
+    ra, rd, rr, rc = measure(antes), measure(depois), measure(depois_read), measure(depois_compact)
     red = lambda x: f"{100 * (1 - x / ra['tokens']):.1f}%" if ra["tokens"] else "-"
     print(f"Cenario: 40 mensagens, 14 visiveis para {AGENT} (9 lidas, 5 nao lidas incl. 1 ack), 1 tarefa aberta lida, 3 missoes")
     print("tokens_est = ceil(chars / 4); medido no stdout de cada comando\n")
     print(f"{'sequencia':<26} {'cmds':>4} {'chars':>7} {'bytes':>7} {'tokens_est':>10} {'reducao':>8}")
-    for name, r in (("antes (inbox+5 read+list)", ra), ("depois (brief)", rd), ("depois + 1 read", rr)):
+    for name, r in (("antes (inbox+5 read+list)", ra), ("depois (brief)", rd), ("depois + 1 read", rr),
+                    ("depois + 1 read --compact", rc)):
         print(f"{name:<26} {r['cmds']:>4} {r['chars']:>7} {r['bytes']:>7} {r['tokens']:>10} {red(r['tokens']) if r is not ra else '-':>8}")
     # equivalencia de informacao (checagens automaticas)
     b = depois[0][1]; a_all = "".join(o for _, o in antes)
@@ -171,7 +174,7 @@ def main():
     print(f"  tarefa aberta ja lida ({t_open}): antes {'aparece' if t_open in a_all else 'NAO aparece'}; brief {'aparece (T)' if t_open in b else 'nao aparece'}")
     print(f"  missoes: mission list mostra {antes[-1][1].count(chr(10))}; brief mostra {b.count(chr(10) + 'M ')} (so a que espera o aval de {AGENT})")
     if show:
-        for title, outs in (("ANTES", antes), ("DEPOIS (+1 read)", depois_read)):
+        for title, outs in (("ANTES", antes), ("DEPOIS (+1 read)", depois_read), ("DEPOIS (+1 read --compact)", depois_compact[1:])):
             print(f"\n===== {title} =====")
             for cmd, o in outs: print(f"$ a2a {cmd}\n{o}", end="" if o.endswith("\n") else "\n")
     shutil.rmtree(root, ignore_errors=True)

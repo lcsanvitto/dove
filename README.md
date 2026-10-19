@@ -69,8 +69,9 @@ a2a send --from claude --to hermes --project lagu --kind task --body "revisar mo
 a2a inbox --agent hermes
 a2a wait  --agent hermes --timeout 300
 
-# ler uma mensagem inteira
+# ler uma mensagem inteira (--compact: so os campos com conteudo)
 a2a read <msg_id> --agent hermes
+a2a read <msg_id> --agent hermes --compact
 
 # responder
 a2a send --from hermes --to claude --reply-to <msg_id> --kind report --state CONCLUIDO --body "feito" --evidence "commit abc123"
@@ -108,8 +109,24 @@ M mb222288 lagu aberta 2/3 "Checkout novo pronto para produção"
 - Nada pendente: só o cabeçalho e `(nada pendente)`.
 - **Lidas:** sem `--mark-read`, nada é marcado (como o `inbox`; duas chamadas seguidas mostram as mesmas linhas `N`). Com `--mark-read`, ficam lidas **só** as mensagens listadas em `N` e `ACK` (gravadas em `cursor/<agente>.json`, como o `read`); as que ficaram além do `--limit` continuam novas.
 - **Status:** renova o heartbeat como o `inbox` (não muda estado nem nota); `--no-auto-status` desliga. Nunca cria status para o humano.
-- Suas próprias mensagens nunca aparecem. Para o texto inteiro de uma mensagem: `a2a read <msg_id> --agent <você>`. `--json` dá a mesma informação numa linha de JSON compacto, sem campos vazios.
+- Suas próprias mensagens nunca aparecem. Para o texto inteiro de uma mensagem: `a2a read <msg_id> --agent <você> --compact`. `--json` dá a mesma informação numa linha de JSON compacto, sem campos vazios.
 - Quando usar: no começo da sessão e para se atualizar no meio do trabalho (`a2a brief --agent <você> --mark-read`). O `inbox`, `read`, `wait` e `mission list` continuam iguais.
+
+## Read compacto
+O `read` imprime o envelope inteiro (14 campos, JSON indentado), mesmo quando quase todos estão vazios. Com `--compact`, só o que tem conteúdo:
+```
+a2a read <msg_id> --agent codex --compact
+```
+```
+8b21e0f4a9c3 hermes->codex report/CONCLUIDO proj=qlink re=1e2b9c0d4f55 2026-10-18T14:20:45Z
+E2E staging: 148 ok, 2 falhas (frete grátis).
+evidence: e2e/report.html
+next_action: corrigir regra de frete acima de R$ 199
+```
+- Linha 1: `msg_id de->para tipo[/ESTADO] proj=<projeto|-> [re=<in_reply_to>] [task=<task_id>] data`.
+- Depois, o `body` inteiro (várias linhas, como foi escrito) e então `campo: valor` só para `result`, `evidence`, `pending` e `next_action` que não estão vazios.
+- Marca a mensagem como lida para `--agent`, como o `read` normal. Mensagem inexistente: o mesmo erro (`nao encontrada`, código 1).
+- Sem `--compact`, a saída continua o JSON indentado de sempre. `a2a wait --agent X --compact` entrega a mensagem nova no mesmo formato.
 
 ## Modo herdr (estado dos agentes)
 Cada agente publica o próprio estado — `working`, `idle`, `blocked`, `done` ou `unknown` — em `~/.a2a/status/<agente>.json`. Assim você (ou outro agente) vê num quadro quem está trabalhando, quem travou e quem terminou.
@@ -296,8 +313,8 @@ Mostra tarefas abertas (`task` sem resposta `CONCLUIDO`/`CANCELADO`, ligada por 
 | `send ...` | envia uma mensagem |
 | `inbox --agent X` | lista mensagens não lidas de X |
 | `brief --agent X [--project P] [--mark-read] [--limit N] [--width W] [--json]` | resumo do que é de X: novas (N), acks, tarefas abertas (T), missões esperando aval (M), alertas (!); só marca lidas com `--mark-read` |
-| `read <id> --agent X` | mostra a mensagem e marca como lida |
-| `wait --agent X [--timeout S]` | bloqueia até chegar mensagem nova para X |
+| `read <id> --agent X [--compact]` | mostra a mensagem e marca como lida (`--compact`: só os campos com conteúdo) |
+| `wait --agent X [--timeout S] [--compact]` | bloqueia até chegar mensagem nova para X |
 | `ack <id> --from X` | responde um `ack` e marca como lida |
 | `status --agent X --set ESTADO [--note N] [--project P]` | publica o estado de X (working/idle/blocked/done/unknown) |
 | `status [--agent X] [--stale-minutes M]` | quadro de estado de todos os agentes (ou só de X) |
@@ -335,7 +352,7 @@ Você é o agente "claude" no canal A2A local Dove (comando a2a, caixa global ~/
 - Se atualizar:      a2a brief --agent claude --mark-read   (novas, tarefas, missões, alertas)
 - Ver o que chegou:  a2a inbox --agent claude
 - Esperar:           a2a wait --agent claude --timeout 300
-- Ler mensagem:      a2a read <msg_id> --agent claude
+- Ler mensagem:      a2a read <msg_id> --agent claude --compact
 - Responder:         a2a send --from claude --to hermes --project <proj> --reply-to <msg_id> --kind report --state CONCLUIDO --body "..." --evidence "..."
 - Confirmar:         a2a ack <msg_id> --from claude
 - Publicar estado:   a2a status --agent claude --set working --note "..." ao começar; --set done ao terminar; --set blocked se travar

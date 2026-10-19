@@ -1110,6 +1110,53 @@ M mb222288 lagu aberta 2/3 "Checkout novo pronto para produção"
     assert "a2a brief --agent codex --mark-read" in t and "a2a inbox" not in t and "a2a whereami --agent codex" in t, t
     print("OK: brief vazio (duas linhas exatas, --json) e onboard com a2a brief")
 
+def compact_fase():
+    """read --compact (item 2): so campos com conteudo, body inteiro, sem a flag byte a byte igual, marca como lida."""
+    tmp = tempfile.mkdtemp(); env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8")
+    for ag in ("codex", "hermes"): run(env, "join", "--agent", ag)
+    bus = os.path.join(tmp, "bus")
+    def put(m):
+        fn = m["data"].replace(":", "").replace("-", "") + "-" + m["msg_id"] + ".json"
+        with open(os.path.join(bus, fn), "w", encoding="utf-8") as f: json.dump(m, f, ensure_ascii=False)
+    base = {"task_id": "", "from": "luiz", "to": "codex", "project": "lagu", "in_reply_to": "", "kind": "task",
+            "state": "", "result": "", "evidence": "", "pending": "", "next_action": ""}
+    put(dict(base, data="2026-10-18T14:02:11Z", msg_id="1e2b9c0d4f55",
+             body="Migrar o webhook de pagamentos para a assinatura nova (X-Signature).\nComeçar pelo handler e pelos testes."))
+    put(dict(base, data="2026-10-18T14:20:45Z", msg_id="8b21e0f4a9c3", **{"from": "hermes", "project": "qlink",
+             "in_reply_to": "1e2b9c0d4f55", "kind": "report", "state": "CONCLUIDO", "evidence": "e2e/report.html",
+             "next_action": "corrigir regra de frete acima de R$ 199", "task_id": "t42",
+             "body": "E2E staging: 148 ok, 2 falhas (frete grátis)."}))
+    put(dict(base, data="2026-10-18T14:30:00Z", msg_id="9c9c9c9c9c9c", project="", body=""))
+    seen = lambda: set(json.load(open(os.path.join(tmp, "cursor", "codex.json")))) if os.path.exists(os.path.join(tmp, "cursor", "codex.json")) else set()
+    r = run(env, "read", "1e2b9c0d4f55", "--agent", "codex", "--compact")
+    assert r.returncode == 0 and r.stdout == ("1e2b9c0d4f55 luiz->codex task proj=lagu 2026-10-18T14:02:11Z\n"
+        "Migrar o webhook de pagamentos para a assinatura nova (X-Signature).\nComeçar pelo handler e pelos testes.\n"), r.stdout
+    assert "1e2b9c0d4f55" in seen(), "--compact marca como lida"
+    r = run(env, "read", "8b21e0f4a9c3", "--agent", "codex", "--compact")
+    assert r.stdout == ("8b21e0f4a9c3 hermes->codex report/CONCLUIDO proj=qlink re=1e2b9c0d4f55 task=t42 2026-10-18T14:20:45Z\n"
+        "E2E staging: 148 ok, 2 falhas (frete grátis).\nevidence: e2e/report.html\n"
+        "next_action: corrigir regra de frete acima de R$ 199\n"), r.stdout
+    for k in ("result:", "pending:", "in_reply_to", "task_id"): assert k not in r.stdout, k
+    r = run(env, "read", "9c9c9c9c9c9c", "--compact")
+    assert r.stdout == "9c9c9c9c9c9c luiz->codex task proj=- 2026-10-18T14:30:00Z\n", r.stdout  # body vazio: so o cabecalho
+    # sem a flag: byte a byte o JSON indentado de antes; marca como lida igual
+    r = run(env, "read", "8b21e0f4a9c3", "--agent", "hermes")
+    src = json.load(open(next(os.path.join(bus, f) for f in os.listdir(bus) if "8b21e0f4a9c3" in f), encoding="utf-8"))
+    assert r.stdout == json.dumps(src, ensure_ascii=False, indent=2) + "\n", r.stdout
+    assert "8b21e0f4a9c3" in json.load(open(os.path.join(tmp, "cursor", "hermes.json")))
+    # inexistente: mesmo erro e codigo, com e sem a flag
+    for extra in ((), ("--compact",)):
+        r = run(env, "read", "naoexiste000", "--agent", "codex", *extra)
+        assert r.returncode == 1 and r.stderr == "nao encontrada\n" and r.stdout == "", (r.returncode, r.stderr)
+        assert "naoexiste000" not in seen()
+    # wait --compact usa o mesmo formato e marca como lida
+    r = run(env, "wait", "--agent", "codex", "--timeout", "2", "--interval", "0.1", "--compact", "--no-auto-status")
+    assert r.returncode == 0 and r.stdout == "9c9c9c9c9c9c luiz->codex task proj=- 2026-10-18T14:30:00Z\n", r.stdout
+    assert "9c9c9c9c9c9c" in seen()
+    t = run(env, "onboard", "--agents-md").stdout
+    assert "a2a read <msg_id> --agent <seu-nome> --compact" in t, t
+    print("OK: read --compact (so campos com conteudo, body multilinha, sem flag identico, marca lida, erro igual, wait --compact)")
+
 if __name__ == "__main__":
     main()
     fase1()
@@ -1117,3 +1164,4 @@ if __name__ == "__main__":
     fase2()
     git_fase()
     brief_fase()
+    compact_fase()

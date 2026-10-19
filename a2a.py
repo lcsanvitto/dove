@@ -177,13 +177,25 @@ def cmd_inbox(a):
     for m in msgs:
         print(f"[{m['data']}] {m['msg_id']} de {m['from']} "
               f"({m['kind']}/{m.get('state','')}) proj={m.get('project','')}: {m['body'][:80]}")
+def compact_lines(m):
+    """Mensagem so com o que tem conteudo: cabecalho numa linha, body inteiro, depois `campo: valor` nao vazios."""
+    ks = m.get("kind", "") + ("/" + m["state"] if m.get("state") else "")
+    head = f"{m.get('msg_id', '')} {m.get('from', '')}->{m.get('to', '')} {ks} proj={m.get('project') or '-'}"
+    if m.get("in_reply_to"): head += f" re={m['in_reply_to']}"
+    if m.get("task_id"): head += f" task={m['task_id']}"
+    out = [head + f" {m.get('data', '')}"]
+    if m.get("body"): out += str(m["body"]).splitlines() or [""]
+    out += [f"{k}: {m[k]}" for k in ("result", "evidence", "pending", "next_action") if m.get(k)]
+    return out
+def show_message(m, compact=False):
+    print("\n".join(compact_lines(m)) if compact else json.dumps(m, ensure_ascii=False, indent=2))
+def find_message(mid):
+    return next((m for m in all_messages() if m["msg_id"] == mid), None)
 def cmd_read(a):
-    for m in all_messages():
-        if m["msg_id"] == a.msg_id:
-            print(json.dumps(m, ensure_ascii=False, indent=2))
-            if a.agent: mark_seen(a.agent, a.msg_id)
-            return
-    print("nao encontrada", file=sys.stderr); sys.exit(1)
+    m = find_message(a.msg_id)
+    if not m: print("nao encontrada", file=sys.stderr); sys.exit(1)
+    show_message(m, getattr(a, "compact", False))
+    if a.agent: mark_seen(a.agent, a.msg_id)
 def cmd_wait(a):
     ensure_dirs(); auto(a, a.agent); deadline = time.time() + a.timeout if a.timeout else None
     if a.until:
@@ -197,7 +209,7 @@ def cmd_wait(a):
         seen = load_seen(a.agent)
         for m in all_messages():
             if visible_for(m, a.agent, a.project) and m["msg_id"] not in seen:
-                print(json.dumps(m, ensure_ascii=False, indent=2))
+                show_message(m, getattr(a, "compact", False))
                 mark_seen(a.agent, m["msg_id"]); return
         if deadline and time.time() > deadline: print("(timeout)"); sys.exit(2)
         time.sleep(a.interval)
@@ -1640,7 +1652,7 @@ Este projeto é trabalhado por vários agentes ao mesmo tempo, que se coordenam 
 **Seu nome no canal:** Claude Code → `claude` · Codex → `codex` · Hermes → `hermes`.
 
 Ao começar uma sessão:
-1. `a2a brief --agent <seu-nome> --mark-read` — o que é seu: mensagens novas (N), tarefas abertas (T), missões esperando seu aval (M) e alertas (!). Use `a2a read <msg_id> --agent <seu-nome>` só quando precisar do texto inteiro de uma mensagem.
+1. `a2a brief --agent <seu-nome> --mark-read` — o que é seu: mensagens novas (N), tarefas abertas (T), missões esperando seu aval (M) e alertas (!). Use `a2a read <msg_id> --agent <seu-nome> --compact` só quando precisar do texto inteiro de uma mensagem.
 2. `a2a status --agent <seu-nome> --set working --note "<o que vai fazer>" --project <projeto>`
 3. Se o Luiz criou uma cópia de trabalho para você, rode `a2a whereami --agent <seu-nome> --project <projeto>` e trabalhe nessa pasta.
 
@@ -1709,7 +1721,10 @@ def build_parser():
                    help="nao atualiza o status do remetente"); s.set_defaults(func=cmd_send)
     i = sub.add_parser("inbox"); i.add_argument("--agent", required=True); i.add_argument("--project")
     i.add_argument("--no-auto-status", dest="no_auto_status", action="store_true"); i.set_defaults(func=cmd_inbox)
-    r = sub.add_parser("read"); r.add_argument("msg_id"); r.add_argument("--agent"); r.set_defaults(func=cmd_read)
+    r = sub.add_parser("read"); r.add_argument("msg_id"); r.add_argument("--agent")
+    r.add_argument("--compact", action="store_true",
+                   help="so os campos com conteudo: 1 linha de cabecalho, o body inteiro e result/evidence/pending/next_action nao vazios")
+    r.set_defaults(func=cmd_read)
     bf = sub.add_parser("brief", help="resumo do que e seu: novas (N), acks, tarefas (T), missoes (M), alertas (!)",
         description="Resumo unico para o agente se atualizar (substitui inbox + read de cada mensagem + mission list). "
         "Linhas: cabecalho @agente estado ctx novas abertas aval; N = mensagem nao lida (exceto ack, mais antiga primeiro); "
@@ -1730,6 +1745,7 @@ def build_parser():
     w = sub.add_parser("wait"); w.add_argument("--agent", required=True); w.add_argument("--project")
     w.add_argument("--timeout", type=float, default=0); w.add_argument("--interval", type=float, default=2.0)
     w.add_argument("--until", choices=AGENT_STATES, help="espera o status do agente virar este estado")
+    w.add_argument("--compact", action="store_true", help="mostra a mensagem como o read --compact")
     w.add_argument("--no-auto-status", dest="no_auto_status", action="store_true"); w.set_defaults(func=cmd_wait)
     t = sub.add_parser("status")  # modo herdr
     t.add_argument("--agent"); t.add_argument("--set", choices=AGENT_STATES)
