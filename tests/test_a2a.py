@@ -2119,7 +2119,9 @@ mode, root = sys.argv[1], sys.argv[2]
 sys.path.insert(0, root); import a2a
 if "win" in mode: a2a._watch_windows = lambda: True
 if "bad" in mode: a2a.WATCH_RUNNERS["claude"]["allow"] += ("Bash(python *)", "Bash(git push *)")
-if mode == "table":
+if "bad2" in mode: a2a.WATCH_RUNNERS["claude"]["allow"] += tuple(f"{sh}({c} *)" for sh in ("Bash", "PowerShell") for c in
+    ("git rebase", "git reset", "git checkout", "git switch", "git branch -D", "git clean"))
+if mode.startswith("table"):
     import json; print(json.dumps({"bad": a2a.watch_forbidden(), "runners": {k: {"argv": list(v["argv"]), "allow": list(v["allow"]),
           "mode": v["permission_mode"], "enabled": v["enabled"]} for k, v in a2a.WATCH_RUNNERS.items()},
           "subcmds": list(a2a.WATCH_A2A_SUBCMDS)})); sys.exit(0)
@@ -2215,12 +2217,13 @@ def watch_fase():
     # 6) a tabela nunca tem padroes proibidos; cada subcomando nas formas Bash e PowerShell; check acusa tabela adulterada
     t = json.loads(subprocess.run([sys.executable, "-c", WATCH_INPROC, "table", str(ROOT)], capture_output=True, env=env).stdout)
     assert t["bad"] == [] and set(t["runners"]) == {"claude", "codex", "hermes"}, t
-    forbidden = re.compile(r"python|\ba2a \*|git push|git merge|git -C|bypassPermissions|danger-full-access|--yolo|dangerously", re.I)
+    forbidden = re.compile(r"python|\ba2a \*|git push|git merge|git -C|git rebase|git reset|git checkout|git switch|git branch -D|"
+                           r"git clean|bypassPermissions|danger-full-access|--yolo|dangerously", re.I)
     for ag, rr in t["runners"].items():
         for s in rr["argv"] + rr["allow"] + [rr["mode"]]: assert not forbidden.search(s), (ag, s)
     allow = t["runners"]["claude"]["allow"]
     for sh in ("Bash", "PowerShell"):
-        for c in t["subcmds"] + ["git status", "git diff", "git log"]: assert f"{sh}({'' if c.startswith('git') else 'a2a '}{c} *)" in allow, (sh, c)
+        for c in t["subcmds"] + ["git status", "git diff", "git log", "git add", "git commit"]: assert f"{sh}({'' if c.startswith('git') else 'a2a '}{c} *)" in allow, (sh, c)
     assert set(t["subcmds"]) == {"send", "brief", "read", "status", "ack", "whereami", "mission approve", "mission reject",
                                  "fact add", "fact list", "project which"}, t["subcmds"]
     assert t["runners"]["claude"]["mode"] == "dontAsk" and "--permission-mode" in t["runners"]["claude"]["argv"], t
@@ -2228,6 +2231,10 @@ def watch_fase():
     assert t["runners"]["hermes"]["enabled"] is False and t["runners"]["claude"]["enabled"] and t["runners"]["codex"]["enabled"], t
     r, _, _ = rows("--agent", "claude", mode="bad", code=1)
     assert r[("dove", "tabela")][0] == "ERRO" and "Bash(python *)" in r[("dove", "tabela")][1] and "Bash(git push *)" in r[("dove", "tabela")][1], r
+    tb = json.loads(subprocess.run([sys.executable, "-c", WATCH_INPROC, "table-bad2", str(ROOT)], capture_output=True, env=env).stdout)
+    for c in ("git rebase", "git reset", "git checkout", "git switch", "git branch -D", "git clean"):
+        assert any(f"{sh}({c} *)" in b for b in tb["bad"] for sh in ("Bash", "PowerShell")), (c, tb["bad"])
+    assert not any("git add" in b or "git commit" in b for b in tb["bad"]), tb["bad"]
     # 7) --show-command: argv exato sem rodar nada (o espiao nao muda)
     before = open(spy, encoding="utf-8").read()
     out, _ = check("--project", "lagu", "--show-command", code=0)
@@ -2252,6 +2259,212 @@ def watch_fase():
     print("OK: a2a watch check (exe ausente, versao, auth assinatura/API/nao logado, --permission-prompts, Windows sem sandbox = "
           "nao pronto, PowerShell, copia limpa/suja/ausente, STOP, A2A_RUNNER, tabela sem padroes proibidos, --show-command, "
           "espiao: so --version/--help/auth status)")
+
+PLAN_INPROC = r"""
+import atexit, json, os, subprocess, sys, time
+mode, root, t = sys.argv[1], sys.argv[2], float(sys.argv[3])
+time.time = lambda: t  # relogio injetado: idades, debounce e heartbeat
+calls = []
+atexit.register(lambda: open(os.environ["PLAN_CALLS"], "w").write(json.dumps(calls)))
+def boom(*a, **k): raise AssertionError("watch plan tentou executar um processo")
+if "git" in mode:  # so `git status --porcelain` pode rodar (espiao no Popen, que o subprocess.run usa)
+    Real = subprocess.Popen
+    class Spy(Real):
+        def __init__(self, args, *a, **k):
+            calls.append(list(args))
+            if list(args) != ["git", "status", "--porcelain"]: raise AssertionError(f"processo proibido: {args}")
+            super().__init__(args, *a, **k)
+    subprocess.Popen = Spy
+    subprocess.call = subprocess.check_output = os.system = boom
+else:
+    subprocess.Popen = subprocess.run = subprocess.call = subprocess.check_output = os.system = boom
+    for f in ("execv", "execvp", "execve", "spawnv", "spawnvp", "posix_spawn", "startfile"):
+        if hasattr(os, f): setattr(os, f, boom)
+sys.path.insert(0, root); import a2a
+if mode.startswith("plan"):
+    ds = a2a.watch_plan(project=os.environ.get("PLAN_PROJECT") or None, agent=os.environ.get("PLAN_AGENT") or None,
+                        check_git="git" in mode)
+    print(json.dumps([d for d in ds if d["action"] != "NADA"]))
+else: a2a.main(sys.argv[4:])
+"""
+def plan_fase():
+    """a2a watch plan / watch --dry-run --once (etapa 3 da Fase 3): decisoes com relogio injetado, debounce, silencio,
+    origem humana, report como resposta, ja acionadas, STOP, desabilitados, copia, sessao interativa, trava, loop, filtros,
+    JSON; so leitura (bytes iguais) e nenhum processo (so git status --porcelain com --check-git)."""
+    import calendar, shutil, uuid
+    B = calendar.timegm((2026, 10, 19, 12, 0, 0))
+    iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+    tmp = tempfile.mkdtemp(); calls_f = os.path.join(tmp, "calls.json")
+    gcfg = os.path.join(tmp, "gitconfig")
+    open(gcfg, "w").write("[user]\n\tname = Teste\n\temail = teste@example.com\n[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = false\n")
+    base = {k: v for k, v in os.environ.items() if k not in ("A2A_RUNNER", "A2A_RUN_ID")}
+    class H:  # um A2A_HOME de teste, escrito direto (datas controladas)
+        def __init__(self, projects=True, wt=True):
+            self.home = tempfile.mkdtemp(dir=tmp)
+            self.env = dict(base, A2A_HOME=self.home, PYTHONIOENCODING="utf-8", PLAN_CALLS=calls_f, GIT_CONFIG_GLOBAL=gcfg,
+                            GIT_CONFIG_NOSYSTEM="1")
+            for d in ("bus", "cursor", "agents", "status", "missions"): os.makedirs(os.path.join(self.home, d))
+            for ag in ("claude", "codex", "hermes"): open(os.path.join(self.home, "agents", ag), "w").close()
+            self.lagu = os.path.join(self.home, "lagu"); self.wt = self.lagu + "-claude"
+            os.makedirs(self.lagu); os.makedirs(self.wt)
+            ps = [{"name": "lagu", "path": self.lagu, "worktrees": {"claude": {"path": self.wt, "branch": "dove/claude", "base": "main"}} if wt else {}},
+                  {"name": "dove", "path": self.lagu + "d", "worktrees": {"claude": {"path": self.wt, "branch": "dove/claude", "base": "main"}}}]
+            if projects: json.dump(ps, open(os.path.join(self.home, "projects.json"), "w"))
+        def msg(self, frm, to, off, kind="task", project="lagu", reply="", task="", body=None, state=""):
+            mid = uuid.uuid4().hex[:12]; ts = iso(B + off)
+            m = {"data": ts, "task_id": task, "msg_id": mid, "from": frm, "to": to, "project": project, "in_reply_to": reply,
+                 "kind": kind, "state": state, "result": "", "evidence": "", "pending": "", "next_action": "", "body": body or f"{kind} {mid}"}
+            json.dump(m, open(os.path.join(self.home, "bus", ts.replace(":", "").replace("-", "") + "-" + mid + ".json"), "w"))
+            time.sleep(0.002)  # mtime desempata mensagens no mesmo segundo
+            return mid
+        def seen(self, ag, *ids):
+            p = os.path.join(self.home, "cursor", ag + ".json"); cur = json.load(open(p)) if os.path.exists(p) else []
+            json.dump(sorted(set(cur) | set(ids)), open(p, "w"))
+        def status(self, ag, age, **kw):
+            json.dump(dict({"agent": ag, "state": "working", "note": "", "project": "lagu", "ts": B + 1000 - age}, **kw),
+                      open(os.path.join(self.home, "status", ag + ".json"), "w"))
+        def plan(self, off, mode="plan", **env):
+            r = subprocess.run([sys.executable, "-c", PLAN_INPROC, mode, str(ROOT), str(B + off)], capture_output=True,
+                               env=dict(self.env, **env))
+            assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+            return {(d["agent"], d["project"]): d for d in json.loads(r.stdout)}
+        def cli(self, off, *args, mode="cli", code=0, e=None):
+            r = subprocess.run([sys.executable, "-c", PLAN_INPROC, mode, str(ROOT), str(B + off), *args], capture_output=True,
+                               env=dict(self.env, **(e or {})))
+            assert r.returncode == code, (args, r.returncode, r.stdout, r.stderr.decode("utf-8", "replace"))
+            return r.stdout.decode("utf-8") + r.stderr.decode("utf-8")
+    # 1) debounce: 3 tasks em 20s -> uma RODARIA so depois de 90s do mais velho (e 30s do mais novo)
+    h = H(); ids = [h.msg("luiz", "claude", o) for o in (0, 10, 20)]
+    for off, wait in ((40, 50), (60, 30), (89, 1)):
+        d = h.plan(off)[("claude", "lagu")]
+        assert d["action"] == "ESPERA" and d["reason"] == f"aguardando debounce ({wait}s)", (off, d)
+    d = h.plan(90)[("claude", "lagu")]
+    assert d["action"] == "RODARIA" and d["triggers"] == ids and d["worktree"] == h.wt and d["argv"][:2] == ["claude", "-p"], d
+    assert d["git"] == "nao verificada em simulacao (use --check-git)" and d["prompt"]["task"] == ids[0], d
+    assert d["prompt"]["chars"] > 500 and d["prompt"]["tokens_est"] == -(-d["prompt"]["chars"] // 4), d
+    out = h.cli(90, "watch", "plan"); tk = d["prompt"]["tokens_est"]
+    assert out == (f"RODARIA claude lagu gatilhos=3 ({','.join(i[:4] + '..' for i in ids)}) copia={h.wt} "
+                   f"prompt≈{tk if tk < 1000 else f'{tk / 1000:.1f}k'} tokens\nplano: 1 rodaria, 0 espera\n"), out
+    assert h.cli(90, "watch", "--dry-run", "--once") == out, "watch --dry-run --once = watch plan"
+    # 2) janela de silencio: o mais velho ja passou de 90s, mas chegou um novo ha 10s
+    h = H(); a1 = h.msg("luiz", "claude", 0); a2 = h.msg("luiz", "claude", 100)
+    assert h.plan(110)[("claude", "lagu")]["reason"] == "aguardando debounce (20s)"
+    d = h.plan(130)[("claude", "lagu")]; assert d["action"] == "RODARIA" and d["triggers"] == [a1, a2], d
+    # 3) so conversas que nasceram do humano (ou de missao criada por ele); report so como resposta a mensagem do agente
+    h = H()
+    solta = h.msg("codex", "claude", 0, kind="question")
+    json.dump({"id": "m1", "created_by": "luiz", "agents": ["claude"]}, open(os.path.join(h.home, "missions", "m1.json"), "w"))
+    json.dump({"id": "m2", "created_by": "codex", "agents": ["claude"]}, open(os.path.join(h.home, "missions", "m2.json"), "w"))
+    via_missao = h.msg("codex", "claude", 1, task="m1"); h.msg("codex", "claude", 2, task="m2")
+    t = h.msg("luiz", "claude", 3); h.seen("claude", t)
+    q = h.msg("claude", "codex", 4, kind="question", reply=t)
+    rep = h.msg("codex", "claude", 5, kind="report", reply=q)        # responde a claude: gatilho
+    h.msg("codex", "claude", 6, kind="report", reply=t)              # responde ao luiz: nao
+    h.msg("codex", "claude", 7, kind="report")                       # report solto: nao
+    h.msg("codex", "claude", 8, kind="ack", reply=t)                 # ack: nunca
+    h.msg("claude", "all", 9, kind="question")                       # propria: nunca
+    d = h.plan(200)[("claude", "lagu")]
+    assert d["action"] == "RODARIA" and d["triggers"] == [via_missao, rep], d
+    assert solta in d["ignored"] and len(d["ignored"]) == 2, d
+    h2 = H(); s2 = h2.msg("codex", "claude", 0, kind="question")
+    d = h2.plan(200)[("claude", "lagu")]
+    assert d["action"] == "IGNORA" and d["reason"] == "sem origem humana (raiz de codex)" and d["triggers"] == [s2], d
+    assert "IGNORA" not in h2.cli(200, "watch", "plan") and "IGNORA claude lagu sem origem humana" in h2.cli(200, "watch", "plan", "--verbose")
+    # 4) gatilhos ja acionados (runs/**.json trigger_ids) e lidos (cursor) ficam de fora
+    h = H(); x1 = h.msg("luiz", "claude", 0); x2 = h.msg("luiz", "claude", 1); x3 = h.msg("luiz", "claude", 2)
+    os.makedirs(os.path.join(h.home, "runs", "2026-10")); json.dump({"trigger_ids": [x1]}, open(os.path.join(h.home, "runs", "2026-10", "r1.json"), "w"))
+    h.seen("claude", x2)
+    assert h.plan(200)[("claude", "lagu")]["triggers"] == [x3]
+    h.seen("claude", x3); assert ("claude", "lagu") not in h.plan(200)
+    # 5) motivos de espera: STOP, desabilitados, sem projeto, sem copia, sessao interativa, trava, loop; o primeiro vale
+    h = H(); h.msg("luiz", "claude", 0); h.msg("luiz", "codex", 0); h.msg("luiz", "hermes", 0)
+    h.msg("luiz", "claude", 0, project=""); h.msg("luiz", "claude", 0, project="naoreg")
+    r = h.plan(200)
+    assert r[("codex", "lagu")]["reason"] == "desabilitado (etapa 9)", r[("codex", "lagu")]
+    assert r[("hermes", "lagu")]["reason"] == "desabilitado (ate o Luiz confirmar)", r[("hermes", "lagu")]
+    assert r[("claude", "")]["reason"] == "sem projeto" and r[("claude", "naoreg")]["reason"].startswith("sem copia de trabalho (projeto nao registrado"), r
+    assert "sem copia de trabalho (a2a worktree create)" in r[("codex", "lagu")]["reasons"], r[("codex", "lagu")]
+    assert r[("claude", "lagu")]["action"] == "RODARIA"
+    open(os.path.join(h.home, "STOP"), "w").close()
+    r = h.plan(200); assert all(d["reason"].startswith("STOP presente") for d in r.values()), r
+    os.remove(os.path.join(h.home, "STOP"))
+    out = h.cli(200, "watch", "plan", "--verbose")
+    assert "ESPERA codex lagu desabilitado (etapa 9)\n" in out and "  motivos: desabilitado (etapa 9); sem copia de trabalho (a2a worktree create)" in out, out
+    assert "ESPERA claude - sem projeto" in out and "plano: 1 rodaria, 4 espera" in out, out
+    hw = H(wt=False); hw.msg("luiz", "claude", 0)
+    assert hw.plan(200)[("claude", "lagu")]["reason"] == "sem copia de trabalho (a2a worktree create)"
+    # sessao interativa: heartbeat de 3m sem run_id -> espera; com run_id ou velho (>10min) -> roda
+    h.status("claude", 180)
+    d = h.plan(1000)[("claude", "lagu")]; assert d["reason"] == "sessao interativa aberta (heartbeat 3m sem run_id)", d
+    assert "ESPERA claude lagu sessao interativa aberta (heartbeat 3m sem run_id)" in h.cli(1000, "watch", "plan")
+    h.status("claude", 180, run_id="r-1", runner="watch"); assert h.plan(1000)[("claude", "lagu")]["action"] == "RODARIA"
+    h.status("claude", 700); assert h.plan(1000)[("claude", "lagu")]["action"] == "RODARIA"
+    dead = subprocess.Popen([sys.executable, "-c", "pass"]); dead.wait()  # pid de processo que ja terminou
+    os.makedirs(os.path.join(h.home, "run")); json.dump({"run_id": "r8", "pid": dead.pid}, open(os.path.join(h.home, "run", "claude.json"), "w"))
+    d = h.plan(1000)[("claude", "lagu")]; assert d["action"] == "RODARIA" and d["stale_lock"].endswith("claude.json"), d  # trava velha
+    json.dump({"run_id": "r9", "pid": os.getpid()}, open(os.path.join(h.home, "run", "claude.json"), "w"))  # dono vivo
+    assert h.plan(1000)[("claude", "lagu")]["reason"] == "ja rodando (run r9)"
+    # loop: pingpong numa conversa do humano -> espera e escala; saltos sem o humano tambem
+    h = H(); t = h.msg("luiz", "claude", 0); h.seen("claude", t); prev = t
+    for i, (a, b) in enumerate((("claude", "codex"), ("codex", "claude"), ("claude", "codex"), ("codex", "claude"))):
+        prev = h.msg(a, b, 1 + i, kind="question", reply=prev, body=f"pergunta {i}")
+    d = h.plan(500)[("claude", "lagu")]
+    assert d["action"] == "ESPERA" and d["reason"] == "loop: pingpong — escalar para o humano", d
+    assert "loop: saltos 4/4 sem mensagem de luiz — escalar para o humano" in d["reasons"], d
+    assert "ESPERA claude lagu loop: pingpong — escalar para o humano" in h.cli(500, "watch", "plan")
+    h = H(); t = h.msg("luiz", "claude", 0); h.seen("claude", t); prev = t
+    for i, (a, b) in enumerate((("claude", "codex"), ("codex", "hermes"), ("hermes", "codex"), ("codex", "claude"))):
+        prev = h.msg(a, b, 1 + i, kind="question", reply=prev, body=f"salto {i}")
+    d = h.plan(500)[("claude", "lagu")]; assert d["reason"] == "loop: saltos 4/4 sem mensagem de luiz — escalar para o humano", d
+    # 6) filtros --project/--agent e --json valido
+    h = H(); h.msg("luiz", "claude", 0); h.msg("luiz", "claude", 0, project="dove"); h.msg("luiz", "codex", 0)
+    assert set(h.plan(200)) == {("claude", "lagu"), ("claude", "dove"), ("codex", "lagu")}
+    assert set(h.plan(200, PLAN_PROJECT="dove")) == {("claude", "dove")}
+    assert set(h.plan(200, PLAN_AGENT="codex")) == {("codex", "lagu")}
+    j = json.loads(h.cli(200, "watch", "plan", "--json", "--project", "lagu"))
+    assert j["simulacao"] is True and j["counts"] == {"rodaria": 1, "espera": 1, "ignora": 0}, j
+    assert {d["agent"] for d in j["decisions"]} == {"claude", "codex"} and j["limits"]["debounce"] == 90 and j["limits"]["quiet"] == 30, j
+    assert json.loads(h.cli(200, "watch", "--dry-run", "--once", "--json", "--agent", "claude"))["counts"]["rodaria"] == 2
+    # 7) so leitura: bytes de bus/cursor/status/run/runs/missions iguais e nenhum arquivo novo (nem index.json); sem processo
+    h = H(); h.msg("luiz", "claude", 0); h.msg("luiz", "codex", 0); h.seen("claude", "x"); h.status("codex", 100)
+    os.makedirs(os.path.join(h.home, "runs", "2026-10")); json.dump({"trigger_ids": []}, open(os.path.join(h.home, "runs", "2026-10", "r.json"), "w"))
+    os.makedirs(os.path.join(h.home, "run")); json.dump({"run_id": "r", "pid": os.getpid()}, open(os.path.join(h.home, "run", "hermes.json"), "w"))
+    def snap():
+        out = {}
+        for dp, _, fs in os.walk(h.home):
+            for f in fs: p = os.path.join(dp, f); out[os.path.relpath(p, h.home)] = (open(p, "rb").read(), os.stat(p).st_mtime_ns)
+        return out
+    before = snap(); calls0 = None
+    for args in (("watch", "plan"), ("watch", "plan", "--verbose"), ("watch", "plan", "--json"), ("watch", "--dry-run", "--once")):
+        h.cli(200, *args)
+        assert json.load(open(calls_f)) == [], args  # boom: nenhum processo
+    h.cli(200, "watch", "plan", "--verbose", e={"A2A_RUNNER": "watch", "A2A_RUN_ID": "r-x"})  # dentro de execucao automatica: igual
+    h.plan(200)
+    assert snap() == before and not os.path.exists(os.path.join(h.home, "index.json")), "watch plan nao pode gravar nada"
+    # 8) --check-git: so `git status --porcelain` na copia; suja -> espera, limpa -> roda
+    git = lambda cwd, *a: subprocess.run(["git", *a], cwd=cwd, env=h.env, capture_output=True, check=True)
+    h = H(); shutil.rmtree(h.wt); git(h.home, "init", "-q", "-b", "main", h.wt)
+    open(os.path.join(h.wt, "a.txt"), "w").write("a\n"); git(h.wt, "add", "."); git(h.wt, "commit", "-qm", "i")
+    h.msg("luiz", "claude", 0)
+    d = h.plan(200, mode="plan-git")[("claude", "lagu")]
+    assert d["action"] == "RODARIA" and d["git"] == "limpa (git status --porcelain)", d
+    assert json.load(open(calls_f)) == [["git", "status", "--porcelain"]], json.load(open(calls_f))
+    open(os.path.join(h.wt, "a.txt"), "w").write("b\n"); open(os.path.join(h.wt, "novo.txt"), "w").write("n\n")
+    out = h.cli(200, "watch", "plan", "--check-git", mode="cli-git")
+    assert "ESPERA claude lagu copia suja (1 arquivo(s) sem commit)" in out, out
+    assert json.load(open(calls_f)) == [["git", "status", "--porcelain"]], json.load(open(calls_f))
+    d = h.plan(200)[("claude", "lagu")]  # sem --check-git: nao confere (e nao roda nada)
+    assert d["action"] == "RODARIA" and d["git"].startswith("nao verificada") and json.load(open(calls_f)) == [], d
+    # 9) a2a watch sem --dry-run: executor real ainda nao existe (sai 2, nada roda); --dry-run sem --once tambem sai 2
+    out = h.cli(200, "watch", code=2); assert "executor real ainda nao habilitado (etapa 7)" in out and json.load(open(calls_f)) == [], out
+    assert "executor real ainda nao habilitado (etapa 7)" in h.cli(200, "watch", "--once", code=2)
+    assert "--dry-run --once" in h.cli(200, "watch", "--dry-run", code=2)
+    hp = run(h.env, "watch", "plan", "--help").stdout
+    assert "exemplos:\n" in hp and "--check-git" in hp and "sessao interativa" in hp, hp
+    assert "a2a watch --dry-run --once" in run(h.env, "watch", "--help").stdout
+    print("OK: a2a watch plan (debounce 90s/silencio 30s, uma execucao por agente+projeto, origem humana, report como resposta, "
+          "ja acionadas, STOP, desabilitados, sem projeto/copia, sessao interativa, trava, loop, filtros, JSON, --dry-run --once, "
+          "so leitura, nenhum processo; --check-git so git status --porcelain; watch real sai 2)")
 
 def seguranca_fase():
     """Fase 3, passos 0 e 1: so o humano conclui missao, --from obrigatorio, vigia reservado, human_name(),
@@ -2938,6 +3151,7 @@ if __name__ == "__main__":
     fact_fase()
     loops_fase()
     watch_fase()
+    plan_fase()
     seguranca_fase()
     cost_fase()
     supervisor_fase()

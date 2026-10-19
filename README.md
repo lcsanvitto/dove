@@ -288,7 +288,25 @@ claude -p --output-format json --permission-mode dontAsk --permission-prompts no
 codex exec --json -s workspace-write -C <cópia do agente> --add-dir ~/.a2a -
 hermes chat --oneshot -Q --query-file - --source tool --max-turns 30 --usage-file ~/.a2a/runs/<run_id>/usage.json   # desabilitado
 ```
-A allowlist do Claude é por **subcomando** do `a2a` (`send`, `brief`, `read`, `status`, `ack`, `whereami`, `mission approve`, `mission reject`, `fact add`, `fact list`, `project which`) mais `git status`/`git diff`/`git log`, nas formas `Bash(...)` e `PowerShell(...)`. Nunca `python *`, `a2a *` inteiro, `git push`, `git merge` nem `git -C`. O modo `dontAsk` nega tudo o que não está liberado (regra de negação em Bash dá para contornar; a contenção é a allowlist).
+A allowlist do Claude é por **subcomando** do `a2a` (`send`, `brief`, `read`, `status`, `ack`, `whereami`, `mission approve`, `mission reject`, `fact add`, `fact list`, `project which`) mais `git status`/`git diff`/`git log` e `git add`/`git commit` (o Claude commita na própria cópia: o vigia roda com a pasta = cópia e `git -C` é proibido), nas formas `Bash(...)` e `PowerShell(...)`. Nunca `python *`, `a2a *` inteiro, `git push`, `git merge`, `git -C`, `git rebase`, `git reset`, `git checkout`, `git switch`, `git branch -D` nem `git clean` (o `watch check` acusa a tabela que tiver algum deles). O modo `dontAsk` nega tudo o que não está liberado (regra de negação em Bash dá para contornar; a contenção é a allowlist).
+
+## Plano do vigia em simulação (`a2a watch plan`)
+O que o vigia rodaria **agora**, sem gravar nem executar nada. `a2a watch --dry-run --once` é o mesmo comando. O executor real ainda não existe: `a2a watch` sem `--dry-run` imprime `executor real ainda nao habilitado (etapa 7)` e sai com código 2.
+```
+a2a watch plan [--project P] [--agent X] [--json] [--verbose] [--check-git]
+```
+```
+RODARIA claude lagu gatilhos=3 (a1b2..,c3d4..,e5f6..) copia=C:\Users\Dell\code\lagu-claude prompt≈1.9k tokens
+ESPERA codex lagu desabilitado (etapa 9)
+ESPERA claude dove sessao interativa aberta (heartbeat 3m sem run_id)
+plano: 1 rodaria, 2 espera
+```
+- **Gatilhos de um agente X:** mensagens não lidas (pelo cursor de X), visíveis para X, de `kind` `task`, `question` ou `correction`; `report` só quando responde (`--reply-to`) a uma mensagem de X. Nunca `ack`, as próprias, as de `vigia` nem as já acionadas (`trigger_ids` em `~/.a2a/runs/AAAA-MM/*.json`, se existir).
+- **Só conversas que nasceram do humano** (raiz enviada por ele, ou tarefa de missão criada por ele; mesma regra do `a2a loops`). As outras aparecem como `IGNORA ... sem origem humana` no `--verbose`. Com 4 saltos automáticos (`LOOP_MAX_HOPS`) sem mensagem do humano, espera e escala.
+- **Uma execução por agente+projeto**, com todos os gatilhos pendentes. **Debounce:** só roda quando o gatilho mais velho tem 90 s (`WATCH_DEBOUNCE`) e nenhum chegou nos últimos 30 s (`WATCH_QUIET`).
+- **Espera** (vale o primeiro motivo; `--verbose` mostra todos): `STOP presente`; agente desabilitado (`hermes` até o Luiz confirmar; `codex` até a etapa 9); `sem projeto`; `sem copia de trabalho (a2a worktree create)`; cópia suja (só com `--check-git`); `sessao interativa aberta` (status renovado há menos de 10 min sem `run_id`); `ja rodando` (trava `~/.a2a/run/<agente>.json` do supervisor com dono vivo; trava velha não segura); `loop: <tipo> — escalar para o humano` (achado do `a2a loops` na conversa, ou teto por hora do agente/global); `aguardando debounce (Ns)`.
+- **RODARIA** traz os gatilhos, a cópia, o argv exato do `--show-command` com a cópia preenchida e o tamanho do `a2a prompt` daquele agente/projeto/primeira tarefa (calculado em processo). `--verbose` mostra o comando, os gatilhos com idade, as ignoradas e os agentes sem nada pendente.
+- **Só lê:** não grava status, cursor, `index.json`, `run/` nem `runs/` e não inicia processo. Sem `--check-git` a cópia aparece como `nao verificada em simulacao`; com ele, o único processo é `git status --porcelain` em cada cópia (arquivos rastreados alterados = suja). Funciona igual dentro de uma execução automática (`A2A_RUNNER`).
 
 ## Custo e tokens (`a2a cost`)
 Soma os tokens que o Claude Code, o Codex e o Hermes **já gravam** no disco, por agente, projeto, modelo, dia ou sessão. **Só lê:** os JSONL são lidos linha a linha e o `state.db` do Hermes é aberto com `mode=ro` (se o WAL impedir, `immutable=1`); nada é criado nem alterado nessas pastas, que ficam fora do `~/.a2a`.
@@ -620,6 +638,7 @@ a2a loops [--project P] [--agent X] [--since H] [--json] [--strict]
 | `cost [--since 7d\|24h\|AAAA-MM-DD] [--project P] [--agent claude\|codex\|hermes] [--by agente\|projeto\|modelo\|dia\|sessao] [--mission ID] [--json]` | tokens (entrada, saída, cache lido/escrito, cache%) e custo estimado quando a fonte grava, lidos (só leitura) dos registros do Claude Code, Codex e Hermes; `n/d` sem custo na fonte |
 | `watch stop --from luiz [--kill]` · `watch resume --from luiz` | kill switch do vigia: cria / apaga `~/.a2a/STOP` (nada novo começa; `--kill` mata já as execuções em curso); só o humano |
 | `watch status` · `watch runs [--last N] [--agent X] [--json]` | STOP, vigia e execuções em curso / registros das execuções (`runs/AAAA-MM/`) |
+| `watch plan [--project P] [--agent X] [--json] [--verbose] [--check-git]` | o que o vigia rodaria agora (`RODARIA`/`ESPERA` e o motivo), em simulação: debounce, sessão interativa, cópia, trava, loop; não grava nem executa nada (`--check-git` roda só `git status --porcelain`); `watch --dry-run --once` é o mesmo |
 | `models init --from luiz [--force]` | cria `~/.a2a/models.json`: aliases do Claude Code + modelo configurado do Codex/Hermes com nível `?` (só o humano) |
 | `models set --agent A --model M --tier rapido\|equilibrado\|forte\|forte+ [--default] --from luiz` · `models price --agent A --model M --input X --output Y [--cache-read Z] [--cache-write W] --from luiz` | classifica um modelo / grava o preço em US$ por milhão de tokens (só o humano) |
 | `models list [--json]` | a tabela de modelos, níveis, padrão e preços (`sem preço` quando vazio) |
