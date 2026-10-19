@@ -2345,6 +2345,90 @@ def cmd_loops(a):
     if a.strict and res["total"]: sys.exit(1)
 
 # ---------------------------------------------------------------- painel web (app dove)
+# ---- papel remoto (etapa 16, sub-passos 1, 2 e 4). O painel continua em loopback; o papel "remote" so existe para Hosts
+# listados em `remote_hosts` (config, vazia = desligado), nunca recebe o token humano e so alcanca a tabela abaixo.
+REMOTE_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", re.ASCII)
+REMOTE_HOSTS_MAX = 8
+def normalize_remote_host(v):
+    """'host' ou 'host:porta' (minusculo). Sem curinga, esquema, caminho, usuario, IPv6 nem IP, salvo 127.0.0.1 e localhost.
+    DoveError se invalido."""
+    if not isinstance(v, str): raise DoveError("host remoto invalido: use hostname ou hostname:porta")
+    h = v.strip().lower()
+    host, sep, port = h.partition(":")
+    bad = DoveError(f"host remoto invalido: '{v}' (use so hostname ou hostname:porta, ex.: meu-pc.tailnet.ts.net)")
+    if not host or len(host) > 253 or (sep and not (port.isascii() and port.isdigit() and 1 <= int(port) <= 65535 and str(int(port)) == port)):
+        raise bad
+    labels = host.split(".")
+    if not all(REMOTE_LABEL_RE.fullmatch(x) for x in labels): raise bad  # '*', '/', '@', '[', espaco, rotulo vazio...
+    if host != "127.0.0.1" and labels[-1][0].isdigit(): raise bad  # IPv4 (0.0.0.0, 10.x, decimal/hex) nunca; nome nao termina em numero
+    return h
+def remote_hosts_list(cfg=None):
+    """Hosts remotos validos da config (entradas invalidas, ex. edicao manual, sao ignoradas: falha fechada)."""
+    raw = (load_config() if cfg is None else cfg).get("remote_hosts")
+    out = []
+    for v in raw if isinstance(raw, list) else []:
+        try: h = normalize_remote_host(v)
+        except DoveError: continue
+        if h not in out: out.append(h)
+    return out
+def remote_hosts_edit(who, host, add):
+    require_human(who)  # recusado em A2A_RUNNER e para nome de agente (antes de qualquer validacao ou gravacao)
+    h = normalize_remote_host(host); ensure_dirs()
+    with FileLock(CONFIG):
+        c = load_config(); cur = remote_hosts_list(c)
+        if add:
+            if h in cur: raise DoveError(f"host remoto '{h}' ja esta na lista")
+            if len(cur) >= REMOTE_HOSTS_MAX: raise DoveError(f"no maximo {REMOTE_HOSTS_MAX} hosts remotos")
+            cur.append(h)
+        else:
+            if h not in cur: raise DoveError(f"host remoto '{h}' nao esta na lista")
+            cur.remove(h)
+        c["remote_hosts"] = cur; write_json(CONFIG, c)
+    return cur
+def cmd_remote(a):
+    try:
+        if a.rcmd == "hosts":
+            if a.hcmd in ("add", "remove"):
+                cur = remote_hosts_edit(a._from, a.host, a.hcmd == "add")
+                print(f"host remoto {'adicionado' if a.hcmd == 'add' else 'removido'}: {normalize_remote_host(a.host)} "
+                      f"({len(cur)} na lista; o painel precisa de pareamento de dispositivo para aceitar qualquer pedido remoto)")
+            else:
+                hs = remote_hosts_list()
+                print("\n".join(hs) if hs else "(nenhum: acesso remoto desligado)")
+    except DoveError as e: fail(f"erro: {e}")
+def remote_device_for_request(handler):
+    """GANCHO do sub-passo 3 (pareamento de dispositivos, ainda NAO implementado e que depende de aval do Luiz): devolve o
+    dispositivo pareado dono do token da requisicao, ou None. Enquanto nao existir, o papel remoto nao autentica ninguem
+    (toda requisicao remota recebe 401)."""
+    return None
+REMOTE_ROUTES = frozenset({("GET", "/remote/api/state")})  # tabela fail-closed do papel remoto: so leitura reduzida, nada que grave
+PROXY_HEADERS = ("x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port", "forwarded", "via", "x-real-ip")
+def proxy_forwarded(headers):
+    """True se a requisicao veio de um proxy reverso (ex.: tailscale serve manda X-Forwarded-* e Tailscale-*): nunca e
+    'local', mesmo com Host de loopback forjado por quem esta do outro lado do proxy."""
+    return any(k.lower() in PROXY_HEADERS or k.lower().startswith("tailscale-") for k in headers.keys())
+def remote_state(stale_min=30):
+    """Estado reduzido do papel remoto (so leitura): status dos agentes, titulos/estados/percentual de orcamento das missoes,
+    contagem de mensagens nao lidas e STOP. SEM corpo de mensagem, caminho, token, config nem valores de orcamento."""
+    hn, reg = human_name(), registered_agents()
+    agents = [{"agent": x["agent"], "state": x["state"], "age": x["age"], "stale": x["stale"]}
+              for x in board_data(stale_min) if x["agent"] != hn]
+    missions = []
+    for m in all_missions()[-100:]:
+        pct = exceeded = None
+        if isinstance(m.get("budget"), dict):
+            try: st = budget_status(mission=m); pct, exceeded = st.get("pct"), bool(st.get("exceeded"))
+            except DoveError: pass
+        v = mission_view(m)
+        missions.append({"id": m["id"], "title": str(m.get("title") or ""), "status": v["status"],
+                         "approved": v["approved"], "total": v["total"], "closed": mission_closed(m),
+                         "budget_pct": pct, "budget_exceeded": exceeded})
+    unread, msgs = {}, all_messages()
+    for a in (x for x in reg if x != hn):
+        seen = load_seen(a)
+        unread[a] = sum(1 for m in msgs if m.get("from") != a and m.get("to") in (a, "all") and m.get("msg_id") not in seen)
+    return {"ok": True, "agents": agents, "missions": missions, "unread": {"total": sum(unread.values()), "by_agent": unread},
+            "stop": os.path.exists(STOP_FILE), "generated": now_iso()}
 TOKEN_GETS = ("/api/scan", "/api/doctor", "/api/fs/list", "/api/project/info", "/api/onboard", "/api/git/status", "/api/git/diff")
 FALLBACK_HTML = """<!doctype html><meta charset="utf-8"><title>Dove</title>
 <p>Dove: ui/index.html nao encontrado ao lado do a2a.py. Atualize o repo (git pull).</p>"""
@@ -2596,16 +2680,58 @@ def cmd_panel(a):
                 if not self.replied:
                     try: self.reply(500, {"ok": False, "error": f"{type(e).__name__}: {e}"})
                     except Exception: pass
-        def host_ok(self):  # anti DNS rebinding
-            if (self.headers.get("Host") or "").lower() in allowed: return True
-            self.reply(403, {"ok": False, "error": "Host nao permitido"}); return False
+        def role(self):
+            """'local' so se o Host e EXATAMENTE um host:porta de loopback deste servidor (e a requisicao nao veio de um proxy
+            reverso); 'remote' so se o Host esta em remote_hosts; qualquer outro caso: 403 e None. Nunca olha X-Forwarded-Host."""
+            hs = self.headers.get_all("Host") or []
+            host = hs[0].lower() if len(hs) == 1 else ""  # Host ausente ou duplicado: recusado
+            if host in allowed:
+                if proxy_forwarded(self.headers):
+                    self.reply(403, {"ok": False, "error": "Host local recusado: a requisicao veio por um proxy"}); return None
+                return "local"
+            if host and host in remote_hosts_list(): return "remote"
+            self.reply(403, {"ok": False, "error": "Host nao permitido"}); return None
+        def remote_gate(self, method):
+            """Papel remoto, fail-closed: Origin/Referer https do proprio host -> dispositivo autenticado (401) -> tabela de
+            rotas (403 para tudo que nao esta nela). -> rota (path) liberada, ou None se ja respondeu."""
+            host = (self.headers.get("Host") or "").lower()
+            origin, referer = self.headers.get("Origin"), self.headers.get("Referer")
+            if (origin is not None and origin.lower() != "https://" + host) or \
+               (referer is not None and not (referer.lower() == "https://" + host or referer.lower().startswith("https://" + host + "/"))):
+                self.reply(403, {"ok": False, "error": "Origin nao permitida"}); return None
+            try: device = remote_device_for_request(self)
+            except Exception: device = None  # falha do gancho = ninguem autenticado
+            if not device:
+                self.reply(401, {"ok": False, "error": "dispositivo nao autenticado"}); return None
+            raw = self.path
+            path = raw.split("?", 1)[0]
+            if not path.startswith("/") or path.startswith("//") or "\\" in raw or "%" in path or (method, path) not in REMOTE_ROUTES:
+                self.reply(403, {"ok": False, "error": "rota nao permitida para o papel remoto"}); return None
+            return path
         def token_ok(self):
             if hmac.compare_digest(self.headers.get("X-Dove-Token") or "", token): return True
             self.reply(403, {"ok": False, "error": "token invalido - recarregue a pagina do Dove (F5)"}); return False
+        def other(self):  # HEAD, OPTIONS, PUT, DELETE, PATCH: nunca tem rota; remoto leva 401/403, local o 501 padrao
+            self.read_body()
+            r = self.role()
+            if r is None: return
+            if r == "remote":
+                if self.remote_gate(self.command) is not None: self.reply(403, {"ok": False, "error": "rota nao permitida para o papel remoto"})
+                return
+            self.send_error(501, f"Unsupported method ({self.command!r})")
+        def do_HEAD(self): self.guarded(self.other)
+        do_OPTIONS = do_PUT = do_DELETE = do_PATCH = do_HEAD
         def do_GET(self): self.guarded(self.get)
         def do_POST(self): self.guarded(self.post)
         def get(self):
-            if not self.host_ok(): return
+            r = self.role()
+            if r is None: return
+            if r == "remote":
+                path = self.remote_gate("GET")
+                if path is None: return
+                if path == "/remote/api/state": self.reply(200, remote_state(a.stale_minutes))
+                else: self.reply(403, {"ok": False, "error": "rota nao permitida para o papel remoto"})
+                return
             u = urlparse(self.path)
             if u.path == "/":
                 try:
@@ -2659,7 +2785,11 @@ def cmd_panel(a):
             return n, b"".join(chunks)
         def post(self):
             n, raw = self.read_body()
-            if not self.host_ok(): return
+            r = self.role()
+            if r is None: return
+            if r == "remote":  # sem rota POST na tabela remota: 401/403, nunca chega ao api_post
+                if self.remote_gate("POST") is not None: self.reply(403, {"ok": False, "error": "rota nao permitida para o papel remoto"})
+                return
             origin = self.headers.get("Origin")
             if origin is not None and origin.lower() != "http://" + (self.headers.get("Host") or "").lower():
                 self.reply(403, {"ok": False, "error": "Origin nao permitida"}); return
@@ -5441,6 +5571,20 @@ def build_parser():
     x.add_argument("--from", dest="_from", default="", metavar="HUMANO", help="o humano (acao so do humano)")
     x.add_argument("--show", action="store_true", help="so mostra os orcamentos (qualquer um pode)")
     co.set_defaults(func=cmd_cost)
+    rm = sub.add_parser("remote", help="acesso remoto ao painel pelo celular (etapa 16): hosts permitidos", **ex(
+        "a2a remote hosts add meu-pc.tailnet.ts.net --from luiz", "a2a remote hosts list"))
+    rs = rm.add_subparsers(dest="rcmd", required=True)
+    rh = rs.add_parser("hosts", help="lista de Hosts aceitos pelo papel remoto (vazia = remoto desligado)",
+                       description="remote_hosts em ~/.a2a/config.json. Vazia (padrao) = acesso remoto desligado. So hostname ou "
+                                   "hostname:porta (sem esquema, caminho, curinga nem IP, salvo 127.0.0.1/localhost). add/remove so o "
+                                   "humano (recusado em A2A_RUNNER e com nome de agente); list e livre. Sozinho nao libera nada: "
+                                   "o painel ainda exige dispositivo pareado (sub-passo 3, ainda nao implementado).")
+    rhs = rh.add_subparsers(dest="hcmd", required=True)
+    for nm in ("add", "remove"):
+        x = rhs.add_parser(nm, help=f"{nm} um host (so o humano)"); x.add_argument("host")
+        x.add_argument("--from", dest="_from", required=True, help="o humano (acao so do humano)")
+    rhs.add_parser("list", help="mostra os hosts (qualquer um pode)")
+    rm.set_defaults(func=cmd_remote)
     return p
 
 def main(argv=None):

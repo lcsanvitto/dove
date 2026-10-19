@@ -3914,6 +3914,235 @@ def endurecimento_fase():
           "negados em ~/.a2a, orcamento do dia vale sem projeto/missao, A2A_AGENT amarra --from/--agent do executor")
 def is_win(): return os.name == "nt"
 
+REMOTE_DRIVER = r"""
+import sys
+sys.path.insert(0, sys.argv[1]); import a2a
+a2a.remote_device_for_request = lambda h: {"id": "fake"} if h.headers.get("X-Test-Device") == "ok" else None  # injeta um dispositivo falso
+a2a.main(["panel", "--port", sys.argv[2]])
+"""
+def remoto_fase():
+    """Etapa 16, sub-passos 1, 2 e 4: remote_hosts (so humano, valores validados), papel de requisicao (local x remoto x recusado),
+    tabela de rotas fail-closed do papel remoto, Origin/Referer https, estado reduzido so leitura (dispositivo falso injetado)."""
+    import inspect
+    tmp = tempfile.mkdtemp(); work = tempfile.mkdtemp()
+    base = {k: v for k, v in os.environ.items() if k not in ("A2A_RUNNER", "A2A_RUN_ID", "A2A_AGENT", "A2A_TESTING", "A2A_RUNNER_OVERRIDE")}
+    env = dict(base, A2A_HOME=tmp, PYTHONIOENCODING="utf-8", DOVE_NO_BROWSER="1")
+    def a2a(*args, code=0, e=None):
+        r = run(e or env, *args)
+        assert r.returncode == code, (args, r.returncode, r.stdout, r.stderr)
+        return r.stdout + r.stderr
+    cfg = lambda: json.load(open(os.path.join(tmp, "config.json"), encoding="utf-8")) if os.path.exists(os.path.join(tmp, "config.json")) else {}
+    a2a("init"); a2a("join", "--agent", "claude"); a2a("join", "--agent", "codex")
+    HOST = "meu-pc.tailnet.ts.net"
+
+    # ---- sub-passo 1: remote_hosts (vazio = desligado), so humano, valores validados
+    assert "nenhum" in a2a("remote", "hosts", "list") and "remote_hosts" not in cfg()
+    for args, code in ((("add", HOST, "--from", "claude"), 1), (("add", HOST, "--from", "codex"), 1),
+                       (("remove", HOST, "--from", "claude"), 1)):
+        assert "so o humano" in a2a("remote", "hosts", *args, code=code), args
+    assert "reservada ao humano" in a2a("remote", "hosts", "add", HOST, "--from", "luiz", code=2, e=dict(env, A2A_RUNNER="watch"))
+    assert "reservada ao humano" in a2a("remote", "hosts", "add", HOST, "--from", "claude", code=2, e=dict(env, A2A_RUNNER="watch"))
+    assert "remote_hosts" not in cfg()  # nada gravado
+    bad = ["*", "*.ts.net", "0.0.0.0", "0.0.0.0:8765", "10.0.0.1", "192.168.1.5:443", "127.0.0.2", "[::1]", "::1", "[::1]:8765",
+           "http://x.ts.net", "https://x.ts.net", "x.ts.net/", "x.ts.net/path", "x.ts.net?a=1", "u@x.ts.net", "evil@127.0.0.1",
+           "x.ts.net:0", "x.ts.net:65536", "x.ts.net:08", "x.ts.net:80:90", "x.ts.net:", "x.ts.net:abc", ":8765", "", "   ", "x..ts.net",
+           ".x.ts.net", "x.ts.net.", "-a.ts.net", "a-.ts.net", "a b.ts.net", "0x7f000001", "2130706433", "1.2.3", "x_y.ts.net",
+           "exemploç.ts.net", "a" * 64 + ".ts.net", "a." * 130 + "ts"]
+    for v in bad:
+        r = run(env, "remote", "hosts", "add", "--from", "luiz", "--", v)
+        assert r.returncode == 1 and "host remoto invalido" in r.stderr, (v, r.returncode, r.stderr)
+    assert "remote_hosts" not in cfg()
+    assert "adicionado: " + HOST in a2a("remote", "hosts", "add", HOST.upper(), "--from", "luiz")  # normaliza para minusculo
+    assert cfg()["remote_hosts"] == [HOST]
+    assert "ja esta na lista" in a2a("remote", "hosts", "add", HOST, "--from", "luiz", code=1)
+    for good in ("localhost", "127.0.0.1:8765", "pc:8443"): a2a("remote", "hosts", "add", good, "--from", "luiz")
+    assert a2a("remote", "hosts", "list", e=dict(env, A2A_RUNNER="watch")).split() == [HOST, "localhost", "127.0.0.1:8765", "pc:8443"]  # list e livre
+    assert "nao esta na lista" in a2a("remote", "hosts", "remove", "outro.ts.net", "--from", "luiz", code=1)
+    assert "reservada ao humano" in a2a("remote", "hosts", "remove", "pc:8443", "--from", "luiz", code=2, e=dict(env, A2A_RUNNER="watch"))
+    for h in ("localhost", "127.0.0.1:8765", "pc:8443"): a2a("remote", "hosts", "remove", h, "--from", "luiz")
+    assert cfg()["remote_hosts"] == [HOST]
+    for n in range(2, 9): a2a("remote", "hosts", "add", f"h{n}.ts.net", "--from", "luiz")
+    assert "no maximo" in a2a("remote", "hosts", "add", "h9.ts.net", "--from", "luiz", code=1)
+    for n in range(2, 9): a2a("remote", "hosts", "remove", f"h{n}.ts.net", "--from", "luiz")
+    a2a("remote", "hosts", "remove", HOST, "--from", "luiz")
+    assert cfg()["remote_hosts"] == [] and "nenhum" in a2a("remote", "hosts", "list")
+    sys.path.insert(0, str(ROOT)); import importlib; mod = importlib.import_module("a2a")
+    assert mod.remote_hosts_list({"remote_hosts": ["*", "ok.ts.net", "OK.ts.net", 5, "0.0.0.0", None, "http://x"]}) == ["ok.ts.net"]  # edicao manual: invalidos ignorados
+    assert mod.remote_hosts_list({"remote_hosts": "ok.ts.net"}) == [] and mod.remote_hosts_list({}) == []
+    assert mod.remote_device_for_request(None) is None  # gancho do sub-passo 3: ninguem autenticado
+    assert mod.REMOTE_ROUTES == {("GET", "/remote/api/state")} and all(m == "GET" for m, _ in mod.REMOTE_ROUTES)  # tabela: so leitura
+    assert not any(p.startswith("/api/") for _, p in mod.REMOTE_ROUTES)
+    print("OK: remote hosts (vazio = desligado, add/remove so humano: A2A_RUNNER e agentes recusados, list livre, valores invalidos "
+          "recusados sem gravar, normaliza, limite, config manual invalida ignorada)")
+
+    # ---- dados para o estado reduzido
+    proj = os.path.join(work, "segredo-dir", "proj"); mkrepo(proj); open(os.path.join(proj, "SEGREDO-ARQ.py"), "w").write("x = 1\n"); a2a("project", "add", "lagu", proj)
+    a2a("send", "--from", "claude", "--to", "codex", "--project", "lagu", "--kind", "task", "--body", "SEGREDO-CORPO", "--file", "SEGREDO-ARQ.py")
+    a2a("status", "--agent", "claude", "--set", "working", "--note", "SEGREDO-NOTA /home/x/y", "--project", "lagu")
+    mid = a2a("mission", "new", "--project", "lagu", "--title", "Titulo visivel", "--desc", "SEGREDO-DESC", "--agents", "claude", "--from", "luiz").split()[1]
+    a2a("mission", "budget", mid, "--usd", "7.77", "--from", "luiz")
+    a2a("remote", "hosts", "add", HOST, "--from", "luiz")
+
+    def sock_raw(port, data):
+        s = socket.create_connection(("127.0.0.1", port), timeout=5); s.sendall(data)
+        out = b""
+        try:
+            while True:
+                c = s.recv(65536)
+                if not c: break
+                out += c
+        except socket.timeout: pass
+        s.close(); head, _, body = out.partition(b"\r\n\r\n")
+        return int(head.split(b" ", 2)[1]), body.decode("utf-8", "replace")
+    def stop_proc(p):
+        p.terminate()
+        try: p.communicate(timeout=5)
+        except Exception: p.kill()
+
+    # ---- servidor REAL (gancho devolve None): remoto sem dispositivo = 401 em tudo
+    port = free_port(); p, T = start_panel(env, port); tok = T["X-Dove-Token"]
+    H = f"127.0.0.1:{port}"
+    try:
+        gets = ["/", "/api/state", "/api/messages", "/api/ping", "/api/doctor", "/api/fs/list?path=/", "/api/scan", "/api/git/diff",
+                "/remote/api/state", "/remote/api/state?x=1", "/nada", "/../etc/passwd", "/%2e%2e/api/state", "//api/state", "/api/state/..//"]
+        for path in gets:
+            code, body = req(port, "GET", path, host=HOST)
+            assert code == 401 and tok not in json.dumps(body), (path, code, body)
+            code, body = req(port, "GET", path, headers=T, host=HOST)  # nem o token humano vale para o remoto
+            assert code == 401, (path, code)
+        code, body = req(port, "GET", "/", host=HOST.upper()); assert code == 401 and tok not in str(body), (code, body)
+        for path in ("/api/send", "/api/mission/done", "/api/project/add", "/api/git/push", "/remote/api/state", "/nada"):
+            for hdr in ({}, T, dict(T, Origin="https://" + HOST), {"X-Test-Device": "ok"}):
+                code, body = req(port, "POST", path, {"to": "codex", "body": "x", "id": mid}, hdr, host=HOST)
+                assert code == 401, (path, hdr, code, body)
+        # Origin errada e rejeitada mesmo sem dispositivo (403, nao 401)
+        for o in ("https://evil.com", "http://" + HOST, "null", "https://" + HOST + ".evil.com", "https://" + HOST + ":8443"):
+            code, body = req(port, "POST", "/api/send", {"to": "codex", "body": "x"}, dict(T, Origin=o), host=HOST)
+            assert code == 403 and "Origin" in body["error"], (o, code, body)
+        # Host desconhecido / forjado: rejeitado (403), inclusive com Host local forjado + cabecalhos de proxy
+        for h in ("evil.com", f"{HOST}:{port}", HOST + ".evil.com", "evil@" + H, "evil.com@" + H, H + ".evil.com", "127.0.0.1", "localhost",
+                  f"0.0.0.0:{port}", f"[::1]:{port + 1}", f"127.0.0.1:{port + 1}", f"127.0.0.1:0{port}", " ", "*", f"{H}/", f"{H}@evil.com"):
+            for pth in ("/", "/api/state", "/api/ping"):
+                code, body = req(port, "GET", pth, host=h)
+                assert code == 403 and tok not in str(body), (h, pth, code, body)
+            code, body = req(port, "POST", "/api/send", {"to": "codex", "body": "x"}, T, host=h); assert code == 403, (h, code)
+        assert req(port, "GET", "/api/state", host=f"LOCALHOST:{port}")[0] == 200  # caixa alta: mesmo host (comportamento existente)
+        for hdr in ({"X-Forwarded-Host": H}, {"X-Forwarded-For": "100.64.0.9"}, {"X-Forwarded-Proto": "https"}, {"Forwarded": "for=1.2.3.4"},
+                    {"Via": "1.1 x"}, {"X-Real-IP": "1.2.3.4"}, {"Tailscale-User-Login": "a@b"}):
+            for pth in ("/", "/api/state"):  # Host de loopback forjado atras de proxy (tailscale serve): nunca vira local
+                code, body = req(port, "GET", pth, headers=hdr, host=H)
+                assert code == 403 and tok not in str(body) and "proxy" in body["error"], (hdr, pth, code, body)
+            code, _ = req(port, "POST", "/api/send", {"to": "codex", "body": "x"}, dict(T, **hdr), host=H); assert code == 403, hdr
+        for hdr in ({"X-Forwarded-Host": H}, {"X-Forwarded-Host": "localhost:" + str(port)}):  # X-Forwarded-Host nunca promove a local
+            code, body = req(port, "GET", "/", headers=hdr, host=HOST); assert code == 401 and tok not in str(body), (hdr, code)
+            code, body = req(port, "GET", "/", headers=hdr, host="evil.com"); assert code == 403, (hdr, code)
+        code, body = sock_raw(port, b"GET / HTTP/1.0\r\n\r\n"); assert code == 403 and tok not in body, (code, body)  # sem Host
+        code, body = sock_raw(port, b"GET / HTTP/1.1\r\nHost:\r\nConnection: close\r\n\r\n"); assert code == 403 and tok not in body, (code, body)
+        # Host duplicado, linha de pedido absoluta, metodos exoticos
+        code, body = sock_raw(port, f"GET / HTTP/1.1\r\nHost: {H}\r\nHost: {HOST}\r\nConnection: close\r\n\r\n".encode())
+        assert code == 403 and tok not in body, (code, body)
+        code, body = sock_raw(port, f"GET / HTTP/1.1\r\nHost: {HOST}\r\nHost: {H}\r\nConnection: close\r\n\r\n".encode())
+        assert code == 403 and tok not in body, (code, body)
+        for line in (f"GET http://{H}/ HTTP/1.1", f"GET http://{HOST}/api/state HTTP/1.1", "GET //api/state HTTP/1.1", f"GET http://evil.com/ HTTP/1.1"):
+            code, body = sock_raw(port, f"{line}\r\nHost: {HOST}\r\nConnection: close\r\n\r\n".encode())
+            assert code == 401 and tok not in body, (line, code, body)
+        for m in ("HEAD", "OPTIONS", "PUT", "DELETE", "PATCH"):
+            code, _ = sock_raw(port, f"{m} /api/state HTTP/1.1\r\nHost: {HOST}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode()); assert code == 401, (m, code)
+            code, _ = sock_raw(port, f"{m} /api/state HTTP/1.1\r\nHost: evil.com\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode()); assert code == 403, (m, code)
+            code, _ = sock_raw(port, f"{m} /api/state HTTP/1.1\r\nHost: {H}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode()); assert code == 501, (m, code)  # local: como antes
+        # ---- local inalterado: token no /, leituras sem token, Origin http, JSON-only
+        code, body = req(port, "GET", "/", headers={}, host=H)
+        assert code == 200 and tok in body and "__DOVE_TOKEN__" not in body, code
+        assert req(port, "GET", "/api/state")[0] == 200 and req(port, "GET", "/api/messages")[0] == 200 and req(port, "GET", "/api/ping")[0] == 200
+        assert req(port, "GET", "/api/doctor")[0] == 403 and req(port, "GET", "/api/doctor", headers=T)[0] == 200  # TOKEN_GETS como antes
+        assert req(port, "GET", "/remote/api/state")[0] == 404 and req(port, "GET", "/remote/api/state", headers=dict(T, **{"X-Test-Device": "ok"}))[0] == 404
+        assert req(port, "POST", "/api/send", {"to": "codex", "body": "x"}, dict(T, Origin="http://" + H))[0] == 200
+        code, body = req(port, "POST", "/api/send", {"to": "codex", "body": "x"}, dict(T, Origin="https://" + H)); assert code == 403 and "Origin" in body["error"]
+        assert req(port, "POST", "/api/send", {"to": "codex", "body": "x"}, dict(T, **{"Content-Type": "text/plain"}))[0] == 415
+        assert req(port, "POST", "/api/send", {"to": "codex", "body": "x"}, {})[0] == 403
+        assert p.poll() is None
+    finally:
+        stop_proc(p)
+
+    # ---- servidor com DISPOSITIVO FALSO injetado (X-Test-Device: ok): so a tabela de rotas passa
+    drv = os.path.join(work, "remote_driver.py"); open(drv, "w").write(REMOTE_DRIVER)
+    port = free_port(); H = f"127.0.0.1:{port}"
+    p = subprocess.Popen([sys.executable, drv, str(ROOT), str(port)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    drains = [threading.Thread(target=lambda s=s: [None for _ in s], daemon=True) for s in (p.stdout, p.stderr)]
+    for t in drains: t.start()
+    D = {"X-Test-Device": "ok"}; O = dict(D, Origin="https://" + HOST)
+    try:
+        assert wait_ping(port, p), "painel (driver) nao respondeu"
+        tok = re.search(r'name="dove-token" content="([^"]+)"', req(port, "GET", "/")[1]).group(1); T = {"X-Dove-Token": tok}
+        before_log = a2a("log", "--limit", "500")
+        # leitura reduzida
+        code, body = req(port, "GET", "/remote/api/state", headers=D, host=HOST)
+        assert code == 200 and body["ok"] is True and set(body) == {"ok", "agents", "missions", "unread", "stop", "generated"}, (code, body)
+        txt = json.dumps(body, ensure_ascii=False)
+        for secret in ("SEGREDO", "7.77", tok, tmp, work, "segredo-dir", "scan_root", "SEGREDO-NOTA", "/home/x"): assert secret not in txt, (secret, txt)
+        assert [x["agent"] for x in body["agents"]] == ["claude", "codex"] and set(body["agents"][0]) == {"agent", "state", "age", "stale"}, body["agents"]
+        assert next(x for x in body["agents"] if x["agent"] == "claude")["state"] == "working"
+        mi = body["missions"]; assert len(mi) == 1 and mi[0]["title"] == "Titulo visivel" and mi[0]["id"] == mid, mi
+        assert set(mi[0]) == {"id", "title", "status", "approved", "total", "closed", "budget_pct", "budget_exceeded"} and mi[0]["status"] == "aberta", mi[0]
+        assert isinstance(mi[0]["budget_pct"], (int, float)) and mi[0]["budget_exceeded"] is False, mi[0]
+        un = body["unread"]; assert set(un["by_agent"]) == {"claude", "codex"} and un["total"] == sum(un["by_agent"].values()) and un["by_agent"]["codex"] >= 1, un
+        assert all(isinstance(v, int) for v in un["by_agent"].values()) and body["stop"] is False
+        a2a("brief", "--agent", "codex", "--mark-read")  # le tudo: o contador de nao lidas do codex zera
+        assert req(port, "GET", "/remote/api/state", headers=D, host=HOST)[1]["unread"]["by_agent"]["codex"] == 0
+        a2a("watch", "stop", "--from", "luiz")
+        assert req(port, "GET", "/remote/api/state?x=1", headers=O, host=HOST)[1]["stop"] is True
+        os.remove(os.path.join(tmp, "STOP"))
+        # Origin/Referer https aceitos no proprio host; o resto rejeitado
+        for extra, ok in (({"Origin": "https://" + HOST}, True), ({"Origin": "https://" + HOST.upper()}, True), ({"Referer": f"https://{HOST}/x?y"}, True),
+                          ({"Referer": f"https://{HOST}"}, True), ({"Origin": "http://" + HOST}, False), ({"Origin": "https://evil.com"}, False),
+                          ({"Origin": "null"}, False), ({"Origin": "https://" + HOST + ".evil.com"}, False), ({"Referer": "https://evil.com/"}, False),
+                          ({"Referer": f"https://{HOST}.evil.com/"}, False), ({"Referer": f"http://{HOST}/"}, False),
+                          ({"Origin": "https://" + HOST, "Referer": "https://evil.com/"}, False)):
+            code, body = req(port, "GET", "/remote/api/state", headers=dict(D, **extra), host=HOST)
+            assert (code == 200) == ok and (ok or (code == 403 and "Origin" in body["error"])), (extra, code, body)
+        # tudo que nao e a rota da tabela: 403 mesmo autenticado (nunca o token, nunca 200/404)
+        for path in ("/", "/api/state", "/api/messages", "/api/ping", "/api/doctor", "/api/scan?root=/", "/api/fs/list?path=/", "/api/project/info?name=lagu",
+                     "/api/git/status", "/api/git/diff", "/api/onboard", "/remote/api/state/", "/remote/api/state/..", "/REMOTE/api/state",
+                     "/remote/api/state/../../api/state", "/remote/api/state%2f", "/remote/%61pi/state", "/remote\\api\\state",
+                     "//api/state", "/remote/api", "/nada", "/api/debug/raise", "*", "remote/api/state"):
+            code, body = req(port, "GET", path, headers=O, host=HOST)
+            assert code == 403 and tok not in json.dumps(body) and "rota" in body["error"], (path, code, body)
+        assert req(port, "GET", "//remote/api/state", headers=O, host=HOST)[0] in (200, 403)  # Python >= 3.11 colapsa "//" em "/" (mesma rota); antes disso cai no 403
+        for line in (f"GET http://{HOST}/remote/api/state HTTP/1.1", f"GET http://{H}/api/state HTTP/1.1", "GET http://x/remote/api/state HTTP/1.1"):
+            code, body = sock_raw(port, f"{line}\r\nHost: {HOST}\r\nX-Test-Device: ok\r\nConnection: close\r\n\r\n".encode())
+            assert code == 403 and tok not in body, (line, code, body)
+        # toda rota de escrita do painel: 403 no papel remoto, sem efeito (mesmo com o token humano e Origin https)
+        routes = sorted(set(re.findall(r'"(/api/[a-z/_]+)"', inspect.getsource(mod.api_post))))
+        assert "/api/send" in routes and "/api/mission/done" in routes and "/api/git/push" in routes and len(routes) >= 15, routes
+        for path in routes + ["/nada", "/remote/api/state", "/api/debug/raise", "/api/watch/stop", "/api/pair"]:
+            for hdr in (O, dict(O, **T), dict(D, **T)):
+                code, body = req(port, "POST", path, {"to": "codex", "body": "HACK", "id": mid, "name": "x", "path": work, "agent": "claude"}, hdr, host=HOST)
+                assert code == 403 and "rota" in body["error"], (path, code, body)
+            code, body = req(port, "POST", path, {}, dict(O, **{"Content-Type": "text/plain"}), host=HOST); assert code == 403, (path, code)
+        assert a2a("log", "--limit", "500") == before_log and not os.path.exists(os.path.join(tmp, "STOP"))  # nada foi gravado
+        assert "concluida" not in a2a("mission", "show", mid) and "HACK" not in a2a("log", "--limit", "500")
+        for m in ("HEAD", "OPTIONS", "PUT", "DELETE", "PATCH"):
+            code, _ = sock_raw(port, f"{m} /remote/api/state HTTP/1.1\r\nHost: {HOST}\r\nX-Test-Device: ok\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode())
+            assert code == 403, (m, code)
+        # papel remoto so existe com remote_hosts nao vazio (lido a cada pedido) e Host exato
+        assert req(port, "GET", "/remote/api/state", headers=D, host=f"{HOST}:{port}")[0] == 403
+        a2a("remote", "hosts", "remove", HOST, "--from", "luiz")
+        for pth in ("/remote/api/state", "/", "/api/state"):
+            code, body = req(port, "GET", pth, headers=O, host=HOST); assert code == 403 and "Host" in body["error"], (pth, code, body)
+        code, body = req(port, "POST", "/api/send", {"to": "codex", "body": "x"}, dict(O, **T), host=HOST); assert code == 403 and "Host" in body["error"]
+        a2a("remote", "hosts", "add", HOST, "--from", "luiz")
+        assert req(port, "GET", "/remote/api/state", headers=D, host=HOST)[0] == 200  # volta a valer sem reiniciar
+        # local segue igual com o gancho ativo: o cabecalho de dispositivo nao muda nada para Host de loopback
+        assert req(port, "GET", "/remote/api/state", headers=D)[0] == 404 and req(port, "GET", "/api/state", headers=D)[0] == 200
+        assert req(port, "POST", "/api/send", {"to": "codex", "body": "local"}, dict(T, **D))[0] == 200
+        assert p.poll() is None
+    finally:
+        stop_proc(p)
+    print("OK: papel remoto - sem dispositivo 401 em tudo (token humano nunca vai pro remoto, nem com X-Forwarded-Host), Host desconhecido/"
+          "forjado/duplicado/atras de proxy recusado, remote_hosts vazio = remoto impossivel (dinamico), dispositivo falso so alcanca o estado "
+          "reduzido (sem corpo, caminho, token, config, valores), Origin/Referer https so do proprio host, todas as rotas de escrita 403 sem efeito, "
+          "HEAD/OPTIONS/PUT/DELETE/PATCH, linha absoluta, traversal; local inalterado")
+
 if __name__ == "__main__":
     main()
     fase1()
@@ -3941,3 +4170,4 @@ if __name__ == "__main__":
     endurecimento_fase()
     parent_fase()
     cancel_fase()
+    remoto_fase()
