@@ -9,6 +9,7 @@ HOME = os.environ.get("A2A_HOME", os.path.expanduser("~/.a2a"))
 BUS, CURSOR, AGENTS, STATUS, MISSIONS = (os.path.join(HOME, d) for d in
                                          ("bus", "cursor", "agents", "status", "missions"))
 PROJECTS, CONFIG = os.path.join(HOME, "projects.json"), os.path.join(HOME, "config.json")
+ARCHIVE = os.path.join(HOME, "archive")  # archive/AAAA-MM/: fios encerrados movidos do bus (nunca apagados)
 UI_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ui", "index.html")
 STATES = ["AGUARDANDO_ACEITE","ACEITO","EM_EXECUCAO","BLOQUEADO",
           "AGUARDANDO_APROVACAO","EM_REVISAO","CONCLUIDO","CANCELADO"]
@@ -84,7 +85,8 @@ def bus_names(): return glob.glob(os.path.join(BUS, "*.json"))
 def bus_files(): return sorted(bus_names(), key=_chrono)
 def read_msg(f):
     m = read_json(f); return m if isinstance(m, dict) and "msg_id" in m else None
-def all_messages(): return [m for m in map(read_msg, bus_files()) if m]
+def bus_entries(): return [(f, m) for f, m in ((f, read_msg(f)) for f in bus_files()) if m]
+def all_messages(): return [m for _, m in bus_entries()]
 def bus_sig():
     """Assinatura barata do bus (muda quando entra ou sai arquivo)."""
     try: return (os.stat(BUS).st_mtime_ns, len(os.listdir(BUS)))
@@ -193,7 +195,14 @@ def compact_lines(m):
 def show_message(m, compact=False):
     print("\n".join(compact_lines(m)) if compact else json.dumps(m, ensure_ascii=False, indent=2))
 def find_message(mid):
-    return next((m for m in all_messages() if m["msg_id"] == mid), None)
+    """Procura no bus e, se nao achar, nas mensagens arquivadas (archive/AAAA-MM/)."""
+    m = next((m for m in all_messages() if m["msg_id"] == mid), None)
+    if m or not mid: return m
+    for pat in (f"*{glob.escape(mid)}*.json", "*.json"):  # pelo nome primeiro (rapido); depois todos
+        for f in sorted(glob.glob(os.path.join(ARCHIVE, "*", pat))):
+            x = read_msg(f)
+            if x and x["msg_id"] == mid: return x
+    return None
 def cmd_read(a):
     m = find_message(a.msg_id)
     if not m: print("nao encontrada", file=sys.stderr); sys.exit(1)
@@ -1302,6 +1311,110 @@ def cmd_brief(a):
     if a.mark_read:
         for mid in b["mark"]: mark_seen(a.agent, mid)  # so o que foi listado (N e ACK), como o read
 
+# ---------------------------------------------------------------- arquivo (fios encerrados saem do bus; so o humano)
+MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
+def msg_epoch(m):
+    try: return datetime.strptime(m.get("data") or "", "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+    except (TypeError, ValueError): return None
+def archive_plan(older_days=14, entries=None, missions=None, now=None):
+    """Fios arquivaveis: [(task, [arquivos])]. Fio = a task + tudo ligado a ela por in_reply_to (transitivo) + as
+    mensagens com o mesmo task_id vindas do destinatario da task (e os acks/respostas delas). Um fio so sai inteiro e so se:
+    a task esta fechada (regras do open_tasks) e nao ha task aberta no fio; a ultima atividade e mais velha que
+    older_days; nenhuma mensagem do fio esta nao lida pelo destinatario (to=all: todos os agentes registrados; o
+    humano nao tem cursor e nao conta); o task_id nao e de missao sem a confirmacao do humano. Fios que dividem
+    mensagens com um fio que fica tambem ficam."""
+    entries = bus_entries() if entries is None else entries
+    missions = all_missions() if missions is None else missions
+    now = time.time() if now is None else now
+    msgs = [m for _, m in entries]; path = {m["msg_id"]: f for f, m in entries}; by_id = {m["msg_id"]: m for m in msgs}
+    kids, same = {}, {}
+    for m in msgs:
+        if m.get("in_reply_to"): kids.setdefault(m["in_reply_to"], []).append(m["msg_id"])
+        if m.get("task_id"): same.setdefault((m["task_id"], m.get("from")), []).append(m["msg_id"])
+    open_ids = {m["msg_id"] for m in open_tasks(msgs)}
+    pending = {x["id"] for x in missions if not x.get("human")}
+    hn, reg, seen = human_name(), registered_agents(), {}
+    def unread(m):
+        to = reg if m.get("to") == "all" else [m.get("to")]
+        for a in to:
+            if a in (hn, m.get("from")): continue
+            if a not in seen: seen[a] = load_seen(a)
+            if m["msg_id"] not in seen[a]: return True
+        return False
+    cutoff, threads = now - older_days * 86400, []
+    for t in msgs:
+        if t.get("kind") != "task": continue
+        stack = [t["msg_id"]] + (same.get((t["task_id"], t.get("to")), []) if t.get("task_id") else [])
+        ids = set()
+        while stack:
+            x = stack.pop()
+            if x in ids or x not in by_id: continue
+            ids.add(x); stack += kids.get(x, [])
+        ms = [by_id[x] for x in ids]; ages = [msg_epoch(m) for m in ms]
+        ok = (not ids & open_ids and not any(m.get("task_id") in pending for m in ms)
+              and None not in ages and max(ages) < cutoff and not any(unread(m) for m in ms))
+        threads.append([t, ids, ok])
+    changed = True
+    while changed:  # um fio que divide mensagens com um fio que fica, fica tambem
+        keep = set().union(*[ids for _, ids, ok in threads if not ok]) if threads else set()
+        changed = False
+        for th in threads:
+            if th[2] and th[1] & keep: th[2], changed = False, True
+    out, taken = [], set()
+    for t, ids, ok in threads:
+        if not ok or t["msg_id"] in taken: continue
+        new = ids - taken; taken |= new
+        out.append((t, sorted((path[x] for x in new), key=_chrono)))
+    return [x for x in out if x[1]]
+def archive_run(by, older_days=14, dry_run=False):
+    require_human(by); ensure_dirs()
+    plan = archive_plan(older_days); month = datetime.now(timezone.utc).strftime("%Y-%m")
+    files = [f for _, fs in plan for f in fs]; dst = os.path.join(ARCHIVE, month); moved = 0
+    if files and not dry_run:
+        os.makedirs(dst, exist_ok=True)
+        for f in files:
+            to = os.path.join(dst, os.path.basename(f))
+            if os.path.exists(to): continue  # nunca sobrescreve
+            try: os.replace(f, to); moved += 1  # move (mantem mtime: a ordem volta igual no --restore)
+            except OSError as e: log_err(f"aviso: nao movi {f}: {e}")
+        if moved: bus_report("", f"{by} arquivou {moved} mensagens ({len(plan)} fios encerrados ha mais de {older_days:g} dias) "
+                                 f"em archive/{month}/. Desfazer: a2a archive --from {by} --restore {month}")
+    return {"plan": plan, "files": len(files), "moved": moved, "month": month}
+def archive_restore(by, month=""):
+    require_human(by); ensure_dirs()
+    if month and not MONTH_RE.match(month): raise DoveError(f"mes invalido: '{month}' (use AAAA-MM)")
+    dirs = [os.path.join(ARCHIVE, month)] if month else sorted(glob.glob(os.path.join(ARCHIVE, "*")))
+    dirs = [d for d in dirs if os.path.isdir(d) and MONTH_RE.match(os.path.basename(d))]
+    if month and not dirs: raise DoveError(f"nada arquivado em archive/{month}/")
+    moved, kept = 0, 0
+    for d in dirs:
+        for f in sorted(glob.glob(os.path.join(d, "*.json"))):
+            to = os.path.join(BUS, os.path.basename(f))
+            if os.path.exists(to): kept += 1; continue
+            try: os.replace(f, to); moved += 1
+            except OSError as e: log_err(f"aviso: nao restaurei {f}: {e}"); kept += 1
+        try: os.rmdir(d)  # so remove a pasta do mes se ficou vazia
+        except OSError: pass
+    where = f"archive/{month}/" if month else "archive/"
+    if moved: bus_report("", f"{by} restaurou {moved} mensagens de {where} para o bus")
+    return {"moved": moved, "kept": kept, "where": where}
+def cmd_archive(a):
+    try:
+        if a.restore is not None:
+            r = archive_restore(a._from, "" if a.restore == "*" else a.restore)
+            print(f"restauradas {r['moved']} mensagens de {r['where']}"
+                  + (f" ({r['kept']} ficaram: ja existiam no bus)" if r["kept"] else ""))
+            return
+        r = archive_run(a._from, a.older_than_days, a.dry_run)
+        n, k, where = r["files"], len(r["plan"]), f"archive/{r['month']}/"
+        if not n: print(f"nada para arquivar (nenhum fio encerrado, lido e sem atividade ha mais de {a.older_than_days:g} dias)"); return
+        if a.dry_run:
+            print(f"arquivaria {n} mensagens ({k} fios) em {where}")
+            for t, fs in r["plan"]:
+                print(f"  {t['msg_id']} ({len(fs)}): " + " ".join(read_msg(f)["msg_id"] for f in fs if read_msg(f)))
+        else: print(f"arquivadas {r['moved']} mensagens ({k} fios) em {where}")
+    except DoveError as e: fail(f"erro: {e}")
+
 # ---------------------------------------------------------------- painel web (app dove)
 TOKEN_GETS = ("/api/scan", "/api/doctor", "/api/fs/list", "/api/project/info", "/api/onboard", "/api/git/status", "/api/git/diff")
 FALLBACK_HTML = """<!doctype html><meta charset="utf-8"><title>Dove</title>
@@ -1818,6 +1931,18 @@ def build_parser():
     gt.set_defaults(func=cmd_git)
     x = sub.add_parser("whereami", help="pasta onde o agente deve trabalhar neste projeto")
     x.add_argument("--agent", required=True); x.add_argument("--project", required=True); x.set_defaults(func=cmd_whereami)
+    ar = sub.add_parser("archive", help="move fios encerrados e antigos do bus para archive/AAAA-MM/ (so o humano)",
+        description="Move (nunca apaga) do bus/ para ~/.a2a/archive/AAAA-MM/ os fios encerrados: a task fechada "
+        "(CONCLUIDO/CANCELADO), as respostas ligadas por --reply-to, as mensagens com o mesmo task_id do destinatario e os "
+        "acks. Fica no bus: fio com task aberta, com atividade nos ultimos --older-than-days dias, com mensagem nao lida "
+        "pelo destinatario ou de missao ainda nao confirmada pelo humano. read <id> continua achando mensagens arquivadas.")
+    ar.add_argument("--from", dest="_from", required=True, help="o humano (acao so do humano)")
+    ar.add_argument("--older-than-days", dest="older_than_days", type=float, default=14,
+                    help="so fios sem atividade ha mais de N dias (padrao 14)")
+    ar.add_argument("--dry-run", dest="dry_run", action="store_true", help="so lista o que seria movido")
+    ar.add_argument("--restore", nargs="?", const="*", metavar="AAAA-MM",
+                    help="devolve para o bus o que foi arquivado (tudo, ou so o mes AAAA-MM)")
+    ar.set_defaults(func=cmd_archive)
     o = sub.add_parser("onboard", help="imprime as instrucoes do canal para um agente ou para o AGENTS.md")
     og = o.add_mutually_exclusive_group(required=True)
     og.add_argument("--agent"); og.add_argument("--agents-md", dest="agents_md", action="store_true")

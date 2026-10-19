@@ -16,6 +16,7 @@ Não fica dentro de um projeto. Fica na sua pasta de usuário, acima de todos os
   agents/          ← agentes registrados (arquivo vazio ou JSON com tipo/modelo/nota)
   status/          ← estado de cada agente (modo herdr, contexto %)
   missions/        ← missões com aval de todos os agentes
+  archive/AAAA-MM/ ← conversas encerradas que você arquivou (a2a archive), intactas
   projects.json    ← projetos registrados (sidebar do dove)
   config.json      ← preferências (ex.: última pasta raiz do "Descobrir projetos")
 ```
@@ -303,6 +304,19 @@ a2a summary [--project lagu]
 ```
 Mostra tarefas abertas (`task` sem resposta `CONCLUIDO`/`CANCELADO`, ligada por `--reply-to` ou pelo mesmo `task_id` vindo do destinatário), agentes bloqueados, agentes sem sinal (stale), agentes com contexto ≥ 80%, missões por status e as últimas 5 conclusões. O mesmo resumo alimenta a coluna "Onde estamos" do app.
 
+## Arquivo (conversas encerradas saem do bus)
+O `bus/` só cresce, e todo comando relê o `bus/`. De tempos em tempos, você (humano) move as conversas encerradas e antigas para `~/.a2a/archive/AAAA-MM/` (o mês em que você arquivou). Nada é apagado: os arquivos JSON vão intactos e o `--restore` devolve.
+```
+a2a archive --from luiz --dry-run                 # lista o que sairia (contagem e ids por conversa)
+a2a archive --from luiz [--older-than-days 14]    # move: "arquivadas 318 mensagens (52 fios) em archive/2026-10/"
+a2a archive --from luiz --restore [2026-10]       # devolve tudo (ou só um mês) para o bus
+```
+- **Conversa (fio):** uma `task` + tudo que responde a ela por `--reply-to` (respostas de respostas também) + as mensagens com o mesmo `task_id` vindas do destinatário da task + os acks disso tudo. Só sai a conversa inteira.
+- **Só sai se:** a task está fechada (as mesmas regras do "onde estamos": `CONCLUIDO`/`CANCELADO` por `--reply-to` ou pelo `task_id`) e não há outra task aberta na conversa; a última mensagem é mais velha que `--older-than-days` (padrão 14); nenhuma mensagem está não lida pelo destinatário (para `all`, por nenhum agente registrado; o humano não tem "lidas" e não conta); e o `task_id` não é de uma missão que você ainda não confirmou. Perguntas e avisos soltos (sem task) ficam no bus.
+- **Só o humano:** exige `--from luiz` (como `worktree merge`); agentes não arquivam. Cada arquivamento/restauração vira um `report` de `luiz` para `all` no canal, com o comando para desfazer.
+- Missões (`missions/`) não mudam. `a2a read <id>` (e `--compact`) continua achando a mensagem arquivada. O resto (`inbox`, `brief`, `summary`, `log`, `wait`, o painel) só vê o `bus/`: no painel, `messages_total` e **Carregar mais antigas** não contam as mensagens arquivadas.
+- `--restore` devolve os arquivos com a mesma data de modificação, então a ordem e as saídas voltam iguais às de antes de arquivar.
+
 ## Comandos
 | Comando | O que faz |
 |---|---|
@@ -334,6 +348,8 @@ Mostra tarefas abertas (`task` sem resposta `CONCLUIDO`/`CANCELADO`, ligada por 
 | `mission done ID [--from luiz]` | confirmação final do humano (só com aval de todos) |
 | `mission list [--project P]` · `mission show ID` | lista / detalha missões |
 | `summary [--project P]` | "onde estamos": tarefas abertas, bloqueios, contexto alto, missões |
+| `archive --from luiz [--older-than-days 14] [--dry-run]` | move conversas encerradas, lidas e antigas do `bus/` para `archive/AAAA-MM/` (só o humano) |
+| `archive --from luiz --restore [AAAA-MM]` | devolve para o `bus/` o que foi arquivado (tudo ou um mês) |
 | `worktree list [--project P]` | cópias de trabalho dos agentes |
 | `worktree create\|merge\|sync\|remove --project P --agent A --from luiz` | cria / traz para sua branch / atualiza / remove a cópia do agente (só o humano) |
 | `git status --project P [--agent A]` | status git do projeto ou da cópia do agente |

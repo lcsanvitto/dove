@@ -1235,6 +1235,111 @@ def wait_fase():
     print(f"OK: wait sem reler o bus (timeout 3s/0.2s: {idle['all']} leitura(s) completa(s) em {idle['passes']} voltas; "
           f"entrega no meio em {mid['lag']:.2f}s; arquivo antigo e cursor relido)")
 
+def archive_fase():
+    """a2a archive (item 6): so o humano, dry-run nao move, fios abertos/nao lidos/recentes/de missao pendente ficam,
+    read acha arquivada, --restore devolve tudo e as saidas voltam byte a byte."""
+    tmp = tempfile.mkdtemp(); env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8")
+    for ag in ("claude", "codex", "hermes"): run(env, "join", "--agent", ag)
+    bus, now, seen = os.path.join(tmp, "bus"), time.time(), {"claude": [], "codex": [], "hermes": []}
+    n = [0]
+    def put(days, frm, to, kind, body, state="", reply="", task="", read=True):
+        n[0] += 1; mid = "%012d" % n[0]; t = now - days * 86400 + n[0]
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+        m = {"data": ts, "task_id": task, "msg_id": mid, "from": frm, "to": to, "project": "lagu", "in_reply_to": reply,
+             "kind": kind, "state": state, "result": "", "evidence": "", "pending": "", "next_action": "", "body": body}
+        f = os.path.join(bus, ts.replace(":", "").replace("-", "") + "-" + mid + ".json")
+        with open(f, "w", encoding="utf-8") as fh: json.dump(m, fh, ensure_ascii=False)
+        os.utime(f, (t, t))
+        if read:
+            for a in (seen if to == "all" else [to]):
+                if a in seen and a != frm: seen[a].append(mid)
+        if frm in seen: seen[frm].append(mid)
+        return mid
+    def mission(mid, human):
+        with open(os.path.join(tmp, "missions", mid + ".json"), "w") as f:
+            json.dump({"id": mid, "project": "lagu", "title": "t " + mid, "description": "", "agents": ["hermes"],
+                       "created_by": "luiz", "created": "2026-09-01T00:00:00Z",
+                       "approvals": {"hermes": {"verdict": "approve", "ts": "x", "evidence": "ok", "reason": ""}},
+                       "history": [], "human": {"by": "luiz", "ts": "x"} if human else None}, f)
+    A = put(30, "luiz", "codex", "task", "A fechada"); A2 = put(30, "codex", "luiz", "ack", "recebido", reply=A)
+    A3 = put(29, "codex", "luiz", "report", "A feita\nsegunda linha", state="CONCLUIDO", reply=A)
+    A4 = put(29, "luiz", "codex", "ack", "ok", reply=A3)
+    B = put(28, "claude", "hermes", "task", "B por task_id", task="tk2")
+    B2 = put(28, "hermes", "claude", "report", "B feita", state="CONCLUIDO", task="tk2")
+    B3 = put(28, "claude", "hermes", "ack", "ok", reply=B2)
+    C = put(30, "luiz", "codex", "task", "C aberta")
+    D = put(1, "claude", "codex", "task", "D recente"); D2 = put(1, "codex", "claude", "report", "D ok", state="CONCLUIDO", reply=D)
+    E = put(30, "claude", "codex", "task", "E nao lida"); E2 = put(30, "codex", "claude", "report", "E ok", state="CONCLUIDO", reply=E, read=False)
+    mission("mpend001", False); mission("mconf001", True)
+    F = put(30, "luiz", "hermes", "task", "F missao pendente", task="mpend001")
+    F2 = put(30, "hermes", "luiz", "report", "F aval", state="CONCLUIDO", reply=F, task="mpend001")
+    G = put(30, "luiz", "hermes", "task", "G missao confirmada", task="mconf001")
+    G2 = put(30, "hermes", "luiz", "report", "G aval", state="CONCLUIDO", reply=G, task="mconf001")
+    H = put(30, "claude", "all", "question", "H broadcast sem task")
+    I = put(30, "claude", "codex", "task", "I fechada"); I2 = put(30, "codex", "claude", "report", "I ok", state="CONCLUIDO", reply=I)
+    I3 = put(29, "hermes", "codex", "task", "I filho aberto", reply=I2)
+    for a, ids in seen.items():
+        with open(os.path.join(tmp, "cursor", a + ".json"), "w") as f: json.dump(sorted(ids), f)
+    listing = lambda d=bus: sorted(os.listdir(d)) if os.path.isdir(d) else []
+    cmds = ("summary", "brief --agent codex --no-auto-status", "brief --agent hermes --no-auto-status",
+            "inbox --agent codex --no-auto-status", "inbox --agent claude --no-auto-status", "log --limit 100",
+            "summary --project lagu", "mission list")
+    snap = lambda: {c: run(env, *c.split()).stdout for c in cmds}
+    before, files0 = snap(), listing()
+    # so o humano
+    r = run(env, "archive", "--from", "codex")
+    assert r.returncode == 1 and "so o humano" in r.stderr and listing() == files0, r.stderr
+    r = run(env, "archive", "--from", "codex", "--restore")
+    assert r.returncode == 1 and "so o humano" in r.stderr, r.stderr
+    # dry-run: lista, nao move nada, nao posta nada
+    r = run(env, "archive", "--from", "luiz", "--dry-run")
+    assert r.returncode == 0 and r.stdout.startswith("arquivaria 9 mensagens (3 fios) em archive/"), r.stdout
+    for x in (A, A4, B, B3, G2): assert x in r.stdout, (x, r.stdout)
+    assert listing() == files0 and not os.path.exists(os.path.join(tmp, "archive")), "dry-run nao move"
+    gone = {A, A2, A3, A4, B, B2, B3, G, G2}
+    r = run(env, "archive", "--from", "luiz")
+    assert r.returncode == 0 and r.stdout.startswith("arquivadas 9 mensagens (3 fios) em archive/"), r.stdout
+    month = re.search(r"archive/(\d{4}-\d{2})/", r.stdout).group(1)
+    in_bus = {f.split("-")[-1][:-5] for f in listing()}
+    in_arc = {f.split("-")[-1][:-5] for f in listing(os.path.join(tmp, "archive", month))}
+    assert in_arc == gone, in_arc
+    for x in (C, D, D2, E, E2, F, F2, H, I, I2, I3): assert x in in_bus, x  # aberta, recente, nao lida, missao pendente, sem task, filho aberto
+    rep = [json.load(open(os.path.join(bus, f), encoding="utf-8")) for f in listing()]
+    rep = [m for m in rep if m["from"] == "luiz" and "arquivou 9 mensagens" in m["body"]]
+    assert len(rep) == 1 and rep[0]["to"] == "all" and rep[0]["kind"] == "report", rep
+    assert f"--restore {month}" in rep[0]["body"] and not os.path.exists(os.path.join(tmp, "status", "luiz.json"))
+    assert len(os.listdir(os.path.join(tmp, "missions"))) == 2, "missoes intocadas"
+    # nada mais para arquivar; arquivo intacto (mesmo conteudo)
+    assert run(env, "archive", "--from", "luiz").stdout.startswith("nada para arquivar"), "segunda vez nao move"
+    # read acha a arquivada (JSON igual ao arquivo; --compact; marca como lida)
+    r = run(env, "read", A3, "--agent", "luiz")
+    src = next(os.path.join(tmp, "archive", month, f) for f in listing(os.path.join(tmp, "archive", month)) if A3 in f)
+    assert r.returncode == 0 and r.stdout == json.dumps(json.load(open(src, encoding="utf-8")), ensure_ascii=False, indent=2) + "\n", r.stdout
+    r = run(env, "read", A3, "--compact")
+    assert r.stdout.startswith(f"{A3} codex->luiz report/CONCLUIDO proj=lagu re={A} ") and "segunda linha" in r.stdout, r.stdout
+    assert run(env, "read", "000000000999").returncode == 1
+    # restore: tudo volta; com os 2 reports do luiz lidos, as saidas sao byte a byte as de antes
+    r = run(env, "archive", "--from", "luiz", "--restore", "1999-01")
+    assert r.returncode == 1 and "nada arquivado" in r.stderr, r.stderr
+    assert run(env, "archive", "--from", "luiz", "--restore", "abc").returncode == 1
+    r = run(env, "archive", "--from", "luiz", "--restore", month)
+    assert r.returncode == 0 and r.stdout.startswith(f"restauradas 9 mensagens de archive/{month}/"), r.stdout
+    assert not os.path.exists(os.path.join(tmp, "archive", month)), "pasta vazia do mes sai"
+    reps = [f.split("-")[-1][:-5] for f in listing() if f not in files0]
+    assert len(reps) == 2 and set(files0) <= set(listing()), reps
+    for rid in reps:
+        for a in ("claude", "codex", "hermes"): run(env, "read", rid, "--agent", a)
+    after = snap()
+    for c in cmds:
+        if c.startswith("log"): continue  # o log mostra os 2 reports novos do luiz
+        assert after[c] == before[c], (c, before[c], after[c])
+    # --restore sem mes devolve tudo
+    run(env, "archive", "--from", "luiz", "--older-than-days", "0.5")
+    r = run(env, "archive", "--from", "luiz", "--restore")
+    assert r.returncode == 0 and r.stdout.startswith("restauradas "), r.stdout
+    assert not [x for x in os.listdir(os.path.join(tmp, "archive"))], os.listdir(os.path.join(tmp, "archive"))
+    print("OK: archive (so o humano, dry-run nao move, abertos/recentes/nao lidos/missao pendente ficam, read acha arquivada, restore volta byte a byte)")
+
 if __name__ == "__main__":
     main()
     fase1()
@@ -1244,3 +1349,4 @@ if __name__ == "__main__":
     brief_fase()
     compact_fase()
     wait_fase()
+    archive_fase()
