@@ -2823,6 +2823,104 @@ def supervisor_fase():
           "TerminateJobObject, close, kill por nome" + (" + caminho real no Windows" if os.name == "nt" else
           " (caminho real so roda no Windows)"))
 
+def models_fase():
+    """a2a models: init so do humano (le config do codex/hermes com override por env), set/price so do humano, list,
+    suggest (uma regra por nivel, sem arquivo, --json), nada muda nos outros comandos."""
+    tmp = tempfile.mkdtemp(); fx = tempfile.mkdtemp()
+    cx, hx = os.path.join(fx, "codex"), os.path.join(fx, "hermes"); os.makedirs(cx); os.makedirs(hx)
+    env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8", CODEX_HOME=cx, HERMES_HOME=hx)
+    env.pop("A2A_RUNNER", None)
+    mf = os.path.join(tmp, "models.json")
+    def a2a(*args, code=0, e=None):
+        r = subprocess.run([sys.executable, str(A2A), *args], capture_output=True, env=e or env)
+        out = r.stdout.decode("utf-8") + r.stderr.decode("utf-8")
+        assert r.returncode == code, (args, r.returncode, out)
+        return out
+    run(env, "join", "--agent", "claude"); run(env, "join", "--agent", "codex")
+    base = {c: a2a(*c) for c in (("agents",), ("status",), ("summary",), ("brief", "--agent", "codex", "--no-auto-status"),
+                                  ("onboard", "--agents-md"), ("prompt", "--agent", "codex", "--project", "lagu", "--prefix-hash"))}
+    # sem models.json: list e suggest funcionam com os aliases embutidos e nao criam o arquivo
+    lst = a2a("models", "list")
+    assert "aliases do Claude Code embutidos" in lst and "rode a2a models init para personalizar" in lst, lst
+    for al, tier in (("haiku", "rapido"), ("sonnet", "equilibrado"), ("opus", "forte"), ("fable", "forte+")):
+        assert re.search(rf"^claude\s+{al}\s+{re.escape(tier)}\s", lst, re.M), (al, lst)
+    assert re.search(r"^claude\s+sonnet\s+equilibrado\s+\*\s+sem preço$", lst, re.M), lst
+    for task, kind, files, tier, rule, model in (
+            ("Resumir o status da missão de ontem", "task", 0, "rapido", "triagem/resumo/status", "haiku"),
+            ("onde fica a config do webhook?", "question", 0, "rapido", "pergunta", "haiku"),
+            ("Corrigir o handler do webhook e os testes", "task", 0, "equilibrado", "testes", "sonnet"),
+            ("Implementar o endpoint de cupom", "task", 0, "equilibrado", "mudanca de codigo", "sonnet"),
+            ("Revisão de segurança do login", "task", 0, "forte", "revisao de seguranca", "opus"),
+            ("Definir a arquitetura do orquestrador", "task", 0, "forte", "arquitetura/design", "opus"),
+            ("investigar teste flaky no CI", "task", 0, "forte", "depurar falha dificil", "opus"),
+            ("ajustar nomes", "task", 6, "forte", "refatoracao em varios arquivos", "opus"),
+            ("ok", "ack", 0, "rapido", "kind=ack", "haiku"),
+            ("seguir com aquilo", "task", 0, "equilibrado", "task sem palavra-chave (padrao de task)", "sonnet"),
+            ("seguir com aquilo", "report", 0, "rapido", "kind=report sem palavra-chave de codigo", "haiku")):
+        out = a2a("models", "suggest", "--task", task, "--kind", kind, "--files", str(files))
+        assert out.startswith(f"nivel: {tier}\n") and f"  claude  {model}\n" in out and f"motivo: regra {rule}" in out, (task, out)
+        assert "sem models.json: rode a2a models init para personalizar" in out, out
+    j = json.loads(a2a("models", "suggest", "--task", "x" * 4001, "--json"))
+    assert j["tier"] == "forte" and j["rule"] == "contexto longo" and j["table"] == "embutida" and j["agents"]["claude"]["model"] == "opus", j
+    j = json.loads(a2a("models", "suggest", "--task", "corrigir bug", "--agent", "codex", "--json"))
+    assert j["agents"] == {"codex": {"model": "", "tier": "", "note": "sem modelo na tabela"}}, j
+    assert json.loads(a2a("models", "list", "--json"))["table"] == "embutida"
+    assert not os.path.exists(mf)
+    # escrita so do humano: init/set/price recusados para agente, sem criar nada
+    for args in (("init", "--from", "claude"), ("set", "--agent", "claude", "--model", "opus", "--tier", "forte", "--from", "codex"),
+                 ("price", "--agent", "claude", "--model", "sonnet", "--input", "1", "--output", "2", "--from", "claude")):
+        assert "so o humano (luiz)" in a2a("models", *args, code=1), args
+    assert not os.path.exists(mf)
+    assert "rode a2a models init" in a2a("models", "set", "--agent", "codex", "--model", "m", "--tier", "forte", "--from", "luiz", code=1)
+    # execucao automatica (A2A_RUNNER) nunca age como humano: nem init/set/price com --from luiz
+    for args in (("init", "--from", "luiz"), ("set", "--agent", "codex", "--model", "m", "--tier", "forte", "--from", "luiz")):
+        assert "execucao automatica (A2A_RUNNER)" in a2a("models", *args, code=2, e=dict(env, A2A_RUNNER="vigia-teste")), args
+    assert not os.path.exists(mf)
+    # init le os configs (CODEX_HOME / HERMES_HOME): so o model do topo do toml; model: em bloco no yaml usa default:
+    open(os.path.join(cx, "config.toml"), "w").write('approval_policy = "never"\nmodel = "modelo-cx" # x\n\n[profiles.y]\nmodel = "nao"\n')
+    open(os.path.join(hx, "config.yaml"), "w").write('agent:\n  model: nao\nmodel:\n  provider: p\n  default: "modelo-hx"\n')
+    out = a2a("models", "init", "--from", "luiz")
+    assert "codex   modelo-cx (?)" in out and "hermes  modelo-hx (?)" in out and "fable (forte+)" in out, out
+    t = json.load(open(mf, encoding="utf-8"))
+    assert t["v"] == 1 and t["prices"] == {} and t["agents"]["codex"]["models"] == [{"id": "modelo-cx", "tier": "?"}], t
+    assert t["agents"]["hermes"]["default"] == "modelo-hx" and t["agents"]["claude"]["default"] == "sonnet", t
+    assert "ja existe" in a2a("models", "init", "--from", "luiz", code=1)
+    open(os.path.join(hx, "config.yaml"), "w").write("model: 'modelo-hx2'\n")
+    os.remove(os.path.join(cx, "config.toml"))
+    a2a("models", "init", "--from", "luiz", "--force"); t = json.load(open(mf, encoding="utf-8"))
+    assert t["agents"]["codex"]["models"] == [] and "modelo nao encontrado" in t["agents"]["codex"]["note"], t
+    assert t["agents"]["hermes"]["models"] == [{"id": "modelo-hx2", "tier": "?"}], t
+    lst = a2a("models", "list")
+    assert re.search(r"^codex\s+\(nenhum\)\s+modelo nao encontrado", lst, re.M) and re.search(r"^hermes\s+modelo-hx2\s+\?\s+\*", lst, re.M), lst
+    # suggest com a tabela: modelo '?' so como padrao; set classifica; price grava
+    j = json.loads(a2a("models", "suggest", "--task", "resumo", "--json"))
+    assert j["table"] == "arquivo" and "hint" not in j and j["agents"]["hermes"]["model"] == "modelo-hx2" and "padrao" in j["agents"]["hermes"]["note"], j
+    assert "sem modelo na tabela: a2a models set --agent codex" in a2a("models", "suggest", "--task", "resumo")
+    a2a("models", "set", "--agent", "codex", "--model", "cx-rapido", "--tier", "rapido", "--from", "luiz")
+    a2a("models", "set", "--agent", "codex", "--model", "cx-forte", "--tier", "forte", "--from", "luiz")
+    out = a2a("models", "set", "--agent", "codex", "--model", "cx-forte", "--tier", "forte", "--default", "--from", "luiz")
+    assert out == "codex/cx-forte = forte (padrao)\n", out
+    assert "invalid choice" in a2a("models", "set", "--agent", "codex", "--model", "x", "--tier", "?", "--from", "luiz", code=2)
+    s = json.loads(a2a("models", "suggest", "--task", "corrigir bug", "--json"))["agents"]["codex"]
+    assert s["model"] == "cx-forte" and "o mais barato acima" in s["note"], s
+    assert json.loads(a2a("models", "suggest", "--task", "resumo", "--json"))["agents"]["codex"]["model"] == "cx-rapido"
+    assert "nao esta na tabela" in a2a("models", "price", "--agent", "codex", "--model", "nada", "--input", "1", "--output", "2", "--from", "luiz", code=1)
+    assert "preco invalido" in a2a("models", "price", "--agent", "claude", "--model", "sonnet", "--input", "-1", "--output", "2", "--from", "luiz", code=1)
+    out = a2a("models", "price", "--agent", "claude", "--model", "sonnet", "--input", "1.5", "--output", "7", "--cache-read", "0.25", "--from", "luiz")
+    assert out.endswith(": 1.5 · 7 · cache 0.25/-\n"), out
+    p = json.load(open(mf, encoding="utf-8"))["prices"]["claude"]["sonnet"]
+    assert p["input"] == 1.5 and p["output"] == 7 and p["cache_read"] == 0.25 and "cache_write" not in p and p["by"] == "luiz", p
+    assert re.search(r"^claude\s+sonnet\s+equilibrado\s+\*\s+1\.5 · 7 · cache 0\.25/-$", a2a("models", "list"), re.M)
+    assert re.search(r"^claude\s+opus\s+forte\s+sem preço$", a2a("models", "list"), re.M)
+    lj = json.loads(a2a("models", "list", "--json")); assert lj["table"] == "arquivo" and lj["prices"]["claude"]["sonnet"]["input"] == 1.5
+    # nada mudou nos outros comandos; o bus nao recebeu nada
+    for c, v in base.items(): assert a2a(*c) == v, c
+    h = " ".join(a2a("models", "--help").split())
+    assert "exemplos:" in h and "a2a models suggest --task" in h and "code.claude.com/docs/en/cli-reference" in h, h
+    assert "a2a models suggest" in a2a("onboard", "--agent", "codex") and "models" not in a2a("onboard", "--agents-md")
+    print("OK: a2a models (init so do humano lendo CODEX_HOME/HERMES_HOME, set/price so do humano, list, suggest por nivel, "
+          "sem tabela = aliases embutidos, --json, outros comandos iguais)")
+
 if __name__ == "__main__":
     main()
     fase1()
@@ -2843,3 +2941,4 @@ if __name__ == "__main__":
     seguranca_fase()
     cost_fase()
     supervisor_fase()
+    models_fase()

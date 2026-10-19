@@ -1698,6 +1698,227 @@ def cmd_fact(a):
                   + (f" · {dead} vencidos (a2a fact list --project {a.project} --all)" if dead and not a.all else ""))
     except DoveError as e: fail(f"erro: {e}")
 
+# ---------------------------------------------------------------- tabela de modelos (a2a models; so o humano edita)
+MODELS_FILE = os.path.join(HOME, "models.json")  # nasce so com `a2a models init --from luiz`
+MODEL_TIERS = ["rapido", "equilibrado", "forte", "forte+"]  # do mais barato ao mais caro; "?" = falta o humano classificar
+MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,79}$")
+# Aliases do --model do Claude Code, conferidos em https://code.claude.com/docs/en/cli-reference (--model: "sonnet, opus,
+# haiku, or fable") e https://code.claude.com/docs/en/model-config#model-aliases. Nenhum nome de modelo de outro provedor
+# fica no codigo: codex e hermes vem da config local de cada CLI no `models init`.
+CLAUDE_ALIASES = [("haiku", "rapido"), ("sonnet", "equilibrado"), ("opus", "forte"), ("fable", "forte+")]
+MODELS_HINT = "rode a2a models init para personalizar"
+def models_builtin():
+    return {"v": 1, "agents": {"claude": {"models": [{"id": i, "tier": t} for i, t in CLAUDE_ALIASES], "default": "sonnet"}},
+            "prices": {}}
+def models_load():
+    """(tabela, veio_do_arquivo). Sem models.json (ou ilegivel): so os aliases do Claude Code embutidos."""
+    d = read_json(MODELS_FILE) if os.path.exists(MODELS_FILE) else None
+    if not isinstance(d, dict) or not isinstance(d.get("agents"), dict): return models_builtin(), False
+    d.setdefault("prices", {}); return d, True
+# codex_config_path() e hermes_config_path() sao os mesmos do watch check (definidos mais abaixo)
+def _unquote(v):
+    v = v.strip()
+    if v and v[0] in "\"'":
+        q = v[0]; end = v.find(q, 1); return v[1:end] if end > 0 else v[1:]
+    return v.split("#", 1)[0].strip()
+def codex_configured_model(path):
+    """`model = "..."` no nivel de cima do config.toml (antes da primeira [secao]). Leitura simples por linha."""
+    try: lines = _read_text(path).splitlines()
+    except (OSError, UnicodeDecodeError): return ""
+    for l in lines:
+        s = l.strip()
+        if s.startswith("["): break
+        m = re.match(r"^model\s*=\s*(.+)$", s)
+        if m: return _unquote(m.group(1))
+    return ""
+def hermes_configured_model(path):
+    """`model:` no nivel de cima do config.yaml. Valor na mesma linha; se `model:` abre um bloco, usa a chave
+    `default:` (ou `model:`) indentada logo abaixo. Leitura simples por linha, sem parser de YAML."""
+    try: lines = _read_text(path).splitlines()
+    except (OSError, UnicodeDecodeError): return ""
+    for n, l in enumerate(lines):
+        m = re.match(r"^model\s*:\s*(.*)$", l)
+        if not m: continue
+        v = _unquote(m.group(1))
+        if v: return v
+        for c in lines[n + 1:]:
+            if not c.strip() or c.lstrip().startswith("#"): continue
+            if not c[:1].isspace(): break
+            mm = re.match(r"^\s+(default|model)\s*:\s*(.+)$", c)
+            if mm and _unquote(mm.group(2)): return _unquote(mm.group(2))
+        return ""
+    return ""
+def models_init_table():
+    t = models_builtin()
+    for ag, path, read in (("codex", codex_config_path(), codex_configured_model),
+                           ("hermes", hermes_config_path(), hermes_configured_model)):
+        mid = read(path) if os.path.isfile(path) else ""
+        if mid and MODEL_ID_RE.match(mid):
+            t["agents"][ag] = {"models": [{"id": mid, "tier": "?"}], "default": mid, "source": path,
+                               "note": "nivel ? : classifique com a2a models set"}
+        else:
+            t["agents"][ag] = {"models": [], "default": "", "source": path,
+                               "note": f"modelo nao encontrado em {path}; cadastre com a2a models set"}
+    return t
+def models_init(who, force=False):
+    require_human(who); os.makedirs(HOME, exist_ok=True)
+    with FileLock(MODELS_FILE):
+        if os.path.exists(MODELS_FILE) and not force:
+            raise DoveError(f"{MODELS_FILE} ja existe (use --force para recriar; isso descarta niveis e precos editados)")
+        t = models_init_table(); write_json(MODELS_FILE, t)
+    return t
+def _models_edit(who, fn):
+    require_human(who)
+    with FileLock(MODELS_FILE):
+        t, from_file = models_load()
+        if not from_file: raise DoveError(f"sem {MODELS_FILE}: rode a2a models init --from {human_name()}")
+        out = fn(t); write_json(MODELS_FILE, t)
+    return out
+def check_model_id(mid):
+    mid = (mid or "").strip()
+    if not MODEL_ID_RE.match(mid): raise DoveError(f"id de modelo invalido: '{mid}'")
+    return mid
+def models_set(who, agent, model, tier, default=False):
+    agent = check_agent_name(agent); model = check_model_id(model)
+    if tier not in MODEL_TIERS: raise DoveError(f"nivel invalido: '{tier}' (use {', '.join(MODEL_TIERS)})")
+    def fn(t):
+        a = t["agents"].setdefault(agent, {"models": [], "default": ""})
+        ms = a.setdefault("models", []); row = next((m for m in ms if m.get("id") == model), None)
+        if row: row["tier"] = tier
+        else: ms.append({"id": model, "tier": tier})
+        if default or not a.get("default"): a["default"] = model
+        if not any(m.get("tier") == "?" for m in ms): a.pop("note", None)
+        return a
+    return _models_edit(who, fn)
+def models_price(who, agent, model, inp, out, cache_read=None, cache_write=None):
+    agent = check_agent_name(agent); model = check_model_id(model)
+    vals = {"input": inp, "output": out, "cache_read": cache_read, "cache_write": cache_write}
+    for k, v in vals.items():
+        if v is not None and (v != v or v < 0 or v > 10000): raise DoveError(f"preco invalido em {k}: {v} (US$ por milhao de tokens, >= 0)")
+    def fn(t):
+        if not any(m.get("id") == model for m in t["agents"].get(agent, {}).get("models", [])):
+            raise DoveError(f"{agent}/{model} nao esta na tabela: cadastre antes com a2a models set --agent {agent} --model {model} --tier ...")
+        p = {k: v for k, v in vals.items() if v is not None}
+        p.update(by=who, ts=now_iso()); t["prices"].setdefault(agent, {})[model] = p
+        return p
+    return _models_edit(who, fn)
+def model_price(agent, model, table=None):
+    """Preco por milhao de tokens que o humano gravou (ou None). Para custo estimado de fontes sem custo proprio:
+    sempre rotular como 'estimado (tabela do Luiz)'."""
+    t = table or models_load()[0]; return (t.get("prices") or {}).get(agent, {}).get(model)
+def _price_num(v): return f"{v:g}"
+def price_label(p):
+    if not p: return "sem preço"
+    s = f"{_price_num(p['input'])} · {_price_num(p['output'])}"
+    if "cache_read" in p or "cache_write" in p:
+        s += f" · cache {_price_num(p['cache_read']) if 'cache_read' in p else '-'}/{_price_num(p['cache_write']) if 'cache_write' in p else '-'}"
+    return s
+def models_rows(t):
+    rows = []
+    for ag in sorted(t["agents"]):
+        a = t["agents"][ag]
+        for m in a.get("models", []):
+            rows.append({"agent": ag, "model": m.get("id", ""), "tier": m.get("tier", "?"), "default": m.get("id") == a.get("default"),
+                         "price": model_price(ag, m.get("id", ""), t)})
+    return rows
+# Regras do suggest: deterministicas, sem IA. Texto normalizado (minusculas, sem acento). A primeira regra que casa,
+# de cima para baixo, decide; forte vem antes para nunca subestimar. Nada casou: kind task -> equilibrado, outros -> rapido.
+SUGGEST_RULES = [
+    ("forte", "arquitetura/design", r"\b(arquitetur\w*|architect\w*|design de sistema|system design|design doc|desenho da solucao|projetar o sistema)"),
+    ("forte", "revisao de seguranca", r"\b(seguranca|security|vulnerab\w*|pentest|threat model\w*|modelo de ameaca\w*|auditoria de seguranca|cve-?\d*)"),
+    ("forte", "refatoracao em varios arquivos", r"\b(refator\w*|refactor\w*|reestrutur\w*)\b.*\b(varios|multiplos|todos os|todo o|em massa|modulos|arquivos|pacotes)\b|\bmulti-?(arquivo|file|modulo|module)s?\b|\bcross-?module\b"),
+    ("forte", "depurar falha dificil", r"\b(race condition|condicao de corrida|deadlock|memory leak|vazamento de memoria|flaky|intermitente\w*|heisenbug|segfault|nao reproduz\w*|corrupcao de dados|data corruption)\b"),
+    ("forte", "contexto longo", r"\b(contexto longo|long[- ]context|repositorio inteiro|repo inteiro|codebase inteir\w*|todo o (repo|repositorio|codigo)|logs? inteiros?|whole (repo|codebase))\b"),
+    ("equilibrado", "testes", r"\b(testes?|tests?|testing|unittest|pytest|cobertura|coverage)\b"),
+    ("equilibrado", "refatoracao pequena", r"\b(refator\w*|refactor\w*|renomear|rename|extrair funcao|extract)\b"),
+    ("equilibrado", "mudanca de codigo", r"\b(implement\w*|corrig\w*|fix\w*|bugs?|feature|endpoint|funcao|function|handler|codigo|code|script|migrar|migration|adicionar|criar|alterar|ajustar|patch|regressao|erro|error|exception|api)\b"),
+    ("rapido", "triagem/resumo/status", r"\b(triag\w*|resum\w*|summar\w*|sumario|status|ack|confirmar recebimento|encaminhar|classificar|priorizar)\b"),
+    ("rapido", "pergunta", r"\?|\b(pergunta|duvida|question|onde fica|o que e|qual e|como funciona)\b"),
+    ("rapido", "docs", r"\b(docs?|documenta\w*|readme|changelog|typo|ortografia|traduz\w*|comentario)\b"),
+]
+SUGGEST_LONG_CHARS = 4000  # texto da tarefa maior que isto conta como contexto longo
+def _norm_text(s):
+    import unicodedata
+    return "".join(c for c in unicodedata.normalize("NFKD", s or "") if not unicodedata.combining(c)).lower()
+def suggest_tier(task, kind="task", files=0):
+    """(nivel, regra, trecho que casou). Arquivos: --files >= 5 pede forte; 2 a 4, pelo menos equilibrado."""
+    text = _norm_text(task); tier, rule, hit = "", "", ""
+    if kind == "ack": tier, rule, hit = "rapido", "kind=ack", "ack"
+    elif len(task or "") > SUGGEST_LONG_CHARS: tier, rule, hit = "forte", "contexto longo", f"{len(task)} caracteres"
+    else:
+        for t, r, rx in SUGGEST_RULES:
+            m = re.search(rx, text)
+            if m: tier, rule, hit = t, r, m.group(0).strip(); break
+        if not tier:
+            tier, rule = ("equilibrado", "task sem palavra-chave (padrao de task)") if kind == "task" else \
+                         ("rapido", f"kind={kind} sem palavra-chave de codigo")
+    if files >= 5 and MODEL_TIERS.index(tier) < MODEL_TIERS.index("forte"):
+        tier, rule, hit = "forte", "refatoracao em varios arquivos", f"--files {files}"
+    elif files >= 2 and tier == "rapido":
+        tier, rule, hit = "equilibrado", "mudanca em mais de um arquivo", f"--files {files}"
+    return tier, rule, hit
+def pick_model(a, tier):
+    """O modelo classificado mais barato com nivel >= tier (o padrao do agente desempata no mesmo nivel)."""
+    ms = [m for m in (a or {}).get("models", []) if m.get("tier") in MODEL_TIERS]
+    for t in MODEL_TIERS[MODEL_TIERS.index(tier):]:
+        same = [m for m in ms if m["tier"] == t]
+        if same:
+            m = next((x for x in same if x.get("id") == a.get("default")), same[0])
+            return {"model": m["id"], "tier": t, "note": "" if t == tier else f"sem modelo {tier}: o mais barato acima"}
+    if (a or {}).get("default"):
+        return {"model": a["default"], "tier": next((m.get("tier", "?") for m in a.get("models", []) if m.get("id") == a["default"]), "?"),
+                "note": f"nenhum modelo classificado com nivel >= {tier}: usando o padrao do agente"}
+    return {"model": "", "tier": "", "note": "sem modelo na tabela"}
+def models_suggest(task, kind="task", files=0, agent=""):
+    t, from_file = models_load(); tier, rule, hit = suggest_tier(task, kind, files)
+    names = [agent] if agent else sorted(t["agents"])
+    agents = {n: pick_model(t["agents"].get(n), tier) for n in names}
+    out = {"tier": tier, "rule": rule, "match": hit, "agents": agents, "table": "arquivo" if from_file else "embutida"}
+    if not from_file: out["hint"] = MODELS_HINT
+    return out
+def cmd_models(a):
+    utf8_stdout()
+    try:
+        if a.mcmd == "init":
+            t = models_init(a._from, a.force)
+            print(f"tabela criada em {MODELS_FILE}")
+            for ag in ("claude", "codex", "hermes"):
+                x = t["agents"][ag]
+                ids = ", ".join(f"{m['id']} ({m['tier']})" for m in x["models"]) or "(nenhum)"
+                print(f"  {ag:<7} {ids}" + (f" — {x['note']}" if x.get("note") else ""))
+            print("precos: nenhum (a2a models price ... --from " + human_name() + ")")
+        elif a.mcmd == "set":
+            x = models_set(a._from, a.agent, a.model, a.tier, a.default)
+            print(f"{a.agent}/{a.model.strip()} = {a.tier}" + (" (padrao)" if x.get("default") == a.model.strip() else ""))
+        elif a.mcmd == "price":
+            p = models_price(a._from, a.agent, a.model, a.input, a.output, a.cache_read, a.cache_write)
+            print(f"preco de {a.agent}/{a.model.strip()} (US$ por milhao de tokens, in · out · cache leitura/escrita): {price_label(p)}")
+        elif a.mcmd == "list":
+            t, from_file = models_load(); rows = models_rows(t)
+            if a.json:
+                print(json.dumps({"table": "arquivo" if from_file else "embutida", "path": MODELS_FILE, "agents": t["agents"],
+                                  "prices": t.get("prices", {})}, ensure_ascii=False, separators=(",", ":"))); return
+            if not from_file: print(f"(sem {MODELS_FILE}: aliases do Claude Code embutidos; {MODELS_HINT})")
+            print(f"{'agente':<8}{'modelo':<26}{'nivel':<13}{'padrao':<8}preco US$/Mtok (in · out · cache leit/escr)")
+            for r in rows:
+                print(f"{r['agent']:<8}{r['model']:<26}{r['tier']:<13}{'*' if r['default'] else '':<8}{price_label(r['price'])}")
+            for ag in sorted(t["agents"]):
+                x = t["agents"][ag]
+                if not x.get("models"): print(f"{ag:<8}{'(nenhum)':<26}{'':<13}{'':<8}" + (x.get("note") or ""))
+                elif x.get("note"): print(f"  nota {ag}: {x['note']}")
+        elif a.mcmd == "suggest":
+            if a.files < 0: raise DoveError("--files precisa ser >= 0")
+            if a.agent: check_agent_name(a.agent)
+            s = models_suggest(a.task, a.kind, a.files, a.agent or "")
+            if a.json: print(json.dumps(s, ensure_ascii=False, separators=(",", ":"))); return
+            print(f"nivel: {s['tier']}")
+            for n, x in s["agents"].items():
+                if x["model"]: print(f"  {n:<8}{x['model']}" + (f" ({x['tier']}; {x['note']})" if x["note"] else ""))
+                else: print(f"  {n:<8}(sem modelo na tabela: a2a models set --agent {n} --model <id> --tier {s['tier']} --from {human_name()})")
+            print(f"motivo: regra {s['rule']}" + (f" (\"{s['match']}\")" if s["match"] else ""))
+            if s.get("hint"): print(f"sem models.json: {MODELS_HINT}")
+    except DoveError as e: fail(f"erro: {e}")
+
 # ---------------------------------------------------------------- arquivo (fios encerrados saem do bus; so o humano)
 MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 def msg_epoch(m):
@@ -2395,6 +2616,7 @@ Este projeto é trabalhado por vários agentes ao mesmo tempo, que se coordenam 
 - Conversa indo e voltando sem decisão? Pare e pergunte ao Luiz. `a2a loops --project <projeto> --agent <seu-nome>` mostra o que parece loop entre agentes (só leitura).
 - Informe seu contexto quando souber: `a2a status --agent <seu-nome> --set working --context <0-100>`; com 80%+ faça o handoff (abaixo).
 - Tokens e custo estimado do projeto (só leitura dos registros do Claude, Codex e Hermes): `a2a cost --project <projeto> --since 24h --by agente`.
+- Nível de modelo para uma tarefa: `a2a models suggest --task "<texto>"` (só sugere; em sessão interativa siga o modelo da sua sessão; a tabela `models.json` é só do Luiz).
 
 ### Contexto e handoff
 Ao passar de 80% de contexto:
@@ -4113,6 +4335,41 @@ def build_parser():
     x.add_argument("--project", required=True); x.add_argument("--from", dest="_from", required=True, help="o humano")
     x.add_argument("--dry-run", dest="dry_run", action="store_true")
     fc.set_defaults(func=cmd_fact)
+    mo = sub.add_parser("models", help="tabela de modelos por agente (nivel e preco) e sugestao de nivel por tarefa",
+        description="Tabela editavel em ~/.a2a/models.json: para cada agente, os modelos com nivel (rapido < equilibrado < "
+        "forte < forte+) e o padrao; precos em US$ por milhao de tokens so quando o humano grava. init, set e price sao so do "
+        "humano. Claude usa os aliases do --model do Claude Code (haiku, sonnet, opus, fable; "
+        "https://code.claude.com/docs/en/cli-reference). Codex e Hermes: o init le o modelo configurado em "
+        "$CODEX_HOME/config.toml (~/.codex) e $HERMES_HOME/config.yaml (~/.hermes; Windows %LOCALAPPDATA%\\hermes) e marca nivel ?, "
+        "para o humano classificar; nenhum nome de modelo desses provedores fica no codigo. suggest e deterministico (sem IA): "
+        "triagem, resumo, status, perguntas e docs -> rapido; codigo, testes e refatoracao pequena -> equilibrado; arquitetura, "
+        "seguranca, refatoracao em varios arquivos, falha dificil e contexto longo -> forte. So sugere: nao executa nada.", **ex(
+        "a2a models init --from luiz",
+        "a2a models list",
+        "a2a models set --agent codex --model <id-do-config> --tier equilibrado --default --from luiz",
+        "a2a models price --agent claude --model sonnet --input X --output Y --cache-read Z --from luiz",
+        'a2a models suggest --task "resumir o status da missao"',
+        'a2a models suggest --task "corrigir o handler do webhook e os testes" --files 2 --agent claude',
+        'a2a models suggest --task "revisao de seguranca do login" --json'))
+    mos = mo.add_subparsers(dest="mcmd", required=True)
+    x = mos.add_parser("init", help="cria ~/.a2a/models.json (so o humano): aliases do Claude + modelo configurado do Codex/Hermes")
+    x.add_argument("--from", dest="_from", required=True, help="o humano"); x.add_argument("--force", action="store_true", help="recria (descarta edicoes)")
+    x = mos.add_parser("list", help="a tabela (sem models.json: os aliases do Claude embutidos)"); x.add_argument("--json", action="store_true")
+    x = mos.add_parser("set", help="cadastra ou reclassifica um modelo de um agente (so o humano)")
+    x.add_argument("--agent", required=True); x.add_argument("--model", required=True)
+    x.add_argument("--tier", required=True, choices=MODEL_TIERS); x.add_argument("--default", action="store_true", help="vira o padrao do agente")
+    x.add_argument("--from", dest="_from", required=True, help="o humano")
+    x = mos.add_parser("price", help="grava o preco (US$ por milhao de tokens) de um modelo da tabela (so o humano)")
+    x.add_argument("--agent", required=True); x.add_argument("--model", required=True)
+    x.add_argument("--input", type=float, required=True); x.add_argument("--output", type=float, required=True)
+    x.add_argument("--cache-read", dest="cache_read", type=float); x.add_argument("--cache-write", dest="cache_write", type=float)
+    x.add_argument("--from", dest="_from", required=True, help="o humano")
+    x = mos.add_parser("suggest", help="nivel mais barato que serve para a tarefa e o modelo de cada agente (so sugere)")
+    x.add_argument("--task", required=True, metavar="TEXTO", help="o texto da tarefa")
+    x.add_argument("--kind", choices=["task", "question", "report", "correction", "ack"], default="task")
+    x.add_argument("--files", type=int, default=0, help="quantos arquivos a tarefa toca (>=5 pede forte)")
+    x.add_argument("--agent", help="so este agente"); x.add_argument("--json", action="store_true")
+    mo.set_defaults(func=cmd_models)
     ins = sub.add_parser("instructions", help="nucleo do Dove nos arquivos globais de instrucoes dos agentes (todos os projetos)",
         description="Grava o nucleo do Dove (a2a onboard --agent X --global-core) entre os marcadores "
         f"'{INSTR_BEGIN}' e '{INSTR_END}' no arquivo de instrucoes que cada agente carrega em toda sessao, em qualquer pasta: "

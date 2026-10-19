@@ -192,6 +192,34 @@ a2a fact prune --project lagu --from luiz [--dry-run]   # move vencidos/condensa
 - **Fato é dado, não ordem:** não vai para o bus, não acorda ninguém, não autoriza merge, deploy, migração em produção, gasto ou exclusão. O `brief` mostra o texto entre aspas. Não grave segredo, senha, token nem dado pessoal.
 - `add`/`expire`/`condense` renovam o heartbeat (sem mudar estado nem nota); `list` não. `brief --facts N` limita as linhas `F` (padrão 10; 0 = nenhuma). Sem `--project`, ou sem memória do projeto, o `brief` sai idêntico ao de antes. Para desfazer: apague ou renomeie `~/.a2a/memory/`.
 
+## Tabela de modelos e sugestão por tarefa (`a2a models`)
+Usar o modelo mais barato que dá conta da tarefa, a partir de uma tabela que só o Luiz edita, sem preço nem nome de modelo inventado. Fica em `~/.a2a/models.json` e só nasce com `a2a models init --from luiz`.
+
+```
+a2a models init --from luiz             # cria a tabela (--force recria e descarta edicoes)
+# tabela criada em ~/.a2a/models.json
+#   claude  haiku (rapido), sonnet (equilibrado), opus (forte), fable (forte+)
+#   codex   <modelo do config.toml> (?) — nivel ? : classifique com a2a models set
+#   hermes  (nenhum) — modelo nao encontrado em ~/.hermes/config.yaml; cadastre com a2a models set
+a2a models set --agent codex --model <id> --tier equilibrado --default --from luiz
+a2a models price --agent claude --model sonnet --input X --output Y [--cache-read Z] [--cache-write W] --from luiz
+a2a models list [--json]
+# agente  modelo      nivel        padrao  preco US$/Mtok (in · out · cache leit/escr)
+# claude  haiku       rapido               sem preço
+# claude  sonnet      equilibrado  *       sem preço
+a2a models suggest --task "revisao de seguranca do login" [--kind task|question|report] [--files N] [--agent A] [--json]
+# nivel: forte
+#   claude  opus
+#   codex   <id> (equilibrado; nenhum modelo classificado com nivel >= forte: usando o padrao do agente)
+# motivo: regra revisao de seguranca ("seguranca")
+```
+- **Níveis:** `rapido` < `equilibrado` < `forte` < `forte+`; `?` = o humano ainda não classificou (o `suggest` não escolhe um `?` por nível, só como padrão do agente).
+- **Claude:** os aliases do `--model` do Claude Code — `haiku`, `sonnet`, `opus`, `fable` (conferidos em [cli-reference](https://code.claude.com/docs/en/cli-reference) e [model-config#model-aliases](https://code.claude.com/docs/en/model-config#model-aliases)); padrão `sonnet`.
+- **Codex e Hermes:** nenhum nome de modelo no código. O `init` lê o modelo configurado: `model = "..."` no topo de `$CODEX_HOME/config.toml` (padrão `~/.codex`) e `model:` no topo de `$HERMES_HOME/config.yaml` (padrão `~/.hermes`; Windows nativo `%LOCALAPPDATA%\hermes`; se `model:` abre um bloco, usa a chave `default:` dele), com nível `?`. Não achou: lista vazia com nota.
+- **Preços:** vazios até o Luiz gravar (`price`, US$ por milhão de tokens). Servem só para o futuro `a2a cost` estimar fontes sem custo próprio (Codex), sempre com o rótulo "estimado (tabela do Luiz)".
+- **Regras do `suggest`** (determinísticas, sem IA; texto sem acento e em minúsculas; a primeira que casa decide, de forte para rápido): arquitetura/design, revisão de segurança, refatoração em vários arquivos, depurar falha difícil (flaky, race condition, deadlock, vazamento...), contexto longo (ou texto com mais de 4.000 caracteres) → `forte`; testes, refatoração pequena, mudança de código → `equilibrado`; triagem/resumo/status, perguntas, docs → `rapido`. Nada casou: `task` → `equilibrado`, outros kinds → `rapido`; `--kind ack` → `rapido`. `--files 5+` sobe para `forte`; `--files 2-4` tira do `rapido`. Para cada agente, o modelo classificado mais barato com nível ≥ o sugerido (o padrão desempata).
+- `init`, `set` e `price` são só do humano. `list` e `suggest` só leem; sem `models.json`, funcionam com os aliases do Claude embutidos e dizem "rode a2a models init para personalizar". O `suggest` só sugere: não executa nada. Para desfazer: apague `~/.a2a/models.json`.
+
 ## Arquivos por referência (`send --file`)
 Para apontar código, a mensagem cita o arquivo em vez de colar o conteúdo no `--body` (colar é caro e fica desatualizado):
 ```
@@ -592,6 +620,10 @@ a2a loops [--project P] [--agent X] [--since H] [--json] [--strict]
 | `cost [--since 7d\|24h\|AAAA-MM-DD] [--project P] [--agent claude\|codex\|hermes] [--by agente\|projeto\|modelo\|dia\|sessao] [--mission ID] [--json]` | tokens (entrada, saída, cache lido/escrito, cache%) e custo estimado quando a fonte grava, lidos (só leitura) dos registros do Claude Code, Codex e Hermes; `n/d` sem custo na fonte |
 | `watch stop --from luiz [--kill]` · `watch resume --from luiz` | kill switch do vigia: cria / apaga `~/.a2a/STOP` (nada novo começa; `--kill` mata já as execuções em curso); só o humano |
 | `watch status` · `watch runs [--last N] [--agent X] [--json]` | STOP, vigia e execuções em curso / registros das execuções (`runs/AAAA-MM/`) |
+| `models init --from luiz [--force]` | cria `~/.a2a/models.json`: aliases do Claude Code + modelo configurado do Codex/Hermes com nível `?` (só o humano) |
+| `models set --agent A --model M --tier rapido\|equilibrado\|forte\|forte+ [--default] --from luiz` · `models price --agent A --model M --input X --output Y [--cache-read Z] [--cache-write W] --from luiz` | classifica um modelo / grava o preço em US$ por milhão de tokens (só o humano) |
+| `models list [--json]` | a tabela de modelos, níveis, padrão e preços (`sem preço` quando vazio) |
+| `models suggest --task "TEXTO" [--kind K] [--files N] [--agent A] [--json]` | nível mais barato que serve para a tarefa, o modelo de cada agente e a regra que casou (só sugere) |
 
 ## Envelope da mensagem (JSON)
 `data` (ISO 8601 UTC) · `task_id` · `msg_id` · `from` · `to` · `project` · `in_reply_to` · `kind` (task | report | question | correction | ack) · `state` (AGUARDANDO_ACEITE | ACEITO | EM_EXECUCAO | BLOQUEADO | AGUARDANDO_APROVACAO | EM_REVISAO | CONCLUIDO | CANCELADO) · `result` · `evidence` · `pending` · `next_action` · `body`
