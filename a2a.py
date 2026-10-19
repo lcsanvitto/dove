@@ -3117,7 +3117,7 @@ def hermes_config_path():
 def _watch_exe(agent, out, which):
     exe = WATCH_RUNNERS[agent]["exe"]; w = which(exe)
     if not w:
-        lvl = "PULADO" if not WATCH_RUNNERS[agent]["enabled"] else "ERRO"
+        lvl = "PULADO" if not agent_enabled(agent) else "ERRO"
         out.append((lvl, "executavel", f"{exe} nao encontrado no PATH" + ("" if lvl == "ERRO" else " (desabilitado no vigia)")))
         return None
     shim = " (shim .cmd/.bat do npm: o vigia chamaria via cmd.exe)" if w.lower().endswith((".cmd", ".bat")) else ""
@@ -3182,7 +3182,11 @@ def watch_check_hermes(which):
         m = re.search(r"^approvals:\s*\n(?:[ \t]+.*\n)*?[ \t]+mode:\s*['\"]?(\w+)", txt + "\n", re.M)
         if m: out.append(("OK", "aprovacoes", f"approvals.mode = {m.group(1)} ({p})"))
         else: out.append(("PULADO", "aprovacoes", f"approvals.mode nao encontrado em {p}"))
-    out.append(("AVISO", "vigia", "desabilitado no vigia ate o Luiz confirmar as flags de contencao"))
+    if hermes_enabled():
+        out.append(("AVISO", "vigia", "ligado por opt-in explicito (a2a watch hermes --enable --from <humano>); risco "
+                    "aceito pelo Luiz em 2026-10-19 ('quero arriscar'); sem sandbox de SO"))
+    else:
+        out.append(("AVISO", "vigia", "desabilitado no vigia (opt-in: a2a watch hermes --enable --from <humano>)"))
     return out
 WATCH_AGENT_CHECKS = {"claude": watch_check_claude, "codex": watch_check_codex, "hermes": watch_check_hermes}
 def watch_check_dove(project=None, agent=None):
@@ -3250,12 +3254,25 @@ WATCH_TRIGGER_KINDS = ("task", "question", "correction")  # report so quando res
 WATCH_PENDING = {}  # agentes habilitados na tabela mas que o vigia ainda nao pode acordar (nenhum: codex liberado na etapa 9)
 def watch_stop_path(): return STOP_FILE  # STOP_FILE e RUN_DIR vem do supervisor (etapa 6), mais abaixo
 def watch_lock_path(agent): return os.path.join(RUN_DIR, agent + ".json")
+def hermes_enabled(): return bool(load_config().get("hermes_enabled"))
+def hermes_opt_in(by, on):
+    """Liga/desliga o opt-in do hermes no vigia (etapa 12): so o humano, nunca sob A2A_RUNNER (require_human).
+    Risco aceito pelo Luiz em 2026-10-19 ("quero arriscar"); sem sandbox de SO, por isso desligado por padrao."""
+    require_human(by)
+    save_config(hermes_enabled=bool(on))
+    return bool(on)
+def agent_enabled(agent):
+    """enabled efetivo de um agente no vigia: hermes depende do opt-in do humano (etapa 12, hermes_enabled()); os
+    demais usam a tabela estatica (WATCH_RUNNERS[agente]["enabled"])."""
+    return hermes_enabled() if agent == "hermes" else bool(WATCH_RUNNERS.get(agent, {}).get("enabled"))
 def _secs(s):
     s = int(max(0, s)); return f"{s}s" if s < 60 else f"{s // 60}m" if s < 3600 else f"{s // 3600}h"
 def watch_disabled(agent):
     r = WATCH_RUNNERS.get(agent)
     if not r: return "sem executor no vigia"
-    if not r["enabled"]: return "desabilitado (ate o Luiz confirmar)"
+    if not agent_enabled(agent):
+        return ("desabilitado (etapa 12: opt-in com a2a watch hermes --enable --from <humano>)" if agent == "hermes"
+                else "desabilitado (ate o Luiz confirmar)")
     if agent in WATCH_PENDING: return f"desabilitado ({WATCH_PENDING[agent]})"
     return ""
 def watch_git_dirty(path):
@@ -4279,9 +4296,13 @@ def run_records(last=20, agent=None):
         if last and len(out) >= last: break
     return out
 def watch_supervisor(a):
-    """a2a watch stop|resume|runs|status (o check fica no cmd_watch)."""
+    """a2a watch stop|resume|runs|status|hermes (o check fica no cmd_watch)."""
     try:
-        if a.wcmd == "stop":
+        if a.wcmd == "hermes":
+            on = hermes_opt_in(a._from, a.enable)
+            print(f"opt-in do hermes no vigia: {'ligado' if on else 'desligado'} (por {a._from})"
+                  + ("" if on else " — o vigia continua recusando o hermes"))
+        elif a.wcmd == "stop":
             killed = watch_stop(a._from, a.kill)
             print(f"STOP criado ({STOP_FILE}): nenhuma execucao nova; as em curso param em ate 1s + {RUN_GRACE:g}s"
                   + ("" if a.kill else " (use --kill para encerrar ja)"))
@@ -5069,7 +5090,8 @@ def build_parser():
         description="Confere se o vigia poderia rodar cada agente, sem chamar nenhum modelo: so roda `--version`, `--help` e "
         "`claude auth status`, com timeout curto. Por agente: executavel no PATH, versao; claude: login (assinatura x chave "
         "de API e o efeito no --bare), --permission-prompts no --help, CLAUDE_CODE_USE_POWERSHELL_TOOL; codex: [windows] "
-        "sandbox no config.toml (no Windows); hermes: versao e approvals.mode, sempre desabilitado no vigia. Dove: tabela sem "
+        "sandbox no config.toml (no Windows); hermes: versao e approvals.mode, desabilitado no vigia ate o opt-in explicito "
+        "do humano (etapa 12: a2a watch hermes --enable). Dove: tabela sem "
         "padroes proibidos, ~/.a2a/STOP, A2A_RUNNER e, com --project, a copia de trabalho de cada agente registrado (limpa). "
         "Niveis: OK, AVISO, ERRO, PULADO; sai 1 se houver ERRO. --show-command so imprime o comando exato do vigia.", **ex(
         "a2a watch check", "a2a watch check --project lagu", "a2a watch check --project lagu --agent codex --json",
@@ -5079,6 +5101,14 @@ def build_parser():
     x.add_argument("--json", action="store_true", help="resultado em uma linha de JSON")
     x.add_argument("--show-command", dest="show_command", action="store_true",
                    help="imprime o argv exato que o vigia usaria (com a allowlist), sem rodar nada")
+    x = was.add_parser("hermes", help="liga/desliga o opt-in do hermes no vigia (etapa 12, risco aceito pelo Luiz; so o humano)",
+        description="Grava hermes_enabled em ~/.a2a/config.json. So o humano (require_human: nunca sob A2A_RUNNER, nem um "
+        "agente nao pode se auto-habilitar). Risco aceito pelo Luiz em 2026-10-19 ('quero arriscar'); sem sandbox de SO "
+        "(approvals.mode do hermes so reduz o risco), por isso desligado por padrao.", **ex(
+        "a2a watch hermes --enable --from luiz", "a2a watch hermes --disable --from luiz"))
+    g = x.add_mutually_exclusive_group(required=True)
+    g.add_argument("--enable", action="store_true"); g.add_argument("--disable", action="store_true")
+    x.add_argument("--from", dest="_from", required=True, help="o humano (acao so do humano)")
     x = was.add_parser("stop", help="cria ~/.a2a/STOP: nada novo comeca e as execucoes em curso param (so o humano)")
     x.add_argument("--from", dest="_from", required=True, help="o humano (acao so do humano)")
     x.add_argument("--kill", action="store_true", help="tambem mata ja a arvore de processos das execucoes em curso")

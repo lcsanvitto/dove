@@ -2195,7 +2195,8 @@ def watch_fase():
     assert r[("claude", "auth")][0] == "OK" and "assinatura" in r[("claude", "auth")][1] and "--bare" in r[("claude", "auth")][1], r
     assert r[("claude", "--permission-prompts")][0] == "OK" and r[("codex", "sandbox")][0] == "OK", r
     assert r[("codex", "commit")][0] == "AVISO" and ".git so leitura" in r[("codex", "commit")][1], r
-    assert r[("hermes", "versao")][0] == "OK" and r[("hermes", "vigia")] == ("AVISO", "desabilitado no vigia ate o Luiz confirmar as flags de contencao"), r
+    assert r[("hermes", "versao")][0] == "OK" and r[("hermes", "vigia")] == (
+        "AVISO", "desabilitado no vigia (opt-in: a2a watch hermes --enable --from <humano>)"), r
     assert r[("dove", "tabela")][0] == "OK" and r[("dove", "STOP")][0] == "OK" and ("dove", "A2A_RUNNER") not in r, r
     out, _ = check(code=0)
     assert out.startswith("dove watch check - ") and "OK     claude: versao: 2.1.300 (Claude Code)\n" in out and "-- " in out, out
@@ -2410,10 +2411,15 @@ def plan_fase():
     h.msg("luiz", "claude", 0, project=""); h.msg("luiz", "claude", 0, project="naoreg")
     r = h.plan(200)
     assert r[("codex", "lagu")]["reason"] == "sem copia de trabalho (a2a worktree create)", r[("codex", "lagu")]
-    assert r[("hermes", "lagu")]["reason"] == "desabilitado (ate o Luiz confirmar)", r[("hermes", "lagu")]
+    assert r[("hermes", "lagu")]["reason"] == "desabilitado (etapa 12: opt-in com a2a watch hermes --enable --from <humano>)", r[("hermes", "lagu")]
     assert r[("claude", "")]["reason"] == "sem projeto" and r[("claude", "naoreg")]["reason"].startswith("sem copia de trabalho (projeto nao registrado"), r
     assert "sem copia de trabalho (a2a worktree create)" in r[("codex", "lagu")]["reasons"], r[("codex", "lagu")]
     assert r[("claude", "lagu")]["action"] == "RODARIA"
+    # etapa 12: opt-in liga a elegibilidade do hermes no vigia (so falta a copia de trabalho, como o codex)
+    json.dump({"hermes_enabled": True}, open(os.path.join(h.home, "config.json"), "w"))
+    r2 = h.plan(200)
+    assert r2[("hermes", "lagu")]["reason"] == "sem copia de trabalho (a2a worktree create)", r2[("hermes", "lagu")]
+    os.remove(os.path.join(h.home, "config.json"))
     open(os.path.join(h.home, "STOP"), "w").close()
     r = h.plan(200); assert all(d["reason"].startswith("STOP presente") for d in r.values()), r
     os.remove(os.path.join(h.home, "STOP"))
@@ -2976,6 +2982,27 @@ def supervisor_fase():
     a2a("watch", "resume", "--from", "luiz")
     print("OK: vigia - STOP presente recusa (registro refused); STOP criado no meio para a execucao; stop/resume so do humano "
           "e recusados (codigo 2) sob A2A_RUNNER")
+
+    # etapa 12: opt-in do hermes no vigia - desligado por padrao, so o humano, recusado sob A2A_RUNNER
+    cfg = os.path.join(tmp, "config.json")
+    r = a2a("watch", "hermes", "--enable", "--from", "codex")
+    assert r.returncode == 1 and "so o humano" in r.stderr, r.stderr
+    assert not os.path.exists(cfg) or not json.load(open(cfg)).get("hermes_enabled")
+    r = a2a("watch", "hermes", "--enable", "--from", "luiz", e=renv)
+    assert r.returncode == 2 and "A2A_RUNNER" in r.stderr, r.stderr
+    assert not os.path.exists(cfg) or not json.load(open(cfg)).get("hermes_enabled")
+    r = a2a("watch", "hermes", "--enable", "--from", "luiz")
+    assert r.returncode == 0 and "ligado" in r.stdout, r
+    assert json.load(open(cfg))["hermes_enabled"] is True
+    out, rc = drive("resolve", {"agent": "hermes"}, noov)
+    assert rc == 0 and out != [sys.executable, fake] and "hermes" in " ".join(out).lower(), out
+    r = a2a("watch", "hermes", "--disable", "--from", "luiz")
+    assert r.returncode == 0 and "desligado" in r.stdout, r
+    assert json.load(open(cfg))["hermes_enabled"] is False
+    out, rc = drive("resolve", {"agent": "hermes"}, noov)
+    assert rc == 1 and "executor real ainda nao habilitado" in out["error"], out
+    print("OK: vigia - opt-in do hermes (etapa 12): desligado por padrao, so o humano liga/desliga, recusado sob "
+          "A2A_RUNNER, e muda o resolve_runner (hermes recusado -> resolve pra valer -> recusado de novo) na hora")
 
     # trava por agente: segunda execucao do mesmo agente recusada; outro agente roda; watch stop --kill derruba ja
     p = drive("run", job(fm="stubborn", timeout=60, grace=30), bg=True)
