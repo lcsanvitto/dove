@@ -2,7 +2,7 @@
 
 > **Sessão nova? Comece por [`docs/HANDOFF.md`](HANDOFF.md)** — contexto, regras e próximos passos para retomar sem reexplicar.
 
-Estado em 2026-10-19 · base `main` em 38d8b13.
+Estado em 2026-10-19 · base `main` em 96e904c.
 
 ## 1. O que é o Dove
 Canal A2A local e global: os agentes (`claude`, `codex`, `hermes`) conversam e dividem trabalho por arquivos JSON em `~/.a2a`, sem nuvem.
@@ -57,7 +57,7 @@ Todos os passos têm aval do Luiz; o 12 foi aceito com risco em 2026-10-19 (desl
 | 6 | Supervisor: `STOP`, travas, timeout, Job Object | **FEITO** · 81a0e14 |
 | 7 | Vigia real, só com o `claude`, iniciado à mão | **FEITO** · 396cfd5 (+ filtro por `assignee` do passo 14, 38d8b13) |
 | 8 | Orçamento: `parse_run_usage`, `run_budget_cap`, `budget_status`, `budget_alerts`, `a2a mission budget`, `a2a cost budget`/`--budget`, `budgets.json`, `a2a watch usage` | **FEITO** · 7fca4c3 |
-| 9 | Codex no vigia (sandbox do Windows; sem commit) | próximo (aprovado) · 7 feito |
+| 9 | Codex no vigia (sandbox do Windows; sem commit) | **FEITO** · 96e904c |
 | 10 | `a2a models` (roteamento de modelo) | **FEITO** · 97ce044 |
 | 11 | Orquestrador (só leitura + mensagens) | próximo (aprovado) · 7 feito, depende também do 15 |
 | 12 | Hermes no vigia | **APROVADO COM RISCO** (Luiz, 2026-10-19: "quero arriscar"): desligado por padrão, só com opt-in explícito |
@@ -65,7 +65,13 @@ Todos os passos têm aval do Luiz; o 12 foi aceito com risco em 2026-10-19 (desl
 | 14 | `assignee` (responsável único) em missões e tarefas | **FEITO** · 38d8b13 (emenda ao passo 7) |
 | 15 | `parent` (missão-mãe) em missões | **APROVADO** (Luiz, 2026-10-19: "sim") · entra junto com o 11, depois do 7 |
 
-Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"). O passo 14 entrou depois (38d8b13) como **emenda** ao 7, não como pré-requisito: hoje o vigia acorda **só o `assignee`** quando ele está definido numa missão ou tarefa; sem o campo, continua acordando todo participante elegível, como antes. Os passos 9 e 11 seguem livres para usar a 7 atual.
+Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"). O passo 14 entrou depois (38d8b13) como **emenda** ao 7, não como pré-requisito: hoje o vigia acorda **só o `assignee`** quando ele está definido numa missão ou tarefa; sem o campo, continua acordando todo participante elegível, como antes. O passo 9 (96e904c) já usou a 7 atual para liberar o codex. O passo 11 segue livre para usar a 7 atual (depende também do 15).
+
+**Passo 9 — Codex no vigia** (**FEITO**, 96e904c):
+- `codex exec --json -s workspace-write -C <cópia> --add-dir <A2A_HOME> -` (já estava na tabela desde a etapa 7; só faltava liberar o gatilho).
+- Exige `[windows] sandbox = "elevated"` (ou `"unelevated"`) configurado; verificado por `a2a watch check` (`watch_check_codex`, etapa 5).
+- `workspace-write` deixa o gitdir da cópia só leitura: o codex nunca commita, entrega a mudança sem commit e reporta no canal.
+- Sequencial (`max_parallel=1`, igual ao 7); hermes continua recusado (etapa 12, opt-in).
 
 **Passo 14 — `assignee`** (**FEITO**, 38d8b13 — emenda ao 7, não pré-requisito dele):
 - Campo opcional `assignee` em missões (`a2a mission new --assignee`) e tarefas avulsas (`a2a send --kind task --assignee`): um único agente responsável, precisa ser participante registrado (nunca o humano, nunca reservado).
