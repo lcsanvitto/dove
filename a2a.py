@@ -1295,6 +1295,10 @@ def cmd_mission(a):
             print(f"reprovacao de '{a.agent}' registrada na missao {a.id} -> {mission_status(m)}")
         elif a.mcmd == "done":
             mission_done(a.id, a._from); print(f"missao {a.id} concluida (confirmada por {a._from})")
+        elif a.mcmd == "budget":
+            b = mission_budget(a.id, a._from, a.usd, a.tokens)["budget"]
+            print(f"orcamento da missao {a.id}: {usd_text(b['usd'])}" + (f" e {fmt_int(b['tokens'])} tokens" if b["tokens"] else "")
+                  + f" (estimado; definido por {b['set_by']})")
         elif a.mcmd == "list":
             ms = [m for m in all_missions() if not a.project or m.get("project") == a.project]
             if not ms: print("(nenhuma missao)"); return
@@ -1310,6 +1314,9 @@ def cmd_mission(a):
                 elif x["verdict"] == "approve": print(f"  {ag:<12} aprovado  {x['ts']}  evidencia: {x['evidence']}")
                 else: print(f"  {ag:<12} reprovado {x['ts']}  motivo: {x['reason']}")
             if v.get("human"): print(f"conclusao confirmada por {v['human']['by']} em {v['human']['ts']}")
+            if isinstance(v.get("budget"), dict):
+                st = budget_status(mission=v)
+                print(f"orcamento: {_budget_amount(st)} ({st['pct']:.0f}%, estimado)" + (" · esgotado" if st["exceeded"] else ""))
     except DoveError as e: fail(f"erro: {e}")
 
 # ---------------------------------------------------------------- "onde estamos" (resumo deterministico)
@@ -1361,6 +1368,7 @@ def cmd_summary(a):
     print("Missoes: " + ", ".join(f"{k} {v}" for k, v in s["missions"].items()))
     print("Ultimas conclusoes:" + ("" if s["recent_done"] else " -"))
     for d in s["recent_done"]: print(f"  - [{d['when']}] {d['who']}: {short(d['text'], 80)}")
+    for x in budget_alerts(a.project): print(f"! {x}")  # so com orcamento definido (sem ele, nada e lido)
 
 # ---------------------------------------------------------------- brief (resumo unico para o agente se atualizar)
 def msg_age(m):
@@ -1394,7 +1402,7 @@ def brief_data(agent, project=None, limit=20, width=100, stale_min=30, facts=10,
     if e["state"] == "blocked": alerts.append("bloqueado: " + (e["note"] or "(sem nota)"))
     if e["stale"]: alerts.append("sem sinal: " + e["note"])
     fl, fmore, falerts = facts_brief(agent, project, facts, FactCtx(msgs=msgs, missions={m["id"]: m for m in missions}))
-    alerts = falerts + alerts
+    alerts = falerts + alerts + budget_alerts(project, agent, missions=missions, days=bool(project))
     return {"agent": agent, "state": e["state"], "ctx": e["context"],
             "novas": len(unread), "abertas": len(tasks), "aval": len(mine),
             "new": [{"id": m["msg_id"], "from": m.get("from", ""), "kind": m.get("kind", ""),
@@ -3660,6 +3668,16 @@ def _cost_files(acc, root, pattern):
     acc.stats["read"] += len(out)
     return [p for _, p in out]
 
+def cost_scan(acc, agent=None):
+    """Passa os registros de cada CLI (so leitura) pelo acumulador; devolve as fontes."""
+    src = cost_sources()
+    for ag in COST_AGENTS:
+        if agent and ag != agent: continue
+        for root in src[ag]:
+            if ag == "claude": cost_claude(acc, root)
+            elif ag == "codex": cost_codex(acc, root)
+            else: cost_hermes(acc, root)
+    return src
 def cost_data(since=None, until=None, project=None, agent=None, by="agente", mission_id=None, now=None):
     now = time.time() if now is None else now
     by = COST_BY.get(by or "agente")
@@ -3674,13 +3692,7 @@ def cost_data(since=None, until=None, project=None, agent=None, by="agente", mis
         since, until = start, end
     elif since is None: since = parse_since("7d", now)
     acc = CostAcc(by, since, until, project, agent, mission)
-    src = cost_sources()
-    for ag in COST_AGENTS:
-        if agent and ag != agent: continue
-        for root in src[ag]:
-            if ag == "claude": cost_claude(acc, root)
-            elif ag == "codex": cost_codex(acc, root)
-            else: cost_hermes(acc, root)
+    src = cost_scan(acc, agent)
     rows = [cost_row(g) for g in acc.groups.values()]
     rows.sort(key=lambda r: r["key"] if by == "dia" else (-r["total"], r["key"]))
     tot = {"key": "total", **{f: 0 for f in COST_FIELDS}, "cost": 0.0, "tok_sessions": set(), "cost_sessions": set(), "sessions": set()}
@@ -3745,6 +3757,10 @@ def cost_lines(d):
     for e in f["errors"][:5]: out.append(f"aviso: {e}")
     return out
 def cmd_cost(a):
+    if getattr(a, "ccmd", None) == "budget": return cmd_cost_budget(a)
+    if a.budget:
+        try: print("\n".join(cost_budget_lines(a.project, a.mission))); return
+        except DoveError as e: fail(f"erro: {e}")
     try:
         since = parse_since(a.since) if a.since else None
         d = cost_data(since=since, project=a.project, agent=a.agent, by=a.by, mission_id=a.mission)
@@ -4204,6 +4220,13 @@ def watch_supervisor(a):
             if a.kill and not killed: print("  nenhuma execucao em curso")
         elif a.wcmd == "resume":
             print(f"STOP removido: execucoes liberadas" if watch_resume(a._from) else "STOP nao existia: nada a fazer")
+        elif a.wcmd == "usage":
+            r = watch_usage(a.run_id)
+            if a.json: print(json.dumps(r["usage"], ensure_ascii=False)); return
+            u = r["usage"]
+            print(f"{a.run_id} {r.get('agent', '?')} ({u['source']}): {usage_text(u)}")
+            if u.get("models"): print(f"modelos: {', '.join(u['models'])}")
+            print("gravado no campo usage do registro")
         elif a.wcmd == "runs":
             if a.last < 0: fail("erro: --last precisa ser >= 0")
             recs = run_records(a.last, a.agent)
@@ -4217,6 +4240,7 @@ def watch_supervisor(a):
                 code = "-" if r.get("exit_code") is None else r["exit_code"]
                 print(f"{r.get('started', '?')} {r.get('run_id', '?')} {r.get('agent', '?'):<10} {r.get('project') or '-':<12} "
                       f"{out:<12} codigo {code:<4} {dur:>8}" + (f"  {short(r['reason'], 80)}" if r.get("reason") else ""))
+                if isinstance(r.get("usage"), dict): print(f"    {usage_text(r['usage'])}")
         else:  # status
             st = read_json(STOP_FILE)
             if os.path.exists(STOP_FILE):
@@ -4233,6 +4257,407 @@ def watch_supervisor(a):
             for _, i, stale in runs:
                 print(f"  {i.get('agent', '?'):<10} run {i.get('run_id', '?')} projeto {i.get('project') or '-'} "
                       f"pid {i.get('child_pid', '-')} ha {fmt_age(i.get('ts'))} ({'trava velha' if stale else 'rodando'})")
+    except DoveError as e: fail(f"erro: {e}")
+
+# ---------------------------------------------------------------- consumo por execucao e orcamento (etapa 8 da Fase 3)
+# Consumo de uma execucao do vigia = o que a propria CLI imprimiu ou gravou ("tokens reportados"; "custo estimado" pela
+# fonte, nunca cobrado). Le runs/AAAA-MM/<run_id>.out (e o arquivo de uso do hermes); so grava o campo usage do registro
+# (a2a watch usage). Formatos (conferidos em 2026-10-19):
+#   claude -p --output-format json: um objeto type=result com usage (input_tokens, output_tokens,
+#     cache_creation_input_tokens, cache_read_input_tokens), total_cost_usd, session_id e modelUsage (por modelo, inclui
+#     subagentes: inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, costUSD; preferido quando
+#     existe). --output-format stream-json: JSONL; vale a ultima linha type=result. Sem ela (execucao parada), soma o
+#     usage das linhas type=assistant (uma vez por message.id), marca partial e o custo fica n/d.
+#     Fontes: code.claude.com/docs/en/headless e /agent-sdk/cost-tracking.
+#   codex exec --json: JSONL; turn.completed.usage = TOTAL da thread ate ali (codex-rs/exec/src/
+#     event_processor_with_jsonl_output.rs usage_from_last_total; um turno por exec): vale o ultimo, nao a soma.
+#     input_tokens inclui cached_input_tokens (entrada = input - cached); reasoning_output_tokens ja esta dentro de
+#     output_tokens (fica separado em "reasoning", so informativo). Sem custo na fonte: n/d, ou tokens x preco gravado
+#     pelo humano em a2a models (cost_source "tabela do Luiz"). Sem turn.completed: partial.
+#   hermes -z --usage-file: JSON (hermes_cli/oneshot.py _USAGE_KEYS): input_tokens, output_tokens, cache_read_tokens,
+#     cache_write_tokens, reasoning_tokens, estimated_cost_usd, model, session_id, partial/interrupted e, com tarefas
+#     auxiliares, auxiliary (somado aqui) e total_including_auxiliary.estimated_cost_usd (o custo usado).
+#     Caminho: campo usage_file do registro; senao <run_id>.usage.json ou <run_id>/usage.json ao lado do .out.
+BUDGETS = os.path.join(HOME, "budgets.json")  # orcamentos por projeto/dia e teto por execucao (so o humano grava)
+RUN_USD_MAX_DEFAULT = 0.50  # teto por execucao quando ninguem definiu (vira o --max-budget-usd do claude no vigia)
+BUDGET_WARN = 80            # % do orcamento: alerta "orcamento N%"; >= 100%: "orcamento esgotado"
+USAGE_LABEL = "tokens reportados; custo estimado"
+def home_path(p):
+    p = str(p or "")
+    return p if os.path.isabs(p) else os.path.join(HOME, p)
+def _usage_dict(source, vals, cost, models, session="", partial=False, **extra):
+    d = {f: _num(vals.get(f)) for f in COST_FIELDS}
+    d["total"] = sum(d[f] for f in COST_FIELDS)
+    d.update(cost_usd_est=None if cost is None else round(cost, 6), cost_source=None if cost is None else "fonte",
+             models=sorted({m for m in models if m}), source=source, partial=bool(partial), session_id=session or None, label=USAGE_LABEL, **extra)
+    return d
+def _json_rows(path):
+    """(formato, [dicts]): 'json' se o arquivo inteiro e um JSON; senao 'jsonl' (linhas JSON; o resto e ignorado)."""
+    try:
+        with open(path, "rb") as f: text = f.read().decode("utf-8", errors="replace")
+    except OSError: return "", []
+    s = text.strip()
+    if not s: return "", []
+    try:
+        whole = json.loads(s)
+        if isinstance(whole, dict): return "json", [whole]
+        if isinstance(whole, list): return "json", [x for x in whole if isinstance(x, dict)]
+    except ValueError: pass
+    rows = []
+    for line in s.splitlines():
+        line = line.strip()
+        if not line.startswith("{"): continue
+        try: d = json.loads(line)
+        except ValueError: continue
+        if isinstance(d, dict): rows.append(d)
+    return "jsonl", rows
+def _usage_claude(path):
+    fmt, rows = _json_rows(path)
+    src = "claude:" + ("json" if fmt == "json" else "stream-json")
+    result = next((d for d in reversed(rows) if d.get("type") == "result"), None)
+    session, models = "", set()
+    for d in rows:
+        if isinstance(d.get("session_id"), str) and not session: session = d["session_id"]
+        if d.get("type") == "system" and isinstance(d.get("model"), str): models.add(d["model"])
+    if result is not None:
+        if isinstance(result.get("session_id"), str): session = result["session_id"]
+        mu = result.get("modelUsage") if isinstance(result.get("modelUsage"), dict) else {}
+        mu = {m: v for m, v in mu.items() if isinstance(v, dict)}
+        if mu:  # inclui subagentes
+            g = lambda k: sum(_num(v.get(k)) for v in mu.values())
+            vals = {"input": g("inputTokens"), "output": g("outputTokens"), "cache_read": g("cacheReadInputTokens"),
+                    "cache_write": g("cacheCreationInputTokens")}
+            costs = [c for c in (_usd(v.get("costUSD")) for v in mu.values()) if c is not None]
+            cost = sum(costs) if costs else _usd(result.get("total_cost_usd"))
+            models |= set(mu)
+        else:
+            u = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+            vals = {"input": u.get("input_tokens"), "output": u.get("output_tokens"),
+                    "cache_read": u.get("cache_read_input_tokens"), "cache_write": u.get("cache_creation_input_tokens")}
+            cost = _usd(result.get("total_cost_usd"))
+        return _usage_dict(src, vals, cost, models, session, False, subtype=str(result.get("subtype") or ""))
+    seen = {}  # sem result (parada no meio): soma as mensagens, uma vez por message.id (o maior valor de cada campo)
+    for d in rows:
+        msg = d.get("message")
+        if d.get("type") != "assistant" or not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict): continue
+        if msg.get("model") == "<synthetic>": continue
+        u = msg["usage"]
+        v = {"input": _num(u.get("input_tokens")), "output": _num(u.get("output_tokens")),
+             "cache_read": _num(u.get("cache_read_input_tokens")), "cache_write": _num(u.get("cache_creation_input_tokens"))}
+        if isinstance(msg.get("model"), str): models.add(msg["model"])
+        k = msg.get("id") if isinstance(msg.get("id"), str) else f"#{len(seen)}"
+        prev = seen.get(k, {}); seen[k] = {f: max(prev.get(f, 0), v[f]) for f in COST_FIELDS}
+    if not seen and not any(d.get("type") == "system" for d in rows): return None
+    return _usage_dict(src, {f: sum(x[f] for x in seen.values()) for f in COST_FIELDS}, None, models, session, True)
+def _usage_codex(path):
+    _, rows = _json_rows(path)
+    last, session, seen_any = None, "", False
+    for d in rows:
+        t = d.get("type")
+        if t == "thread.started": session = str(d.get("thread_id") or session); seen_any = True
+        elif t in ("turn.started", "turn.failed"): seen_any = True
+        elif t == "turn.completed":
+            seen_any = True; last = d.get("usage") if isinstance(d.get("usage"), dict) else {}
+    if not seen_any: return None
+    u = last or {}
+    return _usage_dict("codex:exec-json", _codex_usage(u), None, (), session, last is None,
+                       reasoning=_num(u.get("reasoning_output_tokens")))
+def _usage_hermes(path):
+    d = read_json(path) if path else None
+    if not isinstance(d, dict): return None
+    aux = d.get("auxiliary") if isinstance(d.get("auxiliary"), dict) else {}
+    g = lambda k: _num(d.get(k)) + _num(aux.get(k))
+    vals = {"input": g("input_tokens"), "output": g("output_tokens"), "cache_read": g("cache_read_tokens"),
+            "cache_write": g("cache_write_tokens")}
+    tia = d.get("total_including_auxiliary") if isinstance(d.get("total_including_auxiliary"), dict) else {}
+    cost = _usd(tia.get("estimated_cost_usd"))
+    if cost is None: cost = _usd(d.get("estimated_cost_usd"))
+    sess = d.get("session_id") if isinstance(d.get("session_id"), str) else ""
+    return _usage_dict("hermes:usage-file", vals, cost, [d.get("model")] if isinstance(d.get("model"), str) else (), sess,
+                       bool(d.get("partial") or d.get("interrupted")), reasoning=g("reasoning_tokens"),
+                       cost_status=str(d.get("cost_status") or ""))
+def run_usage_file(rec):
+    """Arquivo de uso do hermes de uma execucao: usage_file do registro, senao ao lado do .out."""
+    if rec.get("usage_file"): return home_path(rec["usage_file"])
+    out = home_path(rec.get("stdout") or "")
+    base = out[:-4] if out.endswith(".out") else out
+    cands = (base + ".usage.json", os.path.join(os.path.dirname(out), str(rec.get("run_id") or ""), "usage.json"))
+    return next((p for p in cands if os.path.isfile(p)), cands[0])
+def parse_run_usage(agent, run_record):
+    """Consumo de uma execucao do vigia (so leitura): {input, output, cache_read, cache_write, total, cost_usd_est
+    (None = n/d), models, source, partial, session_id, label} ou None se a saida nao traz consumo reconhecivel.
+    agent: claude | codex | hermes; outro nome (ex.: orquestrador) tenta codex e depois claude."""
+    rec = run_record if isinstance(run_record, dict) else {}
+    agent = agent or rec.get("agent") or ""
+    if agent == "hermes": return _usage_priced(agent, rec, _usage_hermes(run_usage_file(rec)))
+    out = home_path(rec.get("stdout")) if rec.get("stdout") else ""
+    if not out or not os.path.isfile(out): return None
+    if agent == "claude": u = _usage_claude(out)
+    elif agent == "codex": u = _usage_codex(out)
+    else: u = _usage_codex(out) or _usage_claude(out)
+    return _usage_priced(agent, rec, u)
+def _argv_model(argv):
+    argv = [str(x) for x in (argv or [])]
+    for i, x in enumerate(argv):
+        if x in ("-m", "--model") and i + 1 < len(argv): return argv[i + 1]
+        if x.startswith("--model="): return x.split("=", 1)[1]
+    return ""
+def _usage_priced(agent, rec, u):
+    """Fonte sem custo (codex) e preco gravado pelo humano em a2a models (US$ por milhao de tokens) para o modelo da
+    execucao (-m/--model do argv, o unico modelo da saida, ou o padrao do agente na tabela): custo = tokens x preco,
+    cost_source "tabela do Luiz". Cache sem preco proprio usa o preco de entrada. Sem preco: fica n/d."""
+    if u is None or u.get("cost_usd_est") is not None: return u
+    model = _argv_model(rec.get("argv")) or (u["models"][0] if len(u.get("models") or []) == 1 else "")
+    t = models_load()[0]
+    if not model: model = ((t.get("agents") or {}).get(agent) or {}).get("default") or ""
+    p = model_price(agent, model, t) if model else None
+    if not isinstance(p, dict) or _usd(p.get("input")) is None or _usd(p.get("output")) is None: return u
+    pi, po = _usd(p["input"]), _usd(p["output"])
+    pr = _usd(p.get("cache_read")); pw = _usd(p.get("cache_write"))
+    cost = (u["input"] * pi + u["output"] * po + u["cache_read"] * (pi if pr is None else pr)
+            + u["cache_write"] * (pi if pw is None else pw)) / 1e6
+    return dict(u, cost_usd_est=round(cost, 6), cost_source="tabela do Luiz", price_model=model)
+def find_run_record(run_id):
+    if not RUN_ID_RE.match(run_id or ""): raise DoveError(f"run_id invalido: '{run_id}' (veja a2a watch runs)")
+    for f in sorted(glob.glob(os.path.join(RUNS_DIR, "*", run_id + ".json"))):
+        r = read_json(f)
+        if isinstance(r, dict) and MONTH_RE.match(os.path.basename(os.path.dirname(f))): return f, r
+    raise DoveError(f"execucao '{run_id}' nao encontrada (veja a2a watch runs)")
+def watch_usage(run_id):
+    """Rele a saida da execucao e grava o consumo no campo usage do registro (a unica escrita; o registro e do Dove)."""
+    path, rec = find_run_record(run_id)
+    live = {i.get("run_id") for _, i, stale in active_runs() if not stale}
+    if rec.get("outcome") == "running" and run_id in live:
+        raise DoveError(f"execucao {run_id} ainda em curso: rode de novo quando terminar")
+    u = parse_run_usage(rec.get("agent"), rec)
+    if u is None: raise DoveError(f"nenhum consumo reconhecido na saida de {run_id} ({rec.get('agent', '?')}); registro nao mudou")
+    with FileLock(path):
+        cur = read_json(path); cur = cur if isinstance(cur, dict) else rec
+        cur["usage"] = dict(u, parsed=now_iso()); write_json(path, cur)
+    return cur
+def usd_text(x): return fmt_usd({"cost_usd": x, "cost_partial": False})
+def usage_text(u):
+    """Uma linha: tokens reportados (e as quatro partes) e custo estimado (n/d quando a fonte nao grava)."""
+    t = (f"tokens reportados {fmt_int(_num(u.get('total')))} (entrada {fmt_int(_num(u.get('input')))}, saida "
+         f"{fmt_int(_num(u.get('output')))}, cache lido {fmt_int(_num(u.get('cache_read')))}, cache escrito "
+         f"{fmt_int(_num(u.get('cache_write')))}) · custo estimado {usd_text(_usd(u.get('cost_usd_est')))}"
+         + (" (tabela do Luiz)" if u.get("cost_source") == "tabela do Luiz" else ""))
+    return t + (" · parcial" if u.get("partial") else "")
+
+# ---- orcamentos: missao (campo budget no JSON da missao) e projeto/dia (budgets.json); so o humano define
+def load_budgets():
+    b = read_json(BUDGETS, {}); b = b if isinstance(b, dict) else {}
+    if not isinstance(b.get("projects"), dict): b["projects"] = {}
+    return b
+def _pos_usd(v, what):
+    try: x = float(v)
+    except (TypeError, ValueError): raise DoveError(f"{what} invalido: '{v}' (use um valor em dolares, ex.: 2 ou 0.5)")
+    if not x > 0 or x != x or x == float("inf"): raise DoveError(f"{what} precisa ser maior que zero")
+    return round(x, 6)
+def _pos_int(v, what):
+    try: x = int(v)
+    except (TypeError, ValueError): raise DoveError(f"{what} invalido: '{v}' (use um inteiro)")
+    if x <= 0: raise DoveError(f"{what} precisa ser maior que zero")
+    return x
+def mission_budget(mid, by, usd, tokens=None):
+    by = (by or "").strip(); require_human(by)
+    usd = _pos_usd(usd, "--usd"); tokens = _pos_int(tokens, "--tokens") if tokens is not None else None
+    with FileLock(mission_path(mid)):
+        m = load_mission(mid)
+        m["budget"] = {"usd": usd, "tokens": tokens, "set_by": by, "ts": now_iso()}
+        write_json(mission_path(mid), m)
+    return m
+def budget_set(by, project="", usd_day=None, tokens_day=None, run_usd_max=None):
+    """budgets.json: {"projects": {P: {usd_day, tokens_day, run_usd_max, set_by, ts}}, "run_usd_max", "set_by", "ts"}."""
+    by = (by or "").strip(); require_human(by)
+    project = (project or "").strip()
+    if usd_day is None and tokens_day is None and run_usd_max is None:
+        raise DoveError("nada a definir: use --usd-day, --tokens-day ou --run-usd-max (ou --show para ver)")
+    if (usd_day is not None or tokens_day is not None) and not project: raise DoveError("--usd-day/--tokens-day exigem --project")
+    vals = {}
+    if usd_day is not None: vals["usd_day"] = _pos_usd(usd_day, "--usd-day")
+    if tokens_day is not None: vals["tokens_day"] = _pos_int(tokens_day, "--tokens-day")
+    if run_usd_max is not None: vals["run_usd_max"] = _pos_usd(run_usd_max, "--run-usd-max")
+    os.makedirs(HOME, exist_ok=True)
+    with FileLock(BUDGETS):
+        b = load_budgets(); b.setdefault("v", 1)
+        tgt = b["projects"].setdefault(project, {}) if project else b
+        tgt.update(vals, set_by=by, ts=now_iso())
+        write_json(BUDGETS, b)
+    return b
+def run_usd_max(project=None, budgets=None):
+    """(teto por execucao, de onde veio): do projeto, senao o padrao do Dove definido pelo humano, senao 0.50."""
+    b = budgets or load_budgets()
+    pe = b["projects"].get(project or "") or {}
+    if _usd(pe.get("run_usd_max")): return float(pe["run_usd_max"]), f"projeto {project}"
+    if _usd(b.get("run_usd_max")): return float(b["run_usd_max"]), "padrao definido"
+    return RUN_USD_MAX_DEFAULT, "padrao do Dove"
+
+class _SessionAcc(CostAcc):
+    """Soma dos registros das CLIs por sessao (agente, sessao, projeto), para descontar as que ja estao nos runs."""
+    def key(self, r, pj): return (r["agent"], str(r.get("session") or ""), pj)
+def _run_in_scope(rec, since, until, project=None, mission=None):
+    t = iso_epoch(rec.get("started"))
+    if t is None or t < since or t > until: return False
+    if mission:
+        if "mission" in rec: return rec.get("mission") == mission["id"]  # o vigia grava a missao: vale exata
+        return rec.get("project") == mission["project"] and rec.get("agent") in mission["agents"]
+    return not project or rec.get("project") == project
+def budget_spent(since, until, project=None, mission=None):
+    """Gasto estimado no periodo. Execucoes do vigia: pelo registro (usage gravado, senao relido da saida). O resto: pelos
+    registros das CLIs (a2a cost), menos as sessoes cujo session_id ja veio de um registro do vigia (nao conta duas vezes)."""
+    sp = {"usd": 0.0, "tokens": 0, "usd_partial": False, "runs": 0, "sessions": 0}
+    sids = set()
+    for rec in run_records(0):
+        if not _run_in_scope(rec, since, until, project, mission): continue
+        u = rec.get("usage") if isinstance(rec.get("usage"), dict) else parse_run_usage(rec.get("agent"), rec)
+        if not u: continue
+        sp["runs"] += 1; sp["tokens"] += _num(u.get("total"))
+        c = _usd(u.get("cost_usd_est"))
+        if c is not None: sp["usd"] += c
+        elif _num(u.get("total")): sp["usd_partial"] = True
+        if u.get("session_id"): sids.add(str(u["session_id"]))
+    acc = _SessionAcc("sessao", since, until, None if mission else project, None, mission)
+    cost_scan(acc)
+    for g in acc.groups.values():
+        if g["key"][1] and g["key"][1] in sids: continue
+        tok = sum(g[f] for f in COST_FIELDS)
+        sp["sessions"] += 1; sp["tokens"] += tok
+        if g["cost_sessions"]: sp["usd"] += g["cost"]
+        if g["tok_sessions"] - g["cost_sessions"]: sp["usd_partial"] = True
+    sp["usd"] = round(sp["usd"], 6)
+    return sp
+def _day_start(now): return datetime.fromtimestamp(now, timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+def budget_status(project=None, mission=None, now=None):
+    """Orcamento x gasto (estimado). mission (id ou dict): janela da criacao ate a conclusao do humano (ou agora);
+    senao project: o dia corrente (UTC). Sem orcamento definido: has_budget False e nada e lido.
+    -> {scope, id, project, from, to, limit{usd,tokens}, spent{usd,tokens,usd_partial,runs,sessions}|None,
+        remaining{usd,tokens}|None, pct, warn, exceeded, label}"""
+    now = time.time() if now is None else now
+    if mission:
+        m = mission if isinstance(mission, dict) else load_mission(mission)
+        lim = m.get("budget") if isinstance(m.get("budget"), dict) else {}
+        since = iso_epoch(m.get("created")) or 0.0
+        until = iso_epoch((m.get("human") or {}).get("ts")) or now
+        mm = {"id": m["id"], "project": m.get("project"), "agents": list(m.get("agents") or [])}
+        st = {"scope": "missao", "id": m["id"], "project": m.get("project") or ""}
+        limit = {"usd": _usd(lim.get("usd")), "tokens": _num(lim.get("tokens")) or None}
+    elif project:
+        e = load_budgets()["projects"].get(project) or {}
+        since, until, mm = _day_start(now), now, None
+        st = {"scope": "projeto_dia", "id": project, "project": project}
+        limit = {"usd": _usd(e.get("usd_day")), "tokens": _num(e.get("tokens_day")) or None}
+    else: raise DoveError("budget_status: informe project ou mission")
+    st.update({"from": epoch_iso(since), "to": epoch_iso(until), "limit": limit, "spent": None, "remaining": None,
+               "pct": None, "warn": False, "exceeded": False, "label": "estimado"})
+    st["has_budget"] = limit["usd"] is not None or limit["tokens"] is not None
+    if not st["has_budget"]: return st
+    sp = budget_spent(since, until, None if mm else project, mm)
+    rem = {"usd": None if limit["usd"] is None else round(max(limit["usd"] - sp["usd"], 0.0), 6),
+           "tokens": None if limit["tokens"] is None else max(limit["tokens"] - sp["tokens"], 0)}
+    pcts = []
+    if limit["usd"]: pcts.append(sp["usd"] / limit["usd"] * 100)
+    if limit["tokens"]: pcts.append(sp["tokens"] / limit["tokens"] * 100)
+    pct = round(max(pcts), 1) if pcts else 0.0
+    exceeded = (limit["usd"] is not None and sp["usd"] >= limit["usd"]) or \
+               (limit["tokens"] is not None and sp["tokens"] >= limit["tokens"])
+    st.update(spent=sp, remaining=rem, pct=pct, warn=pct >= BUDGET_WARN, exceeded=bool(exceeded))
+    return st
+def run_budget_cap(project=None, mission=None, now=None):
+    """Teto em US$ para a proxima execucao (o --max-budget-usd do claude no vigia, etapa 7): o menor entre o teto por
+    execucao (projeto, padrao definido ou 0.50), o que resta do orcamento da missao e o que resta do dia do projeto.
+    Orcamento esgotado (inclusive o de tokens) -> 0.0."""
+    m = load_mission(mission) if isinstance(mission, str) and mission else mission
+    project = project or (m.get("project") if isinstance(m, dict) else None)
+    caps = [run_usd_max(project)[0]]
+    for st in ([budget_status(mission=m, now=now)] if m else []) + ([budget_status(project=project, now=now)] if project else []):
+        if not st["has_budget"]: continue
+        if st["exceeded"]: return 0.0
+        if st["remaining"]["usd"] is not None: caps.append(st["remaining"]["usd"])
+    return round(max(min(caps), 0.0), 6)
+def budget_targets(project=None, agent=None, missions=None, days=True):
+    """Orcamentos definidos (sem ler registros): [("missao", dict)] das missoes abertas com budget e [("projeto_dia", P)]."""
+    out = []
+    for m in (all_missions() if missions is None else missions):
+        if m.get("human") or not isinstance(m.get("budget"), dict): continue
+        if project and m.get("project") != project: continue
+        if agent and agent not in (m.get("agents") or []): continue
+        out.append(("missao", m))
+    if days:
+        for pj, e in sorted(load_budgets()["projects"].items()):
+            if (project and pj != project) or not isinstance(e, dict): continue
+            if _usd(e.get("usd_day")) is not None or _num(e.get("tokens_day")): out.append(("projeto_dia", pj))
+    return out
+def _budget_amount(st):
+    sp, lim, parts = st["spent"], st["limit"], []
+    if lim["usd"] is not None: parts.append(f"{usd_text(sp['usd'])}{'*' if sp['usd_partial'] else ''} de {usd_text(lim['usd'])}")
+    if lim["tokens"] is not None: parts.append(f"{fmt_int(sp['tokens'])} de {fmt_int(lim['tokens'])} tokens")
+    return "; ".join(parts)
+def budget_label(st): return f"missao {st['id']}" if st["scope"] == "missao" else f"projeto {st['id']} hoje"
+def budget_alert_line(st):
+    if st["exceeded"]: return f"orcamento esgotado: {budget_label(st)} ({_budget_amount(st)}, estimado)"
+    return f"orcamento {st['pct']:.0f}%: {budget_label(st)} ({_budget_amount(st)}, estimado)"
+def budget_alerts(project=None, agent=None, now=None, missions=None, days=True):
+    """Linhas de alerta (>= 80% ou esgotado) dos orcamentos definidos. Sem orcamento: [] sem ler nenhum registro."""
+    out = []
+    for kind, x in budget_targets(project, agent, missions, days):
+        try: st = budget_status(mission=x, now=now) if kind == "missao" else budget_status(project=x, now=now)
+        except DoveError: continue
+        if st["has_budget"] and (st["warn"] or st["exceeded"]): out.append(budget_alert_line(st))
+    return out
+def cost_budget_lines(project=None, mission=None, now=None):
+    if mission: targets = [("missao", load_mission(mission))]
+    else: targets = budget_targets(project)
+    cap, src = run_usd_max(project)
+    out = ["orcamento x gasto · estimado (tokens reportados; custo estimado pela fonte, nao e o valor cobrado)"]
+    rows = []
+    for kind, x in targets:
+        st = budget_status(mission=x, now=now) if kind == "missao" else budget_status(project=x, now=now)
+        if not st["has_budget"]: out.append(f"{budget_label(st)}: sem orcamento definido"); continue
+        sp, lim, rem = st["spent"], st["limit"], st["remaining"]
+        state = "esgotado" if st["exceeded"] else (f"alerta {BUDGET_WARN}%" if st["warn"] else "ok")
+        rows.append([budget_label(st) + ("" if kind == "missao" else f" ({st['from'][:10]})"),
+                     "-" if lim["usd"] is None else usd_text(lim["usd"]),
+                     usd_text(sp["usd"]) + ("*" if sp["usd_partial"] else ""),
+                     "-" if rem["usd"] is None else usd_text(rem["usd"]),
+                     "-" if lim["tokens"] is None else fmt_int(lim["tokens"]), fmt_int(sp["tokens"]),
+                     f"{st['pct']:.0f}%", state])
+    if rows:
+        cols = ("escopo", "limite", "gasto", "restante", "limite_tokens", "tokens", "uso", "estado")
+        ws = [max(len(c), *(len(r[i]) for r in rows)) for i, c in enumerate(cols)]
+        out.append("  ".join(c.ljust(ws[0]) if i == 0 else c.rjust(ws[i]) for i, c in enumerate(cols)))
+        for r in rows: out.append("  ".join(v.ljust(ws[0]) if i == 0 else v.rjust(ws[i]) for i, v in enumerate(r)))
+        if any(r[2].endswith("*") for r in rows): out.append("* parcial: ha uso sem custo na fonte (ex.: Codex); o gasto real pode ser maior")
+    elif not mission:
+        out.append(f"(nenhum orcamento definido: a2a cost budget --project P --usd-day 2 --from {human_name()} "
+                   f"ou a2a mission budget ID --usd 5 --from {human_name()})")
+    out.append(f"teto por execucao: {usd_text(cap)} ({src})")
+    out.append("gasto = execucoes do vigia (runs/) + registros das CLIs (a2a cost) sem contar duas vezes a mesma sessao")
+    return out
+def budget_show_lines():
+    b = load_budgets(); cap, src = run_usd_max(None, b)
+    out = [f"teto por execucao (padrao): {usd_text(cap)} ({src}" + (f", por {b['set_by']} em {b['ts']})" if src == "padrao definido" else ")")]
+    if not b["projects"]: out.append("projetos: nenhum orcamento diario definido")
+    for pj, e in sorted(b["projects"].items()):
+        parts = []
+        if _usd(e.get("usd_day")) is not None: parts.append(f"{usd_text(e['usd_day'])}/dia")
+        if _num(e.get("tokens_day")): parts.append(f"{fmt_int(e['tokens_day'])} tokens/dia")
+        if _usd(e.get("run_usd_max")): parts.append(f"teto por execucao {usd_text(e['run_usd_max'])}")
+        out.append(f"  {pj}: {', '.join(parts) or '-'} (por {e.get('set_by', '?')} em {e.get('ts', '?')})")
+    ms = [m for m in all_missions() if isinstance(m.get("budget"), dict)]
+    for m in ms:
+        bd = m["budget"]
+        out.append(f"  missao {m['id']} ({m.get('project', '')}): {usd_text(_usd(bd.get('usd')))}"
+                   + (f", {fmt_int(_num(bd.get('tokens')))} tokens" if bd.get("tokens") else "")
+                   + (" (concluida)" if m.get("human") else "") + f" (por {bd.get('set_by', '?')} em {bd.get('ts', '?')})")
+    out.append(f"arquivo: {BUDGETS} (dia = UTC; valores estimados)")
+    return out
+def cmd_cost_budget(a):
+    try:
+        if a.show: print("\n".join(budget_show_lines())); return
+        budget_set(a._from, a.b_project, a.usd_day, a.tokens_day, a.run_usd_max)
+        print(f"orcamento gravado em {BUDGETS}")
+        print("\n".join(budget_show_lines()[:-1]))
     except DoveError as e: fail(f"erro: {e}")
 
 class ExemplosFormatter(argparse.RawDescriptionHelpFormatter):
@@ -4346,7 +4771,7 @@ def build_parser():
     mi = sub.add_parser("mission", help="missoes com aval de todos os agentes", **ex(
         'a2a mission approve m3f9a2c1 --agent claude --evidence "rodei os testes de contrato: 48 ok"',
         'a2a mission reject m3f9a2c1 --agent claude --reason "falta o teste da assinatura antiga"',
-        "a2a mission list --project lagu"))
+        "a2a mission list --project lagu", "a2a mission budget m3f9a2c1 --usd 5 --from luiz"))
     ms = mi.add_subparsers(dest="mcmd", required=True)
     x = ms.add_parser("new"); x.add_argument("--project", required=True); x.add_argument("--title", required=True)
     x.add_argument("--desc", default=""); x.add_argument("--agents", help="a,b,c (padrao: todos os registrados)")
@@ -4356,6 +4781,14 @@ def build_parser():
     x = ms.add_parser("reject", **ex('a2a mission reject m3f9a2c1 --agent claude --reason "falta o teste da assinatura antiga"')); x.add_argument("id"); x.add_argument("--agent", required=True)
     x.add_argument("--reason", required=True)
     x = ms.add_parser("done", help="confirmacao final do humano"); x.add_argument("id")
+    x.add_argument("--from", dest="_from", required=True, help="o humano (acao so do humano)")
+    x = ms.add_parser("budget", help="define o orcamento da missao em US$ (estimado; so o humano)",
+        description="Grava budget: {usd, tokens, set_by, ts} no JSON da missao. O gasto (estimado) soma as execucoes do vigia "
+        "da missao e os registros das CLIs nas copias dos participantes, da criacao ate a conclusao. Aos 80% aparece "
+        "'orcamento 80%' no summary e no brief dos participantes; aos 100%, 'orcamento esgotado'.", **ex(
+        "a2a mission budget m4c1e9a0 --usd 5 --from luiz", "a2a mission budget m4c1e9a0 --usd 5 --tokens 2000000 --from luiz"))
+    x.add_argument("id"); x.add_argument("--usd", required=True, help="limite em dolares (custo estimado)")
+    x.add_argument("--tokens", type=int, help="limite opcional de tokens reportados")
     x.add_argument("--from", dest="_from", required=True, help="o humano (acao so do humano)")
     x = ms.add_parser("list"); x.add_argument("--project")
     x = ms.add_parser("show"); x.add_argument("id")
@@ -4450,7 +4883,8 @@ def build_parser():
         "O supervisor ainda nao roda executor real (claude/codex/hermes): so o executor de teste.", **ex(
         "a2a watch plan", "a2a watch --dry-run --once --verbose",
         "a2a watch check --project lagu", "a2a watch stop --from luiz", "a2a watch stop --from luiz --kill", "a2a watch resume --from luiz",
-        "a2a watch status", "a2a watch runs --last 5", "a2a watch runs --agent codex --json"))
+        "a2a watch status", "a2a watch runs --last 5", "a2a watch runs --agent codex --json",
+        "a2a watch usage 20261019T153000Z-a1b2c3"))
     def plan_args(x):
         x.add_argument("--project", help="so gatilhos deste projeto")
         x.add_argument("--agent", help="so este agente")
@@ -4498,6 +4932,13 @@ def build_parser():
     x.add_argument("--last", type=int, default=20, help="quantos (padrao 20; 0 = todos)"); x.add_argument("--agent")
     x.add_argument("--json", action="store_true", help="os registros em uma linha de JSON")
     was.add_parser("status", help="STOP, vigia rodando (watch.lock) e execucoes em curso (travas por agente)")
+    x = was.add_parser("usage", help="rele a saida de uma execucao e grava o consumo (tokens reportados, custo estimado) no registro",
+        description="Le runs/AAAA-MM/<run_id>.out (claude --output-format json ou stream-json; codex exec --json) ou o arquivo "
+        "--usage-file do hermes e grava no campo usage do registro: entrada, saida, cache lido/escrito, total, custo estimado "
+        "(n/d quando a fonte nao grava, ex.: codex), modelos e parcial (execucao parada antes do resultado final). "
+        "E a unica escrita: so no registro do proprio Dove.", **ex(
+        "a2a watch usage 20261019T153000Z-a1b2c3", "a2a watch usage 20261019T153000Z-a1b2c3 --json"))
+    x.add_argument("run_id"); x.add_argument("--json", action="store_true", help="o consumo em uma linha de JSON")
     wa.set_defaults(func=cmd_watch)
     o = sub.add_parser("onboard", help="imprime as instrucoes do canal para um agente ou para o AGENTS.md")
     og = o.add_mutually_exclusive_group(required=True)
@@ -4603,13 +5044,30 @@ def build_parser():
         "cobranca por token, e o Codex nao grava custo. --mission soma as sessoes nas copias de trabalho dos participantes "
         "dentro da janela da missao (aproximado).", **ex(
         "a2a cost", "a2a cost --since 24h --by modelo", "a2a cost --project lagu --by dia --since 2026-10-01",
-        "a2a cost --agent claude --by sessao", "a2a cost --mission m4c1e9a0 --by agente", "a2a cost --since 30d --json"))
+        "a2a cost --agent claude --by sessao", "a2a cost --mission m4c1e9a0 --by agente", "a2a cost --since 30d --json",
+        "a2a cost --budget", "a2a cost budget --project lagu --usd-day 2 --from luiz", "a2a cost budget --show"))
     co.add_argument("--since", help="periodo: 7d (padrao), 24h, 90m ou AAAA-MM-DD (UTC)")
     co.add_argument("--project", help="so este projeto registrado ('-' = sessoes fora de projeto registrado)")
     co.add_argument("--agent", choices=list(COST_AGENTS), help="so esta CLI")
     co.add_argument("--by", default="agente", type=lambda v: COST_BY.get(v, v), choices=sorted(set(COST_BY.values())), help="agrupar por agente (padrao), projeto, modelo, dia ou sessao")
     co.add_argument("--mission", metavar="ID", help="sessoes nas copias de trabalho dos participantes, na janela da missao (aproximado)")
     co.add_argument("--json", action="store_true")
+    co.add_argument("--budget", action="store_true", help="orcamento x gasto (estimado) dos orcamentos definidos (com --project/--mission: so esse)")
+    cos = co.add_subparsers(dest="ccmd", required=False, metavar="budget")
+    x = cos.add_parser("budget", help="orcamento por projeto/dia e teto por execucao (so o humano grava; --show para ver)",
+        description="Grava ~/.a2a/budgets.json (so o humano; recusado em execucao automatica). --usd-day/--tokens-day: limite "
+        "do projeto por dia (UTC), estimado. --run-usd-max: teto por execucao (com --project, so desse projeto); o vigia "
+        "passa ao claude como --max-budget-usd o menor entre esse teto, o que resta da missao e o que resta do dia. Sem "
+        "nada definido o teto e US$ 0,50. --show mostra tudo (inclusive os orcamentos de missao).", **ex(
+        "a2a cost budget --project lagu --usd-day 2 --from luiz", "a2a cost budget --project lagu --tokens-day 3000000 --from luiz",
+        "a2a cost budget --run-usd-max 0.75 --from luiz", "a2a cost budget --project lagu --run-usd-max 1 --from luiz",
+        "a2a cost budget --show", "a2a cost --budget"))
+    x.add_argument("--project", dest="b_project", default="", metavar="P", help="projeto do orcamento")
+    x.add_argument("--usd-day", dest="usd_day", metavar="X", help="limite em US$ por dia (UTC)")
+    x.add_argument("--tokens-day", dest="tokens_day", type=int, metavar="N", help="limite de tokens reportados por dia (UTC)")
+    x.add_argument("--run-usd-max", dest="run_usd_max", metavar="X", help=f"teto por execucao em US$ (padrao {RUN_USD_MAX_DEFAULT:.2f})")
+    x.add_argument("--from", dest="_from", default="", metavar="HUMANO", help="o humano (acao so do humano)")
+    x.add_argument("--show", action="store_true", help="so mostra os orcamentos (qualquer um pode)")
     co.set_defaults(func=cmd_cost)
     return p
 

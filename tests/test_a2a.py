@@ -3134,6 +3134,241 @@ def models_fase():
     print("OK: a2a models (init so do humano lendo CODEX_HOME/HERMES_HOME, set/price so do humano, list, suggest por nivel, "
           "sem tabela = aliases embutidos, --json, outros comandos iguais)")
 
+BUDGET_DRIVER = r"""
+import json, sys
+sys.path.insert(0, sys.argv[1]); import a2a
+mode, arg = sys.argv[2], json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}
+try:
+    if mode == "usage":
+        _, rec = a2a.find_run_record(arg["run_id"]); print(json.dumps(a2a.parse_run_usage(arg.get("agent") or rec["agent"], rec)))
+    elif mode == "status": print(json.dumps(a2a.budget_status(project=arg.get("project"), mission=arg.get("mission"))))
+    elif mode == "cap": print(json.dumps(a2a.run_budget_cap(project=arg.get("project"), mission=arg.get("mission"))))
+except a2a.DoveError as e:
+    print(json.dumps({"error": str(e)})); sys.exit(1)
+"""
+def budget_fase():
+    """Etapa 8 da Fase 3: consumo por execucao (claude json/stream-json/parado, codex exec --json cumulativo, hermes
+    --usage-file), watch usage grava no registro, orcamento de missao e de projeto/dia so do humano, budget_status com
+    runs + registros das CLIs sem contar duas vezes (session_id), run_budget_cap e alertas 80%/esgotado; sem orcamento,
+    nenhuma saida muda."""
+    from datetime import datetime, timezone
+    tmp = tempfile.mkdtemp(); work = tempfile.mkdtemp()
+    home = os.path.join(tmp, "a2a"); claude = os.path.join(tmp, "claude")
+    lagu = os.path.join(tmp, "lagu"); wt_claude = lagu + "-claude"; wt_codex = lagu + "-codex"
+    for d in (lagu, wt_claude, wt_codex): os.makedirs(d)
+    drv = os.path.join(work, "budget_driver.py"); open(drv, "w").write(BUDGET_DRIVER)
+    base = {k: v for k, v in os.environ.items() if k not in ("A2A_RUNNER", "A2A_RUN_ID", "A2A_TESTING", "A2A_RUNNER_OVERRIDE")}
+    env = dict(base, A2A_HOME=home, PYTHONIOENCODING="utf-8", CLAUDE_CONFIG_DIR=claude, CODEX_HOME=os.path.join(tmp, "codex"),
+               HERMES_HOME=os.path.join(tmp, "hermes"))
+    renv = dict(env, A2A_RUNNER="watch")
+    def a2a(*args, code=0, e=None):
+        r = subprocess.run([sys.executable, str(A2A), *args], capture_output=True, text=True, env=e or env)
+        assert r.returncode == code, (args, r.returncode, r.stdout, r.stderr)
+        return r.stdout + r.stderr
+    def drive(mode, arg, code=0):
+        r = subprocess.run([sys.executable, drv, str(ROOT), mode, json.dumps(arg)], capture_output=True, text=True, env=env)
+        assert r.returncode == code and r.stdout.strip(), (mode, arg, r.returncode, r.stdout, r.stderr)
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    a2a("init"); a2a("join", "--agent", "claude"); a2a("join", "--agent", "codex"); a2a("join", "--agent", "hermes")
+    a2a("project", "add", "lagu", lagu)
+    pj = os.path.join(home, "projects.json"); ps = json.load(open(pj))
+    ps[0]["worktrees"] = {"claude": {"path": wt_claude, "branch": "dove/claude", "base": "main"},
+                          "codex": {"path": wt_codex, "branch": "dove/codex", "base": "main"}}
+    json.dump(ps, open(pj, "w"))
+    mid = a2a("mission", "new", "--project", "lagu", "--title", "Frete", "--agents", "claude,codex", "--from", "luiz").split()[1]
+    a2a("send", "--from", "codex", "--to", "claude", "--project", "lagu", "--kind", "task", "--body", "revisar frete")
+    # sem orcamento: nenhuma saida muda (nem com runs e registros das CLIs presentes; conferido de novo abaixo)
+    age = lambda t: re.sub(r" \d+[smhd] ", " _ ", t)  # idade das mensagens no brief muda com o relogio
+    def outs():
+        return {k: age(v) for k, v in {"summary": a2a("summary"), "summary_p": a2a("summary", "--project", "lagu"),
+                "brief": a2a("brief", "--agent", "claude", "--no-auto-status"),
+                "brief_p": a2a("brief", "--agent", "claude", "--project", "lagu", "--no-auto-status"),
+                "show": a2a("mission", "show", mid), "list": a2a("mission", "list")}.items()}
+    time.sleep(1.1)
+    # ---- registros do vigia (fixtures no formato do run_agent) e transcricoes do Claude
+    T = time.time(); n = [0]
+    iso = lambda t: datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    def mkrun(agent, project, out, extra=None, usage_file=None):
+        n[0] += 1
+        rid = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(T)) + "-%06x" % (0xb00000 + n[0])
+        d = os.path.join(home, "runs", time.strftime("%Y-%m", time.gmtime(T))); os.makedirs(d, exist_ok=True)
+        if out is not None:
+            with open(os.path.join(d, rid + ".out"), "w", encoding="utf-8", newline="\n") as f:
+                f.write(out if isinstance(out, str) else "".join(json.dumps(x) + "\n" for x in out))
+        if usage_file is not None: json.dump(usage_file, open(os.path.join(d, rid + ".usage.json"), "w"))
+        rec = {"v": 1, "run_id": rid, "agent": agent, "project": project, "cwd": work, "argv": [agent], "started": iso(T),
+               "ended": iso(T), "duration_s": 1.0, "exit_code": 0, "outcome": "ok", "reason": "",
+               "stdout": os.path.join("runs", os.path.basename(d), rid + ".out"),
+               "stderr": os.path.join("runs", os.path.basename(d), rid + ".err"), "stderr_tail": "", "usage": None, **(extra or {})}
+        json.dump(rec, open(os.path.join(d, rid + ".json"), "w")); return rid
+    U = lambda i, o, cr, cw: {"input_tokens": i, "output_tokens": o, "cache_read_input_tokens": cr, "cache_creation_input_tokens": cw}
+    MU = lambda i, o, cr, cw, c: {"inputTokens": i, "outputTokens": o, "cacheReadInputTokens": cr, "cacheCreationInputTokens": cw,
+                                   "costUSD": c, "contextWindow": 200000}
+    r1 = mkrun("claude", "lagu", json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 3,
+        "session_id": "sess-c1", "total_cost_usd": 0.30, "usage": U(10, 100, 1000, 50),
+        "modelUsage": {"claude-opus-x": MU(10, 100, 1000, 50, 0.25), "claude-haiku-y": MU(5, 20, 0, 0, 0.05)}}))
+    a = lambda mid_, u, model="claude-sonnet-z": {"type": "assistant", "session_id": "sess-c2",
+                                                  "message": {"id": mid_, "model": model, "usage": u}}
+    r2 = mkrun("claude", "lagu", [{"type": "system", "subtype": "init", "session_id": "sess-c2", "model": "claude-sonnet-z"},
+        a("m1", U(3, 5, 100, 10)), a("m1", U(3, 7, 100, 10)),
+        {"type": "result", "subtype": "success", "session_id": "sess-c2", "total_cost_usd": 0.20, "usage": U(3, 7, 100, 10)}])
+    r3 = mkrun("claude", "lagu", [{"type": "system", "subtype": "init", "session_id": "sess-c3", "model": "claude-sonnet-z"},
+        a("m1", U(2, 4, 50, 0)), a("m1", U(2, 9, 50, 0)), a("m2", U(1, 3, 60, 5))], {"outcome": "stopped"})
+    CX = lambda i, c, o, rs, cw=0: {"input_tokens": i, "cached_input_tokens": c, "cache_write_input_tokens": cw,
+                                     "output_tokens": o, "reasoning_output_tokens": rs}
+    r4 = mkrun("codex", "lagu", [{"type": "thread.started", "thread_id": "th-1"}, {"type": "turn.started"},
+        {"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "ok"}},
+        {"type": "turn.completed", "usage": CX(500, 300, 100, 20)}, {"type": "turn.started"},
+        {"type": "turn.completed", "usage": CX(1000, 600, 200, 50, 5)}])  # usage e o total da thread: vale o ultimo
+    r4b = mkrun("codex", "lagu", [{"type": "thread.started", "thread_id": "th-2"}, {"type": "turn.started"}], {"outcome": "stopped"})
+    r5 = mkrun("hermes", "outro", "resposta do hermes\n", usage_file={"estimated_cost_usd": 0.06, "cost_status": "estimated",
+        "input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 20, "cache_write_tokens": 5, "reasoning_tokens": 7,
+        "total_tokens": 150, "api_calls": 2, "model": "hermes-m", "session_id": "hs-1", "completed": True, "partial": False,
+        "interrupted": False, "failed": False, "auxiliary": {"api_calls": 1, "input_tokens": 10, "output_tokens": 5,
+        "cache_read_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0, "estimated_cost_usd": 0.01, "total_tokens": 15,
+        "by_task": {}}, "total_including_auxiliary": {"estimated_cost_usd": 0.07, "total_tokens": 165, "api_calls": 3}})
+    r6 = mkrun("claude", "lagu", json.dumps({"type": "result", "session_id": "sess-c6", "total_cost_usd": 0.05,
+                                             "usage": U(1, 1, 0, 0)}), {"mission": "mzzzzzz1"})
+    r7 = mkrun("claude", "lagu", None, {"outcome": "refused", "reason": "STOP"})  # sem saida: sem consumo
+    def jl(path, rows):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            for r in rows: f.write(json.dumps(r) + "\n")
+        os.utime(path, (T, T))
+    isoms = lambda t: datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + "123Z"
+    asst = lambda mid_, u, cwd, sid, cost: {"type": "assistant", "cwd": cwd, "sessionId": sid, "timestamp": isoms(T),
+                                           "message": {"id": mid_, "model": "claude-opus-x", "usage": u}, "costUSD": cost}
+    jl(os.path.join(claude, "projects", "-wt-claude", "sess-c1.jsonl"), [asst("lm1", U(10, 100, 1000, 50), wt_claude, "sess-c1", 0.30)])
+    jl(os.path.join(claude, "projects", "-lagu", "sess-i1.jsonl"), [asst("lm2", U(1, 2, 3, 4), lagu, "sess-i1", 0.25)])
+    before = outs()
+    for k, v in before.items(): assert "orcamento" not in v, (k, v)
+    runs0 = a2a("watch", "runs")
+    assert "tokens reportados" not in runs0 and len(runs0.splitlines()) == 8, runs0
+    # ---- parse_run_usage
+    g = lambda rid: drive("usage", {"run_id": rid})
+    u = g(r1)
+    assert (u["input"], u["output"], u["cache_read"], u["cache_write"], u["total"]) == (15, 120, 1000, 50, 1185), u
+    assert u["cost_usd_est"] == 0.30 and u["models"] == ["claude-haiku-y", "claude-opus-x"] and u["source"] == "claude:json", u
+    assert u["partial"] is False and u["session_id"] == "sess-c1" and u["label"] == "tokens reportados; custo estimado", u
+    u = g(r2)
+    assert (u["input"], u["output"], u["cache_read"], u["cache_write"], u["total"]) == (3, 7, 100, 10, 120), u
+    assert u["cost_usd_est"] == 0.2 and u["source"] == "claude:stream-json" and u["models"] == ["claude-sonnet-z"] and not u["partial"], u
+    u = g(r3)
+    assert (u["input"], u["output"], u["cache_read"], u["cache_write"], u["total"]) == (3, 12, 110, 5, 130), u
+    assert u["partial"] is True and u["cost_usd_est"] is None and u["session_id"] == "sess-c3", u
+    u = g(r4)
+    assert (u["input"], u["cache_read"], u["cache_write"], u["output"], u["reasoning"], u["total"]) == (400, 600, 5, 200, 50, 1205), u
+    assert u["cost_usd_est"] is None and u["source"] == "codex:exec-json" and u["session_id"] == "th-1" and not u["partial"], u
+    u = g(r4b)
+    assert u["partial"] is True and u["total"] == 0 and u["session_id"] == "th-2", u
+    u = g(r5)
+    assert (u["input"], u["output"], u["cache_read"], u["cache_write"], u["total"]) == (110, 55, 20, 5, 190), u
+    assert u["cost_usd_est"] == 0.07 and u["models"] == ["hermes-m"] and u["reasoning"] == 7 and u["source"] == "hermes:usage-file", u
+    assert drive("usage", {"run_id": r7}) is None
+    assert drive("usage", {"run_id": r1, "agent": "orquestrador"})["total"] == 1185  # outro nome: detecta o formato
+    # ---- watch usage: grava so o campo usage do registro
+    rp = lambda rid: os.path.join(home, "runs", time.strftime("%Y-%m", time.gmtime(T)), rid + ".json")
+    old = json.load(open(rp(r1)))
+    out = a2a("watch", "usage", r1)
+    assert "tokens reportados 1.185 (entrada 15, saida 120, cache lido 1.000, cache escrito 50)" in out, out
+    assert "custo estimado US$ 0,30" in out and "claude-haiku-y, claude-opus-x" in out, out
+    new = json.load(open(rp(r1)))
+    assert new["usage"]["total"] == 1185 and new["usage"]["parsed"] and {k: v for k, v in new.items() if k != "usage"} == \
+        {k: v for k, v in old.items() if k != "usage"}, new
+    assert json.loads(a2a("watch", "usage", r4, "--json"))["reasoning"] == 50
+    assert "nenhum consumo reconhecido" in a2a("watch", "usage", r7, code=1)
+    assert "run_id invalido" in a2a("watch", "usage", "x", code=1)
+    assert "nao encontrada" in a2a("watch", "usage", "20000101T000000Z-abcdef", code=1)
+    runs1 = a2a("watch", "runs").splitlines()
+    i1 = next(i for i, l in enumerate(runs1) if r1 in l)
+    assert runs1[i1 + 1].strip().startswith("tokens reportados 1.185") and "custo estimado US$ 0,30" in runs1[i1 + 1], runs1
+    i4 = next(i for i, l in enumerate(runs1) if r4 in l)
+    assert "custo estimado n/d" in runs1[i4 + 1] and len(runs1) == 10, runs1
+    # ---- orcamentos: so o humano (agente recusado; humano sob A2A_RUNNER recusado com codigo 2)
+    mp = os.path.join(home, "missions", mid + ".json"); bp = os.path.join(home, "budgets.json")
+    assert "so o humano" in a2a("mission", "budget", mid, "--usd", "5", "--from", "claude", code=1)
+    assert "A2A_RUNNER" in a2a("mission", "budget", mid, "--usd", "5", "--from", "luiz", code=2, e=renv)
+    assert "so o humano" in a2a("cost", "budget", "--project", "lagu", "--usd-day", "1", "--from", "codex", code=1)
+    assert "A2A_RUNNER" in a2a("cost", "budget", "--project", "lagu", "--usd-day", "1", "--from", "luiz", code=2, e=renv)
+    assert "A2A_RUNNER" in a2a("cost", "budget", "--run-usd-max", "1", "--from", "luiz", code=2, e=renv)
+    assert "so o humano" in a2a("cost", "budget", "--project", "lagu", "--usd-day", "1", code=1)  # sem --from
+    assert "budget" not in json.load(open(mp)) and not os.path.exists(bp)
+    assert "maior que zero" in a2a("mission", "budget", mid, "--usd", "0", "--from", "luiz", code=1)
+    assert "exigem --project" in a2a("cost", "budget", "--usd-day", "1", "--from", "luiz", code=1)
+    assert "nada a definir" in a2a("cost", "budget", "--from", "luiz", code=1)
+    assert "US$ 0,50 (padrao do Dove)" in a2a("cost", "budget", "--show", e=renv)  # ver: qualquer um
+    assert "nenhum orcamento definido" in a2a("cost", "--budget")
+    # sem orcamento: cap = 0.50 e nada muda nas saidas (mesmo com runs e registros presentes)
+    assert drive("cap", {"project": "lagu"}) == 0.5 and drive("cap", {"project": "lagu", "mission": mid}) == 0.5
+    assert drive("status", {"project": "lagu"})["has_budget"] is False
+    assert outs() == before
+    # ---- orcamento do projeto/dia: runs + registros das CLIs, sessao do vigia nao conta duas vezes
+    a2a("cost", "budget", "--project", "lagu", "--usd-day", "1", "--tokens-day", "100000", "--from", "luiz")
+    b = json.load(open(bp))["projects"]["lagu"]
+    assert b["usd_day"] == 1.0 and b["tokens_day"] == 100000 and b["set_by"] == "luiz" and b["ts"], b
+    st = drive("status", {"project": "lagu"})
+    sp = st["spent"]
+    # runs lagu: r1 0,30 + r2 0,20 + r6 0,05 (+ r3/r4 sem custo -> parcial) ; logs: sess-i1 0,25 (sess-c1 = r1, descontada)
+    assert abs(sp["usd"] - 0.80) < 1e-9 and sp["usd_partial"] and sp["runs"] == 6 and sp["sessions"] == 1, sp
+    assert sp["tokens"] == 1185 + 120 + 130 + 1205 + 0 + 2 + 10, sp
+    assert st["pct"] == 80.0 and st["warn"] and not st["exceeded"] and abs(st["remaining"]["usd"] - 0.2) < 1e-9, st
+    assert st["remaining"]["tokens"] == 100000 - sp["tokens"] and st["label"] == "estimado" and st["scope"] == "projeto_dia", st
+    assert abs(drive("cap", {"project": "lagu"}) - 0.2) < 1e-9
+    s = a2a("summary")
+    assert "! orcamento 80%: projeto lagu hoje (US$ 0,80* de US$ 1,00; 2.652 de 100.000 tokens, estimado)" in s and s.startswith(before["summary"]), s
+    assert "orcamento" not in a2a("summary", "--project", "outro")
+    bl = a2a("brief", "--agent", "claude", "--project", "lagu", "--no-auto-status")
+    assert "! orcamento 80%: projeto lagu hoje" in bl, bl
+    assert age(a2a("brief", "--agent", "claude", "--no-auto-status")) == before["brief"]  # sem --project: so missoes dele
+    # ---- orcamento da missao: runs dos participantes (r6 tem outra missao) ; sessao fora das copias nao entra
+    a2a("mission", "budget", mid, "--usd", "0.5", "--from", "luiz")
+    mb = json.load(open(mp))["budget"]
+    assert mb["usd"] == 0.5 and mb["tokens"] is None and mb["set_by"] == "luiz" and mb["ts"], mb
+    st = drive("status", {"mission": mid})
+    assert abs(st["spent"]["usd"] - 0.5) < 1e-9 and st["spent"]["runs"] == 5 and st["spent"]["sessions"] == 0, st
+    assert st["spent"]["tokens"] == 1185 + 120 + 130 + 1205 and st["exceeded"] and st["pct"] == 100.0, st
+    assert drive("cap", {"mission": mid}) == 0.0 and drive("cap", {"project": "lagu", "mission": mid}) == 0.0
+    s = a2a("summary")
+    assert f"! orcamento esgotado: missao {mid} (US$ 0,50* de US$ 0,50, estimado)" in s, s
+    assert f"! orcamento esgotado: missao {mid}" in a2a("brief", "--agent", "codex", "--no-auto-status")
+    assert "orcamento" not in a2a("brief", "--agent", "hermes", "--no-auto-status")  # nao participa
+    sh = a2a("mission", "show", mid)
+    assert sh.startswith(before["show"]) and "orcamento: US$ 0,50* de US$ 0,50 (100%, estimado) · esgotado" in sh, sh
+    assert a2a("mission", "list") == before["list"]
+    # ---- teto por execucao: padrao definido, do projeto, e o menor com o que resta
+    a2a("cost", "budget", "--run-usd-max", "0.75", "--from", "luiz")
+    assert drive("cap", {"project": "outro"}) == 0.75 and abs(drive("cap", {"project": "lagu"}) - 0.2) < 1e-9
+    a2a("cost", "budget", "--project", "lagu", "--run-usd-max", "0.1", "--from", "luiz")
+    assert drive("cap", {"project": "lagu"}) == 0.1 and drive("cap", {"project": "outro"}) == 0.75
+    a2a("mission", "budget", mid, "--usd", "5", "--tokens", "3000", "--from", "luiz")  # tokens: 2640 de 3000 = 88%
+    st = drive("status", {"mission": mid})
+    assert st["pct"] == 88.0 and st["warn"] and not st["exceeded"], st
+    assert drive("cap", {"project": "lagu", "mission": mid}) == 0.1
+    assert f"! orcamento 88%: missao {mid} (US$ 0,50* de US$ 5,00; 2.640 de 3.000 tokens, estimado)" in a2a("summary")
+    cb = a2a("cost", "--budget")
+    assert "projeto lagu hoje (" in cb and f"missao {mid}" in cb and "alerta 80%" in cb and "teto por execucao: US$ 0,75" in cb, cb
+    assert "nao e o valor cobrado" in cb and "estimado" in cb.splitlines()[0], cb
+    assert "US$ 0,10 (projeto lagu)" in a2a("cost", "--budget", "--project", "lagu")
+    sw = a2a("cost", "budget", "--show")
+    assert "lagu: US$ 1,00/dia, 100.000 tokens/dia, teto por execucao US$ 0,10" in sw and f"missao {mid} (lagu): US$ 5,00, 3.000 tokens" in sw, sw
+    hp = a2a("cost", "budget", "--help")
+    assert "exemplos:\n" in hp and "US$ 0,50" in hp and "a2a cost budget --show" in hp, hp
+    assert "a2a mission budget" in a2a("mission", "budget", "--help") and "a2a watch usage" in a2a("watch", "usage", "--help")
+    # fonte sem custo (codex) + preco gravado pelo humano em a2a models: custo estimado "tabela do Luiz"
+    a2a("models", "init", "--from", "luiz")
+    a2a("models", "set", "--agent", "codex", "--model", "gpt-x", "--tier", "equilibrado", "--default", "--from", "luiz")
+    assert drive("usage", {"run_id": r4})["cost_usd_est"] is None  # sem preco: continua n/d
+    a2a("models", "price", "--agent", "codex", "--model", "gpt-x", "--input", "1.25", "--output", "10", "--cache-read", "0.125", "--from", "luiz")
+    u = drive("usage", {"run_id": r4})  # 400*1,25 + 600*0,125 + 5*1,25 (cache escrito sem preco = entrada) + 200*10
+    assert abs(u["cost_usd_est"] - 0.002581) < 1e-9 and u["cost_source"] == "tabela do Luiz" and u["price_model"] == "gpt-x", u
+    assert drive("usage", {"run_id": r1})["cost_source"] == "fonte"
+    assert "custo estimado US$ 0,00 (tabela do Luiz)" in a2a("watch", "usage", r4)
+    print("OK: orcamento - consumo por execucao (claude json com modelUsage, stream-json, parada/parcial; codex exec --json "
+          "cumulativo; hermes --usage-file com auxiliares), watch usage grava so o usage, watch runs com consumo, orcamento de "
+          "missao e de projeto/dia so do humano (agente e A2A_RUNNER recusados), budget_status com runs + registros sem contar "
+          "a mesma sessao duas vezes, run_budget_cap (0,50 padrao, teto do projeto, restante), alertas 80%/esgotado no summary "
+          "e no brief; sem orcamento, nenhuma saida muda")
+
 if __name__ == "__main__":
     main()
     fase1()
@@ -3156,3 +3391,4 @@ if __name__ == "__main__":
     cost_fase()
     supervisor_fase()
     models_fase()
+    budget_fase()

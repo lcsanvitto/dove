@@ -350,15 +350,46 @@ a2a watch stop --from luiz [--kill]   # kill switch: cria ~/.a2a/STOP (--kill: m
 a2a watch resume --from luiz          # apaga ~/.a2a/STOP
 a2a watch status                      # STOP, vigia rodando (watch.lock), execuções em curso
 a2a watch runs [--last 20] [--agent X] [--json]   # registros das execuções (só leitura, mais nova primeiro)
+a2a watch usage <run_id> [--json]     # relê a saída da execução e grava o consumo no registro
 ```
 - **Execução** (`run_agent` no `a2a.py`): o processo recebe `A2A_RUNNER=watch` e `A2A_RUN_ID=<run_id>` no ambiente e o prompt pelo stdin; stdout e stderr vão direto para `~/.a2a/runs/AAAA-MM/<run_id>.out` e `.err` (sem passar pela memória).
 - **Árvore de processos:** no Windows o filho nasce suspenso, num grupo de console próprio, entra num Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) e só então roda; parar = `CTRL_BREAK_EVENT`, 5 s de espera, `TerminateJobObject`. No Linux/macOS o filho abre uma sessão nova; parar = `SIGINT` ao grupo, 5 s, `SIGKILL` ao grupo. Netos morrem junto, e o que sobrar quando o filho sai também é encerrado.
 - **Travas:** `~/.a2a/run/watch.lock` (um vigia só) e `~/.a2a/run/<agente>.json` (uma execução por agente), criadas com `O_EXCL`, com pid, instante de criação do processo e máquina. Trava de dono morto (ou de pid reusado, com outro instante de criação) é recuperada; sempre soltas no fim.
 - **STOP:** com `~/.a2a/STOP`, nenhuma execução nova começa (registro `refused`) e as em curso são conferidas a cada 1 s e param (registro `stopped`). `stop` e `resume` são só do humano e recusados (código 2) dentro de uma execução automática (`A2A_RUNNER`).
 - **Timeout:** para como acima e registra `timeout`.
-- **Registro** `~/.a2a/runs/AAAA-MM/<run_id>.json`: `run_id`, `agent`, `project`, `cwd`, `argv` (o prompt, se aparecer, vira `<prompt sha256=… len=…>`), `stdin` (sha/tamanho), `trigger_ids`, `started`/`ended`, `exit_code`, `outcome` (`ok`, `error`, `timeout`, `stopped`, `refused`), `reason`, `stderr_tail` (últimos 2 KB, com tokens/chaves/senhas mascarados) e `usage` (preenchido numa etapa futura).
+- **Registro** `~/.a2a/runs/AAAA-MM/<run_id>.json`: `run_id`, `agent`, `project`, `cwd`, `argv` (o prompt, se aparecer, vira `<prompt sha256=… len=…>`), `stdin` (sha/tamanho), `trigger_ids`, `started`/`ended`, `exit_code`, `outcome` (`ok`, `error`, `timeout`, `stopped`, `refused`), `reason`, `stderr_tail` (últimos 2 KB, com tokens/chaves/senhas mascarados) e `usage` (consumo da execução: `a2a watch usage <run_id>`, veja [Orçamento](#orçamento)).
 - **Paralelo:** o agendador (`run_jobs`) roda no máximo `--max-parallel` execuções juntas (padrão 1) e nunca duas do mesmo agente.
 - **Executor:** `resolve_runner(agent)`. Por enquanto só aceita o gancho de teste `A2A_RUNNER_OVERRIDE=<script>`, e só com `A2A_TESTING=1`; sem isso, `executor real ainda nao habilitado`.
+
+## Orçamento
+Consumo por execução do vigia e orçamento por missão e por projeto/dia (etapa 8 da Fase 3; proposta `docs/propostas/2026-10-19-fase3-orquestrador.md`, item 3). Todo número é **estimado**: "tokens reportados" pelas CLIs e "custo estimado" calculado pela própria fonte, nunca o valor cobrado.
+```
+a2a watch usage <run_id> [--json]                       # consumo de uma execução (grava no campo usage do registro)
+a2a mission budget ID --usd 5 [--tokens N] --from luiz  # orçamento da missão (só o humano)
+a2a cost budget --project P --usd-day 2 [--tokens-day N] --from luiz   # orçamento do projeto por dia (UTC; só o humano)
+a2a cost budget [--project P] --run-usd-max 0.75 --from luiz           # teto por execução (padrão 0,50)
+a2a cost budget --show                                  # mostra os orçamentos (qualquer um)
+a2a cost --budget [--project P] [--mission ID]          # orçamento x gasto
+```
+```
+orcamento x gasto · estimado (tokens reportados; custo estimado pela fonte, nao e o valor cobrado)
+escopo                            limite      gasto  restante  limite_tokens  tokens  uso      estado
+missao m3f9a2c1                 US$ 5,00  US$ 0,50*  US$ 4,50          3.000   2.640  88%  alerta 80%
+projeto lagu hoje (2026-10-19)  US$ 1,00  US$ 0,80*  US$ 0,20        100.000   2.652  80%  alerta 80%
+* parcial: ha uso sem custo na fonte (ex.: Codex); o gasto real pode ser maior
+teto por execucao: US$ 0,75 (padrao definido)
+gasto = execucoes do vigia (runs/) + registros das CLIs (a2a cost) sem contar duas vezes a mesma sessao
+```
+- **Consumo da execução** (`parse_run_usage`): lê `runs/AAAA-MM/<run_id>.out` e devolve entrada, saída, cache lido/escrito, total, custo estimado (`null` = `n/d`), modelos, fonte, `session_id` e `partial`. `a2a watch usage` grava isso no campo `usage` do registro (a única escrita, e só no registro do próprio Dove); `a2a watch runs` mostra uma linha de consumo embaixo das execuções que têm `usage`.
+  - **claude** `-p --output-format json`: o objeto `type: "result"` (`usage` com `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`; `total_cost_usd`; `session_id`). Quando há `modelUsage` (por modelo, inclui subagentes: `inputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`, `costUSD`), ele vale para tokens e custo. `stream-json`: a última linha `type: "result"`; sem ela (execução parada), soma o `usage` das mensagens `assistant` (uma vez por `message.id`), marca `partial` e o custo fica `n/d`. Fontes: [headless](https://code.claude.com/docs/en/headless) e [cost tracking do Agent SDK](https://code.claude.com/docs/en/agent-sdk/cost-tracking).
+  - **codex** `exec --json`: `turn.completed.usage` traz o **total da thread** até ali (no código do Codex, `usage_from_last_total` em `codex-rs/exec/src/event_processor_with_jsonl_output.rs`; um turno por `exec`), então vale o último, não a soma. Entrada = `input_tokens − cached_input_tokens`; `cache_lido` = `cached_input_tokens`; `cache_escrito` = `cache_write_input_tokens`; saída = `output_tokens` (o `reasoning_output_tokens` já está dentro dele e fica separado em `reasoning`, só informativo). Sem custo na fonte: `n/d`, a não ser que o humano tenha gravado o preço do modelo em `a2a models price` (modelo = `-m`/`--model` do argv, senão o padrão do agente na tabela): aí custo = tokens × preço, rotulado `(tabela do Luiz)` (`cost_source`; cache sem preço próprio usa o preço de entrada). Sem `turn.completed`: `partial`.
+  - **hermes** `-z --usage-file`: `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens` (mais o bloco `auxiliary`, somado), custo = `total_including_auxiliary.estimated_cost_usd` (senão `estimated_cost_usd`), `model`, `session_id`, `partial`/`interrupted` (código do [hermes-agent](https://github.com/NousResearch/hermes-agent), `hermes_cli/oneshot.py`). O arquivo é o `usage_file` do registro, ou `<run_id>.usage.json` / `<run_id>/usage.json` ao lado do `.out`.
+- **Orçamento da missão:** campo `budget: {usd, tokens, set_by, ts}` no JSON da missão (missões sem ele ficam sem orçamento; desfazer = remover o campo). Gasto = execuções do vigia da missão (o campo `mission` do registro quando existir; senão, as do projeto feitas pelos participantes) + sessões das CLIs nas cópias de trabalho dos participantes, da criação da missão até a confirmação do humano (ou agora). `mission show` ganha a linha `orcamento:` só quando há orçamento.
+- **Orçamento do projeto:** `~/.a2a/budgets.json` (`projects.<P>.usd_day`, `tokens_day`, `run_usd_max`, `set_by`, `ts`; e `run_usd_max` global). Dia = dia corrido em UTC. Gasto = execuções do vigia do projeto + sessões das CLIs cujo `cwd` está no projeto (como no `a2a cost`).
+- **Sem contar duas vezes:** a sessão de uma execução do vigia também aparece nos registros das CLIs; ela conta só pelo registro do vigia (mesmo `session_id`; o do Codex é o `thread_id`). Execução sem `session_id` na saída pode aparecer nos dois.
+- **Teto por execução** (`run_budget_cap`): o menor entre o teto por execução (do projeto, senão o padrão definido com `--run-usd-max`, senão **US$ 0,50**), o que resta do orçamento da missão e o que resta do dia do projeto; orçamento esgotado (inclusive o de tokens) = 0. O vigia (etapa 7) passa esse valor ao Claude como `--max-budget-usd`.
+- **Alertas:** aos 80%, `! orcamento 80%: missao m3f9a2c1 (US$ 4,00 de US$ 5,00, estimado)` (com limite de tokens, também `2.640 de 3.000 tokens`; o uso é o maior dos dois); aos 100%, `! orcamento esgotado: ...`. Aparecem no `a2a summary` e no `brief` dos participantes da missão (o do projeto/dia, no `brief --project P`). `*` = parcial (há uso sem custo na fonte, ex.: Codex). Sem nenhum orçamento definido nada é lido e nenhuma saída muda.
+- **Só o humano** define orçamento (`require_human`; recusado com código 2 dentro de uma execução automática, `A2A_RUNNER`). Estourar o orçamento nunca gasta mais: só impede novas execuções (etapa 7).
 
 ## Modo herdr (estado dos agentes)
 Cada agente publica o próprio estado — `working`, `idle`, `blocked`, `done` ou `unknown` — em `~/.a2a/status/<agente>.json`. Assim você (ou outro agente) vê num quadro quem está trabalhando, quem travou e quem terminou.
@@ -637,12 +668,16 @@ a2a loops [--project P] [--agent X] [--since H] [--json] [--strict]
 | `watch check [--project P] [--agent X] [--json] [--show-command]` | pré-checagem do vigia, só leitura: CLIs, versões, login, sandbox, cópias limpas, `STOP`; `--show-command` imprime o comando exato do vigia sem rodar |
 | `cost [--since 7d\|24h\|AAAA-MM-DD] [--project P] [--agent claude\|codex\|hermes] [--by agente\|projeto\|modelo\|dia\|sessao] [--mission ID] [--json]` | tokens (entrada, saída, cache lido/escrito, cache%) e custo estimado quando a fonte grava, lidos (só leitura) dos registros do Claude Code, Codex e Hermes; `n/d` sem custo na fonte |
 | `watch stop --from luiz [--kill]` · `watch resume --from luiz` | kill switch do vigia: cria / apaga `~/.a2a/STOP` (nada novo começa; `--kill` mata já as execuções em curso); só o humano |
-| `watch status` · `watch runs [--last N] [--agent X] [--json]` | STOP, vigia e execuções em curso / registros das execuções (`runs/AAAA-MM/`) |
+| `watch status` · `watch runs [--last N] [--agent X] [--json]` | STOP, vigia e execuções em curso / registros das execuções (`runs/AAAA-MM/`), com o consumo quando gravado |
 | `watch plan [--project P] [--agent X] [--json] [--verbose] [--check-git]` | o que o vigia rodaria agora (`RODARIA`/`ESPERA` e o motivo), em simulação: debounce, sessão interativa, cópia, trava, loop; não grava nem executa nada (`--check-git` roda só `git status --porcelain`); `watch --dry-run --once` é o mesmo |
 | `models init --from luiz [--force]` | cria `~/.a2a/models.json`: aliases do Claude Code + modelo configurado do Codex/Hermes com nível `?` (só o humano) |
 | `models set --agent A --model M --tier rapido\|equilibrado\|forte\|forte+ [--default] --from luiz` · `models price --agent A --model M --input X --output Y [--cache-read Z] [--cache-write W] --from luiz` | classifica um modelo / grava o preço em US$ por milhão de tokens (só o humano) |
 | `models list [--json]` | a tabela de modelos, níveis, padrão e preços (`sem preço` quando vazio) |
 | `models suggest --task "TEXTO" [--kind K] [--files N] [--agent A] [--json]` | nível mais barato que serve para a tarefa, o modelo de cada agente e a regra que casou (só sugere) |
+| `watch usage RUN_ID [--json]` | relê a saída da execução (claude json/stream-json, codex `--json`, hermes `--usage-file`) e grava tokens reportados e custo estimado no campo `usage` do registro |
+| `mission budget ID --usd X [--tokens N] --from luiz` | orçamento da missão (estimado; só o humano) |
+| `cost budget --project P --usd-day X [--tokens-day N] --from luiz` · `cost budget [--project P] --run-usd-max X --from luiz` · `cost budget --show` | orçamento do projeto por dia (UTC) / teto por execução (padrão US$ 0,50) em `~/.a2a/budgets.json` (só o humano) / mostra |
+| `cost --budget [--project P] [--mission ID]` | orçamento x gasto (estimado): limite, gasto, restante, uso, alerta 80% / esgotado |
 
 ## Envelope da mensagem (JSON)
 `data` (ISO 8601 UTC) · `task_id` · `msg_id` · `from` · `to` · `project` · `in_reply_to` · `kind` (task | report | question | correction | ack) · `state` (AGUARDANDO_ACEITE | ACEITO | EM_EXECUCAO | BLOQUEADO | AGUARDANDO_APROVACAO | EM_REVISAO | CONCLUIDO | CANCELADO) · `result` · `evidence` · `pending` · `next_action` · `body`
