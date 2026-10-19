@@ -1157,6 +1157,84 @@ def compact_fase():
     assert "a2a read <msg_id> --agent <seu-nome> --compact" in t, t
     print("OK: read --compact (so campos com conteudo, body multilinha, sem flag identico, marca lida, erro igual, wait --compact)")
 
+WAIT_PROBE = r"""
+import argparse, json, os, sys, threading, time, io, contextlib
+sys.path.insert(0, sys.argv[1]); import a2a
+calls = {"all": 0, "passes": 0}
+orig_all, orig_seen = a2a.all_messages, a2a.load_seen
+def counted():
+    calls["all"] += 1; return orig_all()
+def seen(x):
+    calls["passes"] += 1; return orig_seen(x)
+a2a.all_messages, a2a.load_seen = counted, seen
+def wait(timeout, interval=0.2):
+    ns = argparse.Namespace(agent="codex", project=None, timeout=timeout, interval=interval, until=None,
+                            no_auto_status=True, compact=True)
+    buf, rc = io.StringIO(), 0
+    with contextlib.redirect_stdout(buf):
+        try: a2a.cmd_wait(ns)
+        except SystemExit as e: rc = e.code
+    return rc, buf.getvalue()
+out = {}
+for i in range(200): a2a.post_message("hermes", "claude", f"ruido {i}", auto_status=False)
+calls.update(all=0, passes=0)
+rc, txt = wait(3)
+out["idle"] = dict(calls, rc=rc, txt=txt)
+# mensagem gravada no meio da espera: entregue em ate um --interval
+calls.update(all=0, passes=0); t_write = {}
+def later():
+    time.sleep(1.0); t_write["t"] = time.time(); a2a.post_message("hermes", "codex", "chegou no meio", auto_status=False)
+th = threading.Thread(target=later); th.start()
+rc, txt = wait(5); t_done = time.time(); th.join()
+out["mid"] = dict(calls, rc=rc, txt=txt, lag=t_done - t_write["t"])
+# arquivo com nome mais antigo jogado direto no bus (relogio torto / a2a antigo) tambem chega
+calls.update(all=0, passes=0)
+def drop():
+    time.sleep(0.6)
+    m = {"data": "2020-01-01T00:00:00Z", "task_id": "", "msg_id": "velho0000001", "from": "hermes", "to": "codex",
+         "project": "", "in_reply_to": "", "kind": "question", "state": "", "result": "", "evidence": "",
+         "pending": "", "next_action": "", "body": "nome antigo"}
+    a2a.write_json(os.path.join(a2a.BUS, "20200101T000000Z-velho0000001.json"), m)
+threading.Thread(target=drop).start()
+rc, txt = wait(4)
+out["old"] = dict(calls, rc=rc, txt=txt)
+# lida por outro processo antes de o wait ver: nao e entregue (cursor relido a cada volta)
+calls.update(all=0, passes=0)
+def read_elsewhere():
+    time.sleep(0.6); a2a.mark_seen("codex", "lida0000000x")
+    m = {"data": "2026-01-01T00:00:00Z", "task_id": "", "msg_id": "lida0000000x", "from": "hermes", "to": "codex",
+         "project": "", "in_reply_to": "", "kind": "question", "state": "", "result": "", "evidence": "",
+         "pending": "", "next_action": "", "body": "ja lida"}
+    a2a.write_json(os.path.join(a2a.BUS, "20260101T000000Z-lida0000000x.json"), m)
+threading.Thread(target=read_elsewhere).start()
+rc, txt = wait(1.5)
+out["seen"] = dict(calls, rc=rc, txt=txt)
+print(json.dumps(out))
+"""
+
+def wait_fase():
+    """wait sem reler o bus a toa (item 3): poucas leituras completas, entrega rapida, saida igual."""
+    tmp = tempfile.mkdtemp(); env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8")
+    run(env, "init")
+    r = subprocess.run([sys.executable, "-c", WAIT_PROBE, str(ROOT)], capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    o = json.loads(r.stdout)
+    idle, mid, old, seen = o["idle"], o["mid"], o["old"], o["seen"]
+    assert idle["rc"] == 2 and idle["txt"] == "(timeout)\n", idle
+    assert idle["all"] <= 2 and 10 <= idle["passes"] <= 20, idle  # antes: 1 releitura completa por volta (~15)
+    assert mid["rc"] == 0 and "chegou no meio" in mid["txt"] and mid["all"] <= 2, mid
+    assert mid["lag"] < 0.2 + 0.25, mid  # em ate um --interval (com folga para o agendador)
+    assert old["rc"] == 0 and "velho0000001" in old["txt"], old
+    assert seen["rc"] == 2 and "lida0000000x" not in seen["txt"], seen
+    # saida e marcacao iguais as de antes (JSON indentado sem --compact)
+    run(env, "send", "--from", "hermes", "--to", "codex", "--body", "via cli", "--no-auto-status")
+    w = run(env, "wait", "--agent", "codex", "--timeout", "2", "--interval", "0.1", "--no-auto-status")
+    assert w.returncode == 0 and json.loads(w.stdout)["body"] == "via cli" and w.stdout.startswith("{\n  \"data\""), w.stdout
+    w = run(env, "wait", "--agent", "codex", "--timeout", "0.5", "--interval", "0.1", "--no-auto-status")
+    assert w.returncode == 2 and w.stdout == "(timeout)\n", w.stdout
+    print(f"OK: wait sem reler o bus (timeout 3s/0.2s: {idle['all']} leitura(s) completa(s) em {idle['passes']} voltas; "
+          f"entrega no meio em {mid['lag']:.2f}s; arquivo antigo e cursor relido)")
+
 if __name__ == "__main__":
     main()
     fase1()
@@ -1165,3 +1243,4 @@ if __name__ == "__main__":
     git_fase()
     brief_fase()
     compact_fase()
+    wait_fase()

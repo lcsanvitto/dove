@@ -80,12 +80,15 @@ def mark_seen(a, mid):
 def _chrono(f):  # ts do nome do arquivo; desempate pela ordem de escrita (mtime)
     try: return (os.path.basename(f)[:16], os.path.getmtime(f))
     except OSError: return (os.path.basename(f)[:16], 0)
-def all_messages():
-    out = []
-    for f in sorted(glob.glob(os.path.join(BUS, "*.json")), key=_chrono):
-        m = read_json(f)
-        if isinstance(m, dict) and "msg_id" in m: out.append(m)
-    return out
+def bus_names(): return glob.glob(os.path.join(BUS, "*.json"))
+def bus_files(): return sorted(bus_names(), key=_chrono)
+def read_msg(f):
+    m = read_json(f); return m if isinstance(m, dict) and "msg_id" in m else None
+def all_messages(): return [m for m in map(read_msg, bus_files()) if m]
+def bus_sig():
+    """Assinatura barata do bus (muda quando entra ou sai arquivo)."""
+    try: return (os.stat(BUS).st_mtime_ns, len(os.listdir(BUS)))
+    except OSError: return None
 def visible_for(m, agent, project=None):
     if m["to"] not in (agent, "all"): return False
     if m["from"] == agent: return False
@@ -196,6 +199,7 @@ def cmd_read(a):
     if not m: print("nao encontrada", file=sys.stderr); sys.exit(1)
     show_message(m, getattr(a, "compact", False))
     if a.agent: mark_seen(a.agent, a.msg_id)
+WAIT_FULL_EVERY = 30  # wait: releitura completa do bus no maximo a cada 30s (rede de seguranca para mtime grosseiro)
 def cmd_wait(a):
     ensure_dirs(); auto(a, a.agent); deadline = time.time() + a.timeout if a.timeout else None
     if a.until:
@@ -205,9 +209,17 @@ def cmd_wait(a):
                 print(json.dumps(st, ensure_ascii=False, indent=2)); return
             if deadline and time.time() > deadline: print("(timeout)"); sys.exit(2)
             time.sleep(a.interval)
+    known, sig, t_full = set(), None, 0.0
     while True:
-        seen = load_seen(a.agent)
-        for m in all_messages():
+        seen = load_seen(a.agent)  # relido a cada volta (outro processo pode ter lido a mensagem)
+        cur = bus_sig()
+        if not t_full or time.time() - t_full >= WAIT_FULL_EVERY:  # leitura completa: no inicio e a cada 30s
+            names = bus_names(); msgs = all_messages(); known = set(names); t_full, sig = time.time(), cur
+        elif cur != sig:  # o bus mudou: so parseia os arquivos novos (as antigas ja foram olhadas)
+            sig, new = cur, sorted((f for f in bus_names() if f not in known), key=_chrono)
+            known.update(new); msgs = [m for m in map(read_msg, new) if m]
+        else: msgs = []
+        for m in msgs:
             if visible_for(m, a.agent, a.project) and m["msg_id"] not in seen:
                 show_message(m, getattr(a, "compact", False))
                 mark_seen(a.agent, m["msg_id"]); return

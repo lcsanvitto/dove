@@ -82,6 +82,8 @@ a2a ack <msg_id> --from hermes
 # listar agentes registrados
 a2a agents
 ```
+O `wait` não relê o `bus/` inteiro a cada `--interval` (padrão 2s): ele lê tudo uma vez no início e depois só abre os arquivos novos quando o `bus/` muda (data de modificação da pasta + número de arquivos), com uma releitura completa a cada 30s como rede de segurança. O que ele imprime e marca como lido não mudou.
+
 Você (humano) espia quando quiser: `a2a inbox --agent <qualquer>` ou abra os arquivos em `~/.a2a/bus/`.
 
 ## Brief: se atualizar numa chamada só
@@ -314,7 +316,7 @@ Mostra tarefas abertas (`task` sem resposta `CONCLUIDO`/`CANCELADO`, ligada por 
 | `inbox --agent X` | lista mensagens não lidas de X |
 | `brief --agent X [--project P] [--mark-read] [--limit N] [--width W] [--json]` | resumo do que é de X: novas (N), acks, tarefas abertas (T), missões esperando aval (M), alertas (!); só marca lidas com `--mark-read` |
 | `read <id> --agent X [--compact]` | mostra a mensagem e marca como lida (`--compact`: só os campos com conteúdo) |
-| `wait --agent X [--timeout S] [--compact]` | bloqueia até chegar mensagem nova para X |
+| `wait --agent X [--timeout S] [--interval I] [--compact]` | bloqueia até chegar mensagem nova para X (só relê o `bus/` quando ele muda) |
 | `ack <id> --from X` | responde um `ack` e marca como lida |
 | `status --agent X --set ESTADO [--note N] [--project P]` | publica o estado de X (working/idle/blocked/done/unknown) |
 | `status [--agent X] [--stale-minutes M]` | quadro de estado de todos os agentes (ou só de X) |
@@ -366,6 +368,8 @@ Regras: não responda ack/próprias msgs (anti-loop); sempre --reply-to; nunca a
 ## Testes
 ```
 python tests/test_a2a.py
+python tests/measure_brief.py   # quanto texto o agente le para se atualizar (antes/depois do brief)
+python tests/measure_bus.py     # tempo de brief/summary/inbox/painel com um bus de 2.000 mensagens
 ```
 
 ## Próximos passos (ideias)
