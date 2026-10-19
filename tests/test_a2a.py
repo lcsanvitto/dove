@@ -363,6 +363,7 @@ def fase1():
         code, j = req(port, "POST", "/api/send", {"to": "ninguem", "body": "x"}, {"X-Dove-Token": tok})
         assert code == 400 and "desconhecido" in j["error"], j
         assert req(port, "POST", "/api/mission/verdict", {"id": "x"}, {"X-Dove-Token": tok})[0] == 404
+        assert req(port, "GET", "/api/debug/raise")[0] == 404                                  # rota de teste so com env
         assert req(port, "GET", "/api/state", host=f"localhost:{port}")[0] == 200
         T = {"X-Dove-Token": tok}
         code, j = req(port, "GET", f"/api/scan?root={urllib.request.quote(root)}&depth=3", None, T)
@@ -404,6 +405,141 @@ def fase1():
     t = run(env, "onboard", "--agent", "codex").stdout
     assert "--context <0-100>" in t and "a2a mission approve <id> --agent codex --evidence" in t, t
 
+def raw_post(port, path, data, headers):
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    c.putrequest("POST", path, skip_host=True, skip_accept_encoding=True)
+    c.putheader("Host", f"127.0.0.1:{port}")
+    for k, v in dict(headers, **{"Content-Length": str(len(data))}).items(): c.putheader(k, v)
+    c.endheaders(); c.send(data)
+    r = c.getresponse(); raw = r.read(); c.close()
+    return r.status, json.loads(raw.decode("utf-8"))
+
+def robustez():
+    """Painel nunca derruba a conexao; add/scan robustos (Windows: aspas, maiusculas, junctions, permissoes)."""
+    tmp = tempfile.mkdtemp()
+    env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8", DOVE_NO_BROWSER="1", DOVE_TEST_RAISE="1")
+    sys.path.insert(0, str(ROOT)); os.environ["A2A_HOME"] = tmp
+    import importlib; a2a = importlib.import_module("a2a")
+
+    # ---- funcoes puras: aspas, nomes e caminhos no Windows simulado
+    d = tempfile.mkdtemp()
+    assert a2a.clean_path(f'"{d}"') == d and a2a.clean_path(f"  '{d}'  ") == d and a2a.clean_path(f'" {d}/ "') == d
+    assert a2a.clean_path("  ") == ""
+    assert a2a.name_taken("Dove", ["lagu", "dove"], windows=True)
+    assert not a2a.name_taken("Dove", ["lagu", "dove"], windows=False)
+    assert a2a.name_taken("dove", ["dove"], windows=False)
+    assert a2a.path_key("C:/Users/Dell/dove/", windows=True) == a2a.path_key("c:\\users\\DELL\\Dove", windows=True)
+    assert a2a.unique_name("App", "/x/y/App", ["app"]) == "App"  # Linux: diferencia maiusculas
+    real_isw = a2a.is_windows
+    try:
+        a2a.is_windows = lambda: True  # Windows simulado: "LAGU" colide com "lagu" ja registrado
+        a2a.project_add("x-tmp", d); a2a.project_remove("x-tmp")
+        try: a2a.project_add("X-TMP", d); a2a.project_add("x-tmp", tempfile.mkdtemp()); assert False
+        except a2a.DoveError as e: assert "ja existe" in str(e), e
+        assert a2a.project_add("x-tmp", tempfile.mkdtemp(), auto_name=True)["name"] != "x-tmp"
+    finally:
+        a2a.is_windows = real_isw
+    print("OK: clean_path (aspas/espacos), nome duplicado sem maiusculas no Windows (name_taken/path_key)")
+
+    # ---- write_json: replace bloqueado (antivirus/leitor no Windows) nao derruba
+    real_replace, real_sleep = os.replace, time.sleep
+    def busy(*x): raise PermissionError(13, "arquivo em uso")
+    try:
+        os.replace, a2a.time.sleep = busy, (lambda s: None)
+        tgt = os.path.join(d, "x.json"); a2a.write_json(tgt, {"caminho": "C:\\Usuários\\João"})
+    finally:
+        os.replace, a2a.time.sleep = real_replace, real_sleep
+    assert json.load(open(tgt, encoding="utf-8")) == {"caminho": "C:\\Usuários\\João"}
+    assert not [f for f in os.listdir(d) if f.endswith(".tmp")], os.listdir(d)
+    print("OK: write_json com os.replace bloqueado (cai para gravacao direta em UTF-8, sem lixo .tmp)")
+
+    # ---- scan: pasta ilegivel, symlink em loop, link para fora, .git ilegivel
+    root = tempfile.mkdtemp()
+    mkrepo(os.path.join(root, "ok", "r1"), url="https://github.com/u/r1.git")
+    mkrepo(os.path.join(root, "trancada", "segredo"))
+    os.makedirs(os.path.join(root, "loop"))
+    os.symlink(os.path.join(root, "loop"), os.path.join(root, "loop", "eu"))      # loop
+    os.symlink(root, os.path.join(root, "ok", "raiz"))                            # volta para a raiz
+    os.symlink(os.path.join(root, "ok", "r1"), os.path.join(root, "atalho"))      # link para repo: nao segue
+    mkrepo(os.path.join(root, "estranho"))
+    open(os.path.join(root, "estranho", ".git", "config"), "wb").write(b'[remote "origin"]\n\turl = https://h\xe9.com/x\n')
+    os.chmod(os.path.join(root, "trancada"), 0)
+    try:
+        t0 = time.time(); repos = a2a.scan_repos(root, 6); dt = time.time() - t0
+    finally:
+        os.chmod(os.path.join(root, "trancada"), 0o755)
+    paths = sorted(r["path"] for r in repos)
+    assert dt < 3, dt
+    assert os.path.join(root, "ok", "r1") in paths and os.path.join(root, "estranho") in paths, paths
+    assert len(paths) == len(set(paths)) and not any("atalho" in p or "raiz" in p or "eu" in p.split(os.sep) for p in paths), paths
+    if os.geteuid() != 0: assert os.path.join(root, "trancada", "segredo") not in paths, paths
+    # root le tudo: simula PermissionError na pasta trancada
+    real_scandir = os.scandir
+    def fake_scandir(p="."):
+        if os.path.basename(str(p)) == "trancada": raise PermissionError(13, "Acesso negado", str(p))
+        return real_scandir(p)
+    try:
+        a2a.os.scandir = fake_scandir; repos = a2a.scan_repos(root, 6)
+    finally:
+        a2a.os.scandir = real_scandir
+    paths = [r["path"] for r in repos]
+    assert os.path.join(root, "trancada", "segredo") not in paths and os.path.join(root, "ok", "r1") in paths, paths
+    try: a2a.scan_repos(os.path.join(root, "nao-existe")); assert False
+    except a2a.DoveError as e: assert "nao encontrada" in str(e)
+    try: a2a.scan_repos(f'"{os.path.join(root, "ok")}"', 2)  # aspas coladas
+    except a2a.DoveError as e: assert False, e
+    print(f"OK: scan pula pasta sem permissao, symlink em loop e links ({len(repos)} repos em {dt:.2f}s)")
+
+    # ---- painel: 400 com mensagem, aspas, 500 JSON, servidor continua de pe
+    port = free_port()
+    p = subprocess.Popen([sys.executable, str(A2A), "panel", "--port", str(port)], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert wait_ping(port, p), "painel nao respondeu"
+        tok = re.search(r'name="dove-token" content="([^"]+)"', req(port, "GET", "/")[1]).group(1)
+        T = {"X-Dove-Token": tok}
+        code, j = req(port, "POST", "/api/project/add", {"path": os.path.join(root, "nao-existe")}, T)
+        assert code == 400 and "nao existe" in j["error"] and j["ok"] is False, (code, j)
+        f = os.path.join(root, "arquivo.txt"); open(f, "w").write("x")
+        code, j = req(port, "POST", "/api/project/add", {"path": f}, T)
+        assert code == 400 and "nao e uma pasta" in j["error"], (code, j)
+        code, j = req(port, "POST", "/api/project/add", {"path": "   "}, T)
+        assert code == 400 and "caminho" in j["error"], (code, j)
+        dove_dir = os.path.join(root, "ok", "r1")
+        code, j = req(port, "POST", "/api/project/add", {"path": f'"{dove_dir}"'}, T)
+        assert code == 200 and j["project"]["path"] == dove_dir and j["project"]["name"] == "r1", (code, j)
+        code, j = req(port, "POST", "/api/project/add", {"path": dove_dir + os.sep}, T)
+        assert code == 400 and "ja esta registrada" in j["error"], (code, j)
+        code, j = req(port, "POST", "/api/project/add", {"name": "r1", "path": os.path.join(root, "estranho")}, T)
+        assert code == 400 and "ja existe" in j["error"], (code, j)
+        code, j = raw_post(port, "/api/project/add", b"{nao e json", dict(T, **{"Content-Type": "application/json"}))
+        assert code == 400 and "JSON invalido" in j["error"], (code, j)
+        code, j = req(port, "POST", "/api/project/remove", {"name": ""}, T)
+        assert code == 400 and "nome" in j["error"], (code, j)
+        code, j = req(port, "POST", "/api/project/remove", {"name": "fantasma"}, T)
+        assert code == 400 and "nao encontrado" in j["error"], (code, j)
+        # erro inesperado no handler -> 500 JSON (nao derruba a conexao)
+        code, j = req(port, "GET", "/api/debug/raise")
+        assert code == 500 and j["ok"] is False and j["error"].startswith("RuntimeError: falha de teste"), (code, j)
+        code, j = req(port, "POST", "/api/debug/raise", {}, T)
+        assert code == 500 and j["error"].startswith("RuntimeError"), (code, j)
+        # token errado com corpo grande: resposta 403 chega (corpo drenado antes de responder)
+        code, j = raw_post(port, "/api/send", b"{" + b" " * 60000 + b"}", {"X-Dove-Token": "x", "Content-Type": "application/json"})
+        assert code == 403 and "token" in j["error"], (code, j)
+        code, j = req(port, "GET", f"/api/scan?root={urllib.request.quote(chr(34) + root + chr(34))}&depth=6", None, T)
+        assert code == 200 and j["root"] == root and any(r["registered"] for r in j["repos"]), (code, str(j)[:300])
+        code, j = req(port, "GET", f"/api/scan?root={urllib.request.quote(os.path.join(root, 'nada'))}", None, T)
+        assert code == 400 and "nao encontrada" in j["error"], (code, j)
+        assert wait_ping(port, p) and p.poll() is None, "servidor caiu depois dos erros"
+        code, st = req(port, "GET", "/api/state")
+        assert code == 200 and st["config"]["scan_root"] == root and [x["name"] for x in st["projects"]] == ["r1"], st["config"]
+    finally:
+        p.terminate(); _, err = p.communicate(timeout=5)
+    assert re.search(r"^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\] erro em GET /api/debug/raise", err, re.M), err
+    assert "Traceback" in err and "RuntimeError: falha de teste" in err, err
+    print("OK: painel robusto (400 com mensagem em add/remove/scan, aspas, JSON invalido, 500 JSON + traceback, segue no ar)")
+
 if __name__ == "__main__":
     main()
     fase1()
+    robustez()

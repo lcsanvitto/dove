@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="dove-token" content="__DOVE_TOKEN__">
 <title>Dove</title>
+<link rel="icon" href="data:,">
 <style>
 /* Layout: herdr-style workspace. Sidebar (projetos em cima, agentes embaixo) | conversa | "onde estamos" + missoes.
    Dark-first, terminal feel: mono for labels/data, system sans for running text. */
@@ -258,7 +259,17 @@ dialog::backdrop{background:rgba(5,7,10,.6)}
 .checks{display:flex;flex-wrap:wrap;gap:6px}
 .checks label{display:inline-flex;gap:6px;align-items:center;font:12.5px var(--mono);border:1px solid var(--line2);border-radius:var(--r);padding:3px 9px;background:var(--raised)}
 .toast{position:fixed;bottom:16px;right:16px;background:var(--raised);border:1px solid var(--line2);border-radius:var(--r);padding:7px 12px;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.3);z-index:20}
-.toast.err{border-color:var(--crit);color:var(--crit)}
+.toast.err{border-color:var(--crit);color:var(--crit);max-width:min(560px,calc(100vw - 32px));cursor:pointer}
+.offline{position:fixed;top:50px;left:50%;transform:translateX(-50%);z-index:30;background:var(--crit-bg);border:1px solid var(--crit);color:var(--fg);border-radius:var(--r);padding:8px 14px;font-size:13px;max-width:min(680px,calc(100vw - 32px));box-shadow:0 4px 16px rgba(0,0,0,.3);backdrop-filter:blur(6px)}
+.offline b{color:var(--crit)}
+.offline code{font-family:var(--mono);background:var(--sunk);padding:0 4px;border-radius:3px}
+.proj .rm{border:0;background:none;padding:0 3px;color:var(--faint);font-size:14px;line-height:1;opacity:0}
+.proj:hover .rm,.proj .rm:focus-visible{opacity:1}
+.proj .rm:hover{color:var(--crit)}
+.proj.confirm{background:var(--crit-bg);flex-wrap:wrap}
+.proj.confirm .q{flex:1 1 100%;font:12px var(--ui);color:var(--fg);white-space:normal}
+.proj.confirm .btn{font-size:11.5px;padding:1px 8px}
+.proj.confirm .btn.danger{background:var(--crit);border-color:var(--crit);color:#fff;font-weight:600}
 
 @media (max-width:1280px){.app{grid-template-columns:240px minmax(0,1fr) 320px}.track{width:72px}}
 @media (max-width:980px){
@@ -277,7 +288,7 @@ dialog::backdrop{background:rgba(5,7,10,.6)}
     dove
   </div>
   <div class="crumb"><span>/</span><b id="crumb">todos os projetos</b></div>
-  <div class="live" id="live"><i></i><span id="livetxt">conectando...</span></div>
+  <div class="live" id="live" title="Conexão com o servidor local do Dove"><i></i><span id="livetxt">conectando...</span></div>
 </header>
 
 <main class="app">
@@ -383,12 +394,14 @@ dialog::backdrop{background:rgba(5,7,10,.6)}
 </dialog>
 
 <div class="toast" id="toast" role="status" hidden></div>
+<div class="offline" id="offline" role="alert" hidden><b>Sem conexão com o servidor do Dove</b> — a janela do PowerShell com <code>dove</code> foi fechada? Rode <code>dove</code> de novo.</div>
 
 <script>
 "use strict";
 var TOKEN = (document.querySelector('meta[name="dove-token"]') || {}).content || "";
 var S = null;                       // ultimo /api/state
-var ui = {project: null, replyTo: null, open: {}, confirming: null, sig: {}, firstConv: true, lastCount: 0};
+var ui = {project: null, replyTo: null, open: {}, confirming: null, removing: null, sig: {}, firstConv: true, lastCount: 0, online: null};
+var OFFLINE_MSG = "Sem conexao com o servidor do Dove — a janela do PowerShell com `dove` foi fechada? Rode `dove` de novo.";
 try { ui.project = localStorage.getItem("dove.project") || null; } catch (e) {}
 
 /* ---------- helpers (todo texto via textContent) ---------- */
@@ -418,14 +431,40 @@ function dayLabel(iso) {
 function changed(key, val) { var s = JSON.stringify(val); if (ui.sig[key] === s) return false; ui.sig[key] = s; return true; }
 function toast(msg, err) {
   var t = $("toast"); t.textContent = msg; t.className = "toast" + (err ? " err" : ""); t.hidden = false;
-  clearTimeout(toast._t); toast._t = setTimeout(function () { t.hidden = true; }, 2800);
+  t.title = err ? "clique para fechar" : "";
+  clearTimeout(toast._t); toast._t = setTimeout(function () { t.hidden = true; }, err ? 9000 : 2800);
+}
+/* toda chamada ao servidor passa por aqui: erro HTTP -> mensagem do servidor; falha de rede -> OFFLINE_MSG */
+function request(path, opts) {
+  return fetch(path, opts).then(function (r) {
+    return r.text().then(function (txt) {
+      var j = null; try { j = txt ? JSON.parse(txt) : {}; } catch (e) { j = null; }
+      if (!r.ok || !j || j.ok === false) {
+        var msg = j && j.error ? j.error : "Erro " + r.status + " do servidor do Dove" + (txt && !j ? ": " + txt.slice(0, 160) : "");
+        var err = new Error(msg); err.status = r.status; throw err;
+      }
+      setOnline(true); return j;
+    });
+  }, function (e) {
+    setOnline(false);
+    var err = new Error(OFFLINE_MSG); err.network = true; err.cause = e; throw err;
+  });
 }
 function api(path, body) {
-  return fetch(path, {method: "POST", headers: {"Content-Type": "application/json", "X-Dove-Token": TOKEN},
-    body: JSON.stringify(body || {})}).then(function (r) {
-      return r.json().catch(function () { return {}; }).then(function (j) {
-        if (!r.ok || j.ok === false) throw new Error(j.error || ("erro " + r.status)); return j; });
-    });
+  return request(path, {method: "POST", headers: {"Content-Type": "application/json", "X-Dove-Token": TOKEN},
+    body: JSON.stringify(body || {}), cache: "no-store"});
+}
+function getJSON(path, needToken) {
+  return request(path, {headers: needToken ? {"X-Dove-Token": TOKEN} : {}, cache: "no-store"});
+}
+function showErr(e) { toast(e && e.message ? e.message : String(e), true); }
+function setOnline(on) {
+  var was = ui.online; ui.online = on;
+  $("live").className = "live" + (on ? "" : " off");
+  $("live").title = on ? "Conectado ao servidor local do Dove" : OFFLINE_MSG;
+  if (!on) $("livetxt").textContent = "offline · sem conexão com o dove";
+  $("offline").hidden = on;
+  if (on && was === false) toast("Conexão com o Dove restabelecida");
 }
 function stateKey(s) { return String(s || "unknown").replace(/[^a-z]/g, ""); }
 function cur() { return ui.project; }
@@ -448,7 +487,7 @@ function selectProject(name) {
 function renderProjects() {
   var q = $("psearch").value.trim().toLowerCase();
   var ps = S.projects, sp = S.summary.projects;
-  if (!changed("proj", [ps, q, ui.project, Object.keys(sp).map(function (k) { return [k, sp[k].open_tasks.length, sp[k].blocked.length]; })])) return;
+  if (!changed("proj", [ps, q, ui.project, ui.removing, Object.keys(sp).map(function (k) { return [k, sp[k].open_tasks.length, sp[k].blocked.length]; })])) return;
   var list = $("plist"); list.replaceChildren();
   $("pcount").textContent = ps.length ? String(ps.length) : "";
   if (!ps.length) {
@@ -468,16 +507,41 @@ function renderProjects() {
     var s = sp[p.name] || {open_tasks: [], blocked: []};
     var row = el("div", "proj" + (ui.project === p.name ? " active" : "")); row.setAttribute("role", "listitem");
     row.tabIndex = 0; row.title = p.path;
+    if (ui.removing === p.name) { list.appendChild(removeConfirm(p)); return; }
     var pin = el("button", "pin" + (p.pinned ? " on" : ""), p.pinned ? "★" : "☆"); pin.type = "button";
     pin.setAttribute("aria-label", (p.pinned ? "Desafixar " : "Fixar ") + p.name);
-    pin.onclick = function (ev) { ev.stopPropagation(); api("/api/project/pin", {name: p.name, pinned: !p.pinned}).then(tick).catch(function (e) { toast(e.message, true); }); };
+    pin.onclick = function (ev) { ev.stopPropagation(); api("/api/project/pin", {name: p.name, pinned: !p.pinned}).then(tick).catch(showErr); };
     add(row, pin, el("span", "nm", p.name));
     if (s.open_tasks.length) { var o = el("span", "pb open", s.open_tasks.length); o.title = s.open_tasks.length + " tarefas abertas"; add(row, o); }
     if (s.blocked.length) { var bl = el("span", "pb blk", s.blocked.length + " bloq"); bl.title = s.blocked.length + " agente(s) bloqueado(s)"; add(row, bl); }
+    var rm = el("button", "rm", "×"); rm.type = "button"; rm.title = "Remover projeto da lista";
+    rm.setAttribute("aria-label", "Remover projeto " + p.name);
+    rm.onclick = function (ev) { ev.stopPropagation(); ui.removing = p.name; renderProjects(); };
+    add(row, rm);
     row.onclick = function () { selectProject(p.name); };
     row.onkeydown = function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); selectProject(p.name); } };
     list.appendChild(row);
   });
+}
+
+function removeConfirm(p) {
+  var row = el("div", "proj confirm"); row.setAttribute("role", "listitem");
+  add(row, el("span", "q", "Remover “" + p.name + "” da lista? A pasta e as mensagens não são apagadas."));
+  var yes = el("button", "btn danger", "Remover"); yes.type = "button";
+  var no = el("button", "btn", "Cancelar"); no.type = "button";
+  yes.onclick = function (ev) {
+    ev.stopPropagation(); yes.disabled = true;
+    api("/api/project/remove", {name: p.name}).then(function () {
+      ui.removing = null;
+      if (S) S.projects = S.projects.filter(function (x) { return x.name !== p.name; });
+      if (ui.project === p.name) selectProject(null); else renderProjects();
+      toast("Projeto “" + p.name + "” removido"); return tick();
+    }).catch(function (e) { yes.disabled = false; showErr(e); });
+  };
+  no.onclick = function (ev) { ev.stopPropagation(); ui.removing = null; renderProjects(); };
+  add(row, yes, no);
+  setTimeout(function () { no.focus(); }, 0);
+  return row;
 }
 
 /* ---------- agentes ---------- */
@@ -700,7 +764,7 @@ function missionCard(m) {
     if (ui.confirming === m.id) {
       add(row, el("span", null, "Confirmar que a missão está concluída?"));
       var yes = el("button", "btn pri", "Sim, concluir"); yes.type = "button";
-      yes.onclick = function () { yes.disabled = true; api("/api/mission/done", {id: m.id}).then(function () { ui.confirming = null; toast("Missão concluída"); return tick(); }).catch(function (e) { toast(e.message, true); yes.disabled = false; }); };
+      yes.onclick = function () { yes.disabled = true; api("/api/mission/done", {id: m.id}).then(function () { ui.confirming = null; toast("Missão concluída"); return tick(); }).catch(function (e) { showErr(e); yes.disabled = false; }); };
       var no = el("button", "btn", "Cancelar"); no.type = "button"; no.onclick = function () { ui.confirming = null; renderMissions(); };
       add(row, yes, no);
     } else {
@@ -735,11 +799,10 @@ var scan = {repos: [], sel: {}};
 function doScan() {
   var root = $("sroot").value.trim(); if (!root) { pmsg("Informe a pasta raiz.", true); return; }
   pmsg("Procurando..."); $("sgo").disabled = true;
-  fetch("/api/scan?root=" + encodeURIComponent(root) + "&depth=" + encodeURIComponent($("sdepth").value),
-    {headers: {"X-Dove-Token": TOKEN}, cache: "no-store"})
-    .then(function (r) { return r.json().then(function (j) { if (!r.ok || !j.ok) throw new Error(j.error || "erro"); return j; }); })
+  getJSON("/api/scan?root=" + encodeURIComponent(root) + "&depth=" + encodeURIComponent($("sdepth").value), true)
     .then(function (j) {
       scan.repos = j.repos; scan.sel = {}; $("sres").hidden = false; $("sfilter").value = "";
+      if (j.root) { $("sroot").value = j.root; if (S) S.config.scan_root = j.root; }
       pmsg(j.repos.length + " repositórios em " + j.elapsed + "s"); renderScan();
     })
     .catch(function (e) { pmsg(e.message, true); })
@@ -783,10 +846,14 @@ function addProjects() {
   } else reqs = Object.keys(scan.sel).map(function (k) { return {name: scan.sel[k].name, path: k, auto_name: true}; });
   if (!reqs.length) return;
   $("padd").disabled = true; var ok = 0, errs = [];
-  reqs.reduce(function (p, r) { return p.then(function () { return api("/api/project/add", r).then(function () { ok++; }, function (e) { errs.push(r.path + ": " + e.message); }); }); }, Promise.resolve())
+  reqs.reduce(function (p, r) { return p.then(function () { return api("/api/project/add", r).then(function () { ok++; }, function (e) { errs.push(e.network ? e.message : (reqs.length > 1 ? r.path + ": " : "") + e.message); }); }); }, Promise.resolve())
     .then(function () {
       tick();
-      if (errs.length) { pmsg(ok + " adicionados; " + errs.length + " com erro: " + errs[0], true); $("padd").disabled = false; }
+      if (errs.length) {
+        var head = reqs.length === 1 ? "Não foi possível adicionar: " : ok + " adicionados; " + errs.length + " com erro: ";
+        pmsg(head + errs[0] + (errs.length > 1 ? " (+" + (errs.length - 1) + ")" : ""), true);
+        toast(head + errs[0], true); $("padd").disabled = false;
+      }
       else { $("dproj").close(); toast(ok === 1 ? "Projeto adicionado" : ok + " projetos adicionados"); scan.sel = {}; $("ppath").value = ""; $("pname").value = ""; }
     });
 }
@@ -829,11 +896,11 @@ function render() {
   renderProjects(); renderAgents(); syncComposer(); renderConversation(); renderWhere(); renderMissions();
 }
 function tick() {
-  return fetch("/api/state", {cache: "no-store"}).then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
-    .then(function (s) {
-      S = s; $("live").className = "live"; $("livetxt").textContent = "ao vivo · " + hhmm(s.generated); render();
-    })
-    .catch(function () { $("live").className = "live off"; $("livetxt").textContent = "sem conexão com o dove"; });
+  return getJSON("/api/state")
+    .then(function (s) { S = s; $("livetxt").textContent = "online · " + hhmm(s.generated); render(); })
+    .catch(function (e) {
+      if (!e.network) { $("live").className = "live off"; $("livetxt").textContent = "erro no servidor"; $("live").title = e.message; }
+    });
 }
 
 $("composer").addEventListener("submit", send);
@@ -854,6 +921,7 @@ $("sall").onchange = function () {
 };
 $("padd").onclick = addProjects;
 $("fmis").addEventListener("submit", createMission);
+$("toast").onclick = function () { $("toast").hidden = true; };
 document.querySelectorAll("[data-close]").forEach(function (b) { b.onclick = function () { b.closest("dialog").close(); }; });
 $("newpill").onclick = function () { var tl = $("tl"); tl.scrollTop = tl.scrollHeight; $("newpill").hidden = true; };
 $("tl").addEventListener("scroll", function () { var tl = $("tl"); if (tl.scrollHeight - tl.scrollTop - tl.clientHeight < 60) $("newpill").hidden = true; });

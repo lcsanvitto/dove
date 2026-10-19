@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """a2a (Dove) - canal de mensagens agente-a-agente, local e global."""
-import argparse, glob, hmac, json, os, re, secrets, sys, time, uuid
+import argparse, glob, hmac, json, os, re, secrets, sys, time, traceback, uuid
 from datetime import datetime, timezone
 
 HOME = os.environ.get("A2A_HOME", os.path.expanduser("~/.a2a"))
@@ -36,11 +36,19 @@ def write_json(p, obj):
     """Grava atomico (tmp + replace) em UTF-8."""
     tmp = f"{p}.{os.getpid()}.{uuid.uuid4().hex[:6]}.tmp"
     with open(tmp, "w", encoding="utf-8") as f: json.dump(obj, f, ensure_ascii=False, indent=2)
-    for i in range(10):  # Windows: replace falha se outro processo esta lendo
+    delay = 0.02
+    for i in range(10):  # Windows: replace falha se outro processo (ou o antivirus) esta com o arquivo aberto
         try: os.replace(tmp, p); return
         except PermissionError:
-            if i == 9: raise
-            time.sleep(0.05)
+            if i == 9: break
+            time.sleep(delay); delay = min(delay * 2, 0.5)
+    try:  # ultimo recurso: grava por cima (nao atomico) em vez de derrubar a requisicao
+        with open(p, "w", encoding="utf-8") as f: json.dump(obj, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        raise DoveError(f"nao consegui gravar {p} (arquivo em uso por outro programa/antivirus?): {e}")
+    finally:
+        try: os.remove(tmp)
+        except OSError: pass
 class FileLock:
     """Trava simples por arquivo .lock (O_EXCL); quebra trava velha (>10s)."""
     def __init__(self, path, timeout=5.0): self.p, self.timeout = path + ".lock", timeout
@@ -251,25 +259,54 @@ def load_projects():
     p = read_json(PROJECTS, [])
     return [x for x in p if isinstance(x, dict) and x.get("name")] if isinstance(p, list) else []
 def sorted_projects(ps): return sorted(ps, key=lambda p: (not p.get("pinned"), p["name"].lower()))
-def norm_path(p): return os.path.normcase(os.path.abspath(os.path.expanduser(p)))
+def is_windows(): return os.name == "nt"
+def clean_path(p):
+    """Caminho digitado/colado pelo usuario -> absoluto e normalizado.
+    Tira espacos e aspas em volta ("C:\\Users\\x" ou 'x'), expande ~ e %VAR%/$VAR."""
+    p = (p or "").strip()
+    while len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'": p = p[1:-1].strip()
+    if not p: return ""
+    if "\0" in p: raise DoveError("caminho invalido (caractere nulo)")
+    p = os.path.expandvars(os.path.expanduser(p))
+    try: return os.path.normpath(os.path.abspath(p))
+    except (OSError, ValueError) as e: raise DoveError(f"caminho invalido: {p} ({e})")
+def path_key(p, windows=None):
+    """Chave para comparar caminhos: no Windows ignora maiusculas e trata / como \\."""
+    windows = is_windows() if windows is None else windows
+    if windows: return p.replace("/", "\\").rstrip("\\").lower()
+    return os.path.normpath(p)
+def norm_path(p): return path_key(os.path.abspath(os.path.expanduser(p)))
+def name_key(n, windows=None):
+    """Nome de projeto para detectar duplicado: no Windows sem diferenciar maiusculas (Dove == dove)."""
+    windows = is_windows() if windows is None else windows
+    return n.casefold() if windows else n
+def name_taken(name, names, windows=None):
+    k = name_key(name, windows); return any(name_key(x, windows) == k for x in names)
 def unique_name(name, path, taken):
-    if name not in taken: return name
+    if not name_taken(name, taken): return name
     parent = os.path.basename(os.path.dirname(os.path.abspath(path))) or "x"
     cand, i = f"{name}-{parent}", 2
-    while cand in taken: cand, i = f"{name}-{parent}-{i}", i + 1
+    while name_taken(cand, taken): cand, i = f"{name}-{parent}-{i}", i + 1
     return cand
-def project_add(name, path, auto_name=False):
-    name, path = (name or "").strip(), (path or "").strip()
-    if not path: raise DoveError("caminho vazio")
-    if not name: name = os.path.basename(os.path.abspath(os.path.expanduser(path)).rstrip("\\/"))
-    if not name or "/" in name or "\\" in name: raise DoveError(f"nome de projeto invalido: '{name}'")
-    full = os.path.abspath(os.path.expanduser(path)); ensure_dirs()
+def project_add(name, path, auto_name=False, must_exist=False):
+    name = (name or "").strip()
+    full = clean_path(path)
+    if not full: raise DoveError("informe o caminho da pasta do projeto")
+    if must_exist:
+        if not os.path.exists(full): raise DoveError(f"a pasta nao existe: {full}")
+        if not os.path.isdir(full): raise DoveError(f"o caminho nao e uma pasta: {full}")
+    if not name: name = os.path.basename(full.rstrip("\\/")) or full.rstrip("\\/:")
+    if not name or "/" in name or "\\" in name or any(c in name for c in '"<>|?*:') or name in (".", ".."):
+        raise DoveError(f"nome de projeto invalido: '{name}'")
+    ensure_dirs()
     with FileLock(PROJECTS):
-        ps = load_projects(); taken = {p["name"] for p in ps}
-        if any(norm_path(p["path"]) == norm_path(full) for p in ps):
-            raise DoveError(f"caminho ja registrado: {full}")
-        if name in taken:
-            if not auto_name: raise DoveError(f"projeto '{name}' ja existe")
+        ps = load_projects(); taken = [p["name"] for p in ps]
+        dup = next((p for p in ps if isinstance(p.get("path"), str) and norm_path(p["path"]) == norm_path(full)), None)
+        if dup: raise DoveError(f"essa pasta ja esta registrada como projeto '{dup['name']}': {full}")
+        if name_taken(name, taken):
+            if not auto_name:
+                other = next(x for x in taken if name_key(x) == name_key(name))
+                raise DoveError(f"projeto '{other}' ja existe - escolha outro nome")
             name = unique_name(name, full, taken)
         p = {"name": name, "path": full, "pinned": False, "added": now_iso()}
         ps.append(p); write_json(PROJECTS, ps)
@@ -318,29 +355,57 @@ def git_info(repo, dot_git):
     for f in ("HEAD", "index"):
         try: ts = max(ts, os.path.getmtime(os.path.join(gitdir, f)))
         except OSError: pass
+    try: iso = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if ts else ""
+    except (OSError, OverflowError, ValueError): ts, iso = 0.0, ""  # Windows: mtime fora da faixa
     return {"name": os.path.basename(repo) or repo, "path": repo, "branch": branch, "remote": url,
-            "host": remote_host(url), "last_activity": ts,
-            "last_activity_iso": datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if ts else ""}
+            "host": remote_host(url), "last_activity": ts, "last_activity_iso": iso}
+def _is_link(e):
+    """Symlink, junction ou outro reparse point (Windows): nao seguimos (evita loops e pastas protegidas)."""
+    try:
+        if e.is_symlink(): return True
+        isj = getattr(os.path, "isjunction", None)  # Python 3.12+
+        if isj and isj(e.path): return True
+        attrs = getattr(e.stat(follow_symlinks=False), "st_file_attributes", 0)
+        return bool(attrs & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT (Python < 3.12 no Windows)
+    except OSError: return True
+def safe_git_info(repo, dot_git):
+    try: return git_info(repo, dot_git)
+    except Exception:  # .git ilegivel/estranho: ainda lista o repo, sem detalhes
+        return {"name": os.path.basename(repo) or repo, "path": repo, "branch": "", "remote": "", "host": "",
+                "last_activity": 0.0, "last_activity_iso": ""}
 def scan_repos(root, depth=3):
-    """Acha repos git (pasta com .git) sob root ate depth niveis, sem descer em repos achados."""
-    root = os.path.abspath(os.path.expanduser(root))
-    if not os.path.isdir(root): raise DoveError(f"pasta nao encontrada: {root}")
-    found = []
+    """Acha repos git (pasta com .git) sob root ate depth niveis, sem descer em repos achados.
+    Pula pastas sem permissao, symlinks/junctions e erros por entrada."""
+    root = clean_path(root)
+    if not root: raise DoveError("informe a pasta raiz")
+    if not os.path.exists(root): raise DoveError(f"pasta nao encontrada: {root}")
+    if not os.path.isdir(root): raise DoveError(f"o caminho nao e uma pasta: {root}")
+    try:
+        with os.scandir(root): pass
+    except PermissionError: raise DoveError(f"sem permissao para ler a pasta: {root}")
+    except OSError as e: raise DoveError(f"nao consegui ler a pasta {root}: {e}")
+    found, seen = [], set()
     def walk(d, level):
+        try:
+            st = os.stat(d)
+            key = (st.st_dev, st.st_ino)
+            if st.st_ino and key in seen: return  # ja visitada (loop)
+            seen.add(key)
+        except OSError: return
         try:
             with os.scandir(d) as it: entries = list(it)
         except OSError: return
         for e in entries:
-            if e.name == ".git": found.append(git_info(d, e.path)); return
+            if e.name == ".git": found.append(safe_git_info(d, e.path)); return
         if level >= depth: return
         for e in entries:
-            if e.name in SKIP_DIRS or e.name.startswith("."): continue
             try:
-                if not e.is_dir(follow_symlinks=False): continue
-            except OSError: continue
-            walk(e.path, level + 1)
+                if e.name in SKIP_DIRS or e.name.startswith(".") or e.name.startswith("$"): continue
+                if not e.is_dir(follow_symlinks=False) or _is_link(e): continue
+                walk(e.path, level + 1)
+            except (OSError, ValueError): continue
     walk(root, 0)
-    reg = {norm_path(p["path"]) for p in load_projects()}
+    reg = {norm_path(p["path"]) for p in load_projects() if isinstance(p.get("path"), str)}
     for r in found: r["registered"] = norm_path(r["path"]) in reg
     return sorted(found, key=lambda r: r["path"].lower())
 def scan_add(repos):
@@ -366,7 +431,7 @@ def cmd_project(a):
             for p in ps: print(f"{'*' if p.get('pinned') else ' '} {p['name']:<20} {p['path']}")
         elif a.pcmd == "scan":
             t0 = time.time(); repos = scan_repos(a.root, a.depth); dt = time.time() - t0
-            save_config(scan_root=os.path.abspath(os.path.expanduser(a.root)))
+            save_config(scan_root=clean_path(a.root))
             for r in repos:
                 age = fmt_age(r["last_activity"]) if r["last_activity"] else "-"
                 print(f"{r['name']:<24} {r['branch'] or '-':<14} {r['host'] or '-':<14} {age:>4}  {r['path']}"
@@ -580,8 +645,10 @@ def api_post(path, d, human):
         m = post_message(human, to, body, kind, s("project").strip(), task, reply, state, auto_status=False)
         return {"message": m}
     if path == "/api/project/add":
-        return {"project": project_add(s("name"), s("path"), bool(d.get("auto_name")))}
-    if path == "/api/project/remove": project_remove(s("name")); return {}
+        return {"project": project_add(s("name"), s("path"), bool(d.get("auto_name")), must_exist=True)}
+    if path == "/api/project/remove":
+        if not s("name").strip(): raise DoveError("informe o nome do projeto")
+        project_remove(s("name").strip()); return {}
     if path == "/api/project/pin": return {"project": project_pin(s("name"), bool(d.get("pinned", True)))}
     if path == "/api/mission/new":
         ags = d.get("agents") if isinstance(d.get("agents"), list) else []
@@ -589,6 +656,11 @@ def api_post(path, d, human):
                                                     [x for x in ags if isinstance(x, str)], human))}
     if path == "/api/mission/done": return {"mission": mission_view(mission_done(s("id"), human))}
     return None
+def log_err(msg):
+    """Log do servidor no stderr com data/hora (a janela do PowerShell mostra)."""
+    try:
+        sys.stderr.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n"); sys.stderr.flush()
+    except Exception: pass
 def cmd_panel(a):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import urlparse, parse_qs
@@ -599,9 +671,13 @@ def cmd_panel(a):
         print(f"Dove ja esta rodando em {url} - abrindo o navegador"); open_browser(url); return
     token = secrets.token_urlsafe(24)
     allowed = {f"{h}:{a.port}" for h in ("127.0.0.1", "localhost", "[::1]", a.host)}
+    test_raise = os.environ.get("DOVE_TEST_RAISE") == "1"  # rota de teste: /api/debug/raise
     class H(BaseHTTPRequestHandler):
+        replied = False
         def reply(self, code, body, ctype="application/json; charset=utf-8"):
-            if not isinstance(body, bytes): body = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            if not isinstance(body, bytes):  # "replace": nomes de arquivo com surrogates (Windows) nao derrubam
+                body = json.dumps(body, ensure_ascii=False).encode("utf-8", "replace")
+            self.replied = True
             self.send_response(code); self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body))); self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Referrer-Policy", "no-referrer")
@@ -609,13 +685,26 @@ def cmd_panel(a):
                 self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; "
                                  "script-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'")
             self.end_headers(); self.wfile.write(body)
+        def guarded(self, fn):
+            """Nunca derruba a conexao: DoveError -> 400; qualquer outra excecao -> 500 JSON + traceback no stderr."""
+            try: fn()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError): pass  # navegador desistiu
+            except DoveError as e:
+                if not self.replied: self.reply(400, {"ok": False, "error": str(e)})
+            except Exception as e:
+                log_err(f"erro em {self.command} {self.path}:\n" + traceback.format_exc().rstrip())
+                if not self.replied:
+                    try: self.reply(500, {"ok": False, "error": f"{type(e).__name__}: {e}"})
+                    except Exception: pass
         def host_ok(self):  # anti DNS rebinding
             if (self.headers.get("Host") or "").lower() in allowed: return True
             self.reply(403, {"ok": False, "error": "Host nao permitido"}); return False
         def token_ok(self):
             if hmac.compare_digest(self.headers.get("X-Dove-Token") or "", token): return True
-            self.reply(403, {"ok": False, "error": "token invalido"}); return False
-        def do_GET(self):
+            self.reply(403, {"ok": False, "error": "token invalido - recarregue a pagina do Dove (F5)"}); return False
+        def do_GET(self): self.guarded(self.get)
+        def do_POST(self): self.guarded(self.post)
+        def get(self):
             if not self.host_ok(): return
             u = urlparse(self.path)
             if u.path == "/":
@@ -630,14 +719,26 @@ def cmd_panel(a):
                 q = parse_qs(u.query); root = (q.get("root") or [""])[0]
                 try: depth = max(0, min(6, int((q.get("depth") or ["3"])[0])))
                 except ValueError: depth = 3
-                try:
-                    t0 = time.time(); repos = scan_repos(root, depth)
-                    save_config(scan_root=os.path.abspath(os.path.expanduser(root)))
-                    self.reply(200, {"ok": True, "root": os.path.abspath(os.path.expanduser(root)),
-                                     "repos": repos, "elapsed": round(time.time() - t0, 3)})
-                except DoveError as e: self.reply(400, {"ok": False, "error": str(e)})
+                t0 = time.time(); repos = scan_repos(root, depth); root = clean_path(root)
+                try: save_config(scan_root=root)
+                except DoveError as e: log_err(f"aviso: nao gravei scan_root: {e}")
+                self.reply(200, {"ok": True, "root": root, "repos": repos, "elapsed": round(time.time() - t0, 3)})
+            elif u.path == "/api/debug/raise" and test_raise: raise RuntimeError("falha de teste (DOVE_TEST_RAISE)")
             else: self.reply(404, {"ok": False, "error": "nao encontrado"})
-        def do_POST(self):
+        def read_body(self):
+            """Le o corpo ANTES de responder: fechar o socket com dados nao lidos manda RST e o navegador
+            mostra 'Failed to fetch' em vez da resposta de erro."""
+            try: n = int(self.headers.get("Content-Length") or "-1")
+            except ValueError: n = -1
+            if n < 0: return n, b""
+            left, chunks = min(n, 1 << 20), []
+            while left > 0:
+                c = self.rfile.read(min(left, 65536))
+                if not c: break
+                chunks.append(c); left -= len(c)
+            return n, b"".join(chunks)
+        def post(self):
+            n, raw = self.read_body()
             if not self.host_ok(): return
             origin = self.headers.get("Origin")
             if origin is not None and origin.lower() != "http://" + (self.headers.get("Host") or "").lower():
@@ -645,27 +746,36 @@ def cmd_panel(a):
             if not self.token_ok(): return
             if (self.headers.get("Content-Type") or "").split(";")[0].strip().lower() != "application/json":
                 self.reply(415, {"ok": False, "error": "Content-Type deve ser application/json"}); return
-            try: n = int(self.headers.get("Content-Length") or "-1")
-            except ValueError: n = -1
             if n < 0: self.reply(411, {"ok": False, "error": "Content-Length obrigatorio"}); return
             if n > 65536: self.reply(413, {"ok": False, "error": "corpo grande demais (max 64 KB)"}); return
-            try: d = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
-            except (ValueError, UnicodeDecodeError): self.reply(400, {"ok": False, "error": "JSON invalido"}); return
+            try: d = json.loads(raw.decode("utf-8") or "{}")
+            except (ValueError, UnicodeDecodeError):
+                self.reply(400, {"ok": False, "error": "JSON invalido no corpo da requisicao"}); return
             if not isinstance(d, dict): self.reply(400, {"ok": False, "error": "esperado objeto JSON"}); return
-            try: res = api_post(urlparse(self.path).path, d, human_name())
-            except DoveError as e: self.reply(400, {"ok": False, "error": str(e)}); return
+            path = urlparse(self.path).path
+            if path == "/api/debug/raise" and test_raise: raise RuntimeError("falha de teste (DOVE_TEST_RAISE)")
+            res = api_post(path, d, human_name())
             if res is None: self.reply(404, {"ok": False, "error": "nao encontrado"}); return
             self.reply(200, dict(res, ok=True))
         def log_message(self, *x): pass
+    class Server(ThreadingHTTPServer):
+        daemon_threads = True  # Ctrl+C nao espera requisicoes penduradas
+        def handle_error(self, request, client_address):  # ultima rede: loga e segue servindo
+            log_err(f"erro na conexao de {client_address}:\n" + traceback.format_exc().rstrip())
     if a.host not in ("127.0.0.1", "localhost", "::1"):
         print(f"AVISO: escutando em {a.host} - o painel fica visivel na rede (leitura sem autenticacao)",
               file=sys.stderr)
-    try: srv = ThreadingHTTPServer((a.host, a.port), H)
+    try: srv = Server((a.host, a.port), H)
     except OSError as e: fail(f"erro: nao consegui abrir a porta {a.port} ({e}). Use --port.")
-    print(f"Dove em {url} (Ctrl+C para sair)", flush=True)
+    print(f"Dove em {url} (Ctrl+C para sair; nao feche esta janela enquanto usa o painel)", flush=True)
     if a.open:
-        import threading; threading.Timer(0.3, open_browser, (url,)).start()
-    try: srv.serve_forever()
+        import threading; t = threading.Timer(0.3, open_browser, (url,)); t.daemon = True; t.start()
+    try:
+        while True:  # serve_forever so sai por Ctrl+C; qualquer outra excecao e logada e o loop volta
+            try: srv.serve_forever(poll_interval=0.5); break
+            except KeyboardInterrupt: raise
+            except Exception:
+                log_err("erro no loop do servidor (continuando):\n" + traceback.format_exc().rstrip()); time.sleep(0.2)
     except KeyboardInterrupt: print("\npainel encerrado")
     finally: srv.server_close()
 
