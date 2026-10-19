@@ -2328,6 +2328,194 @@ def seguranca_fase():
     print("OK: seguranca (mission done so humano, --from obrigatorio, vigia reservado, human_name, A2A_RUNNER recusa "
           "acoes do humano com exit 2 e deixa agentes trabalharem, run_id no status)")
 
+def cost_fase():
+    """a2a cost: fixtures do Claude (dedup, varios modelos, projeto e copia), do Codex (token_count e
+    token_usage_record) e do Hermes (state.db criado com sqlite3); so leitura."""
+    import sqlite3
+    from datetime import datetime, timezone
+    tmp = tempfile.mkdtemp()
+    home = os.path.join(tmp, "a2a"); claude = os.path.join(tmp, "claude"); codex = os.path.join(tmp, "codex")
+    hermes = os.path.join(tmp, "hermes")
+    lagu = os.path.join(tmp, "lagu"); wt_claude = lagu + "-claude"; wt_codex = lagu + "-codex"
+    for d in (lagu, wt_claude, wt_codex): os.makedirs(d)
+    env = dict(os.environ, A2A_HOME=home, CLAUDE_CONFIG_DIR=claude, CODEX_HOME=codex, HERMES_HOME=hermes)
+    def a2a(*args, code=0):
+        r = subprocess.run([sys.executable, str(A2A), *args], capture_output=True, text=True, env=env)
+        assert r.returncode == code, (args, r.returncode, r.stdout, r.stderr)
+        return r.stdout + r.stderr
+    a2a("init"); a2a("join", "--agent", "claude"); a2a("join", "--agent", "codex")
+    a2a("project", "add", "lagu", lagu)
+    pj = os.path.join(home, "projects.json"); ps = json.load(open(pj))
+    ps[0]["worktrees"] = {"claude": {"path": wt_claude, "branch": "dove/claude", "base": "main"},
+                          "codex": {"path": wt_codex, "branch": "dove/codex", "base": "main"}}
+    json.dump(ps, open(pj, "w"))
+    T = time.time()
+    iso = lambda t: datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + "123Z"
+    def jl(path, rows, mtime, tail=""):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            for r in rows: f.write((r if isinstance(r, str) else json.dumps(r)) + "\n")
+            f.write(tail)
+        os.utime(path, (mtime, mtime))
+    def asst(mid, model, usage, ts, cwd, sid, **extra):
+        msg = {"id": mid, "model": model, "role": "assistant", "type": "message"}
+        if usage is not None: msg["usage"] = usage
+        return {"type": "assistant", "cwd": cwd, "sessionId": sid, "timestamp": iso(ts), "message": msg, **extra}
+    U = lambda i, o, cr, cw: {"input_tokens": i, "output_tokens": o, "cache_read_input_tokens": cr, "cache_creation_input_tokens": cw}
+    m1 = asst("msg_1", "claude-opus-x", U(10, 100, 1000, 50), T - 3600, lagu, "s1")
+    pa = os.path.join(claude, "projects", "-tmp-lagu", "s1.jsonl")
+    jl(pa, [{"type": "user", "cwd": lagu, "sessionId": "s1", "timestamp": iso(T - 3700), "message": {"content": "oi"}},
+            m1, m1,  # streaming: a mesma resposta duas vezes
+            asst("msg_2", "claude-haiku-y", U(5, 20, 0, 0), T - 3600, lagu, "s1"),
+            "{nao e json \"assistant\"",
+            asst("msg_x", "claude-opus-x", None, T - 3600, lagu, "s1"),  # sem usage: zero, sem quebrar
+            asst("msg_s", "<synthetic>", U(0, 0, 0, 0), T - 3600, lagu, "s1"),
+            {"type": "cost-state", "sessionId": "s1", "startTime": 1, "totalCostUSD": 0.51,
+             "modelUsage": {"claude-opus-x": {"costUSD": 0.5}, "claude-haiku-y": {"costUSD": 0.01}}},
+            {"type": "cost-state", "sessionId": "s1", "startTime": 1, "totalCostUSD": 0.81,
+             "modelUsage": {"claude-opus-x": {"costUSD": 0.8}, "claude-haiku-y": {"costUSD": 0.01}}}],
+       T - 3500, tail='{"type":"assistant","message":{"id":"cortada')
+    pa2 = os.path.join(claude, "projects", "-tmp-lagu", "s1b.jsonl")  # sessao retomada: copia a resposta antiga
+    jl(pa2, [m1, {"type": "cost-state", "sessionId": "s1", "startTime": 1, "totalCostUSD": 0.51,  # copia: soma 0
+                  "modelUsage": {"claude-opus-x": {"costUSD": 0.5}, "claude-haiku-y": {"costUSD": 0.01}}}], T - 3400)
+    pb = os.path.join(claude, "projects", "-tmp-lagu-claude", "s2.jsonl")
+    jl(pb, [asst("msg_3", "claude-opus-x", U(1, 10, 90, 0), T - 1800, wt_claude, "s2", costUSD=0.02)], T - 1700)
+    pc = os.path.join(claude, "projects", "-tmp-lagu", "s3.jsonl")  # antigo: fica fora do --since 7d pelo mtime
+    jl(pc, [asst("msg_old", "claude-opus-x", U(1000, 1000, 0, 0), T - 10 * 86400, lagu, "s3")], T - 10 * 86400)
+    tc = lambda total, last, ts: {"timestamp": iso(ts), "type": "event_msg", "payload": {"type": "token_count",
+        "info": {"total_token_usage": total, "last_token_usage": last, "model_context_window": 1000}, "rate_limits": None}}
+    C = lambda i, c, o, **k: {"input_tokens": i, "cached_input_tokens": c, "output_tokens": o, "reasoning_output_tokens": 0,
+                               "total_tokens": i + o, **k}
+    ca = os.path.join(codex, "sessions", "2026", "10", "19", "rollout-2026-10-19T10-00-00-a.jsonl")
+    jl(ca, [{"timestamp": iso(T - 1300), "type": "session_meta", "payload": {"id": "ca", "cwd": os.path.join(tmp, "fora"),
+             "timestamp": iso(T - 1300), "originator": "codex_cli_rs", "cli_version": "0.1"}},
+            {"timestamp": iso(T - 1250), "type": "turn_context", "payload": {"cwd": os.path.join(tmp, "fora"), "model": "gpt-5-codex"}},
+            {"timestamp": iso(T - 1240), "type": "event_msg", "payload": {"type": "token_count", "info": None, "rate_limits": {}}},
+            tc(C(100, 60, 10), C(100, 60, 10), T - 1200),
+            tc(C(100, 60, 10), C(100, 60, 10), T - 1190),  # repetido (so rate limit): nao soma
+            tc(C(300, 200, 30), C(200, 140, 20), T - 600),
+            {"timestamp": iso(T - 500), "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {}}}}],
+       T - 500)
+    rec = lambda rid, u, ts: {"timestamp": iso(ts), "type": "token_usage_record", "payload": {"thread_id": "cb", "turn_id": "t",
+        "session_id": "cb", "root_turn_id": "t", "response_id": rid, "usage": u, "turn_token_usage": u, "thread_token_usage": u}}
+    cb = os.path.join(codex, "archived_sessions", "rollout-2026-10-19T11-00-00-b.jsonl")
+    jl(cb, [{"timestamp": iso(T - 1200), "type": "session_meta", "payload": {"id": "cb", "session_id": "cb", "cwd": wt_codex}},
+            {"timestamp": iso(T - 1200), "type": "turn_context", "payload": {"cwd": wt_codex, "model": "gpt-5.5"}},
+            tc(C(999, 0, 999), C(999, 0, 999), T - 1100),  # ignorado: o arquivo tem token_usage_record
+            rec("r1", C(50, 10, 5), T - 1100), rec("r1", C(50, 10, 5), T - 1100),
+            rec("r2", C(20, 0, 2, cache_write_input_tokens=3), T - 1000)], T - 1000)
+    os.makedirs(hermes)
+    db = os.path.join(hermes, "state.db")
+    con = sqlite3.connect(db)
+    con.executescript("""
+    CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, model TEXT, started_at REAL NOT NULL, ended_at REAL,
+      input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, cache_read_tokens INTEGER DEFAULT 0,
+      cache_write_tokens INTEGER DEFAULT 0, reasoning_tokens INTEGER DEFAULT 0, cwd TEXT, estimated_cost_usd REAL,
+      actual_cost_usd REAL, cost_status TEXT, cost_source TEXT, last_activity_at REAL);
+    CREATE TABLE session_model_usage (session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, model TEXT NOT NULL,
+      billing_provider TEXT NOT NULL DEFAULT '', billing_base_url TEXT NOT NULL DEFAULT '', billing_mode TEXT NOT NULL DEFAULT '',
+      task TEXT NOT NULL DEFAULT '', api_call_count INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_write_tokens INTEGER NOT NULL DEFAULT 0, reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+      estimated_cost_usd REAL NOT NULL DEFAULT 0, actual_cost_usd REAL NOT NULL DEFAULT 0, cost_status TEXT, cost_source TEXT,
+      first_seen REAL, last_seen REAL,
+      PRIMARY KEY (session_id, model, billing_provider, billing_base_url, billing_mode, task));
+    """)
+    con.execute("INSERT INTO sessions (id, source, model, started_at, input_tokens, output_tokens, cache_read_tokens, "
+                "cache_write_tokens, cwd, estimated_cost_usd, cost_status, last_activity_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("h1", "cli", "anthropic/claude-sonnet", T - 7300, 7, 8, 9, 1, lagu, 0.05, "estimated", T - 7200))
+    con.execute("INSERT INTO session_model_usage (session_id, model, input_tokens, output_tokens, cache_read_tokens, "
+                "cache_write_tokens, estimated_cost_usd, cost_status, first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                ("h1", "anthropic/claude-sonnet", 7, 8, 9, 1, 0.05, "estimated", T - 7300, T - 7200))
+    con.execute("INSERT INTO sessions (id, source, model, started_at, input_tokens, output_tokens, cwd) VALUES (?,?,?,?,?,?,?)",
+                ("h2", "cli", "openrouter/x", T - 5000, 3, 4, "/em/lugar/nenhum"))
+    con.execute("INSERT INTO sessions (id, source, model, started_at, input_tokens, output_tokens, cwd, last_activity_at) "
+                "VALUES (?,?,?,?,?,?,?,?)", ("h3", "cli", "openrouter/x", T - 30 * 86400, 500, 500, lagu, T - 30 * 86400))
+    con.commit(); con.close()
+    os.utime(db, (T - 100, T - 100))
+    def snap():
+        out = {}
+        for root in (claude, codex, hermes):
+            for d, _, fs in os.walk(root):
+                for f in fs:
+                    p = os.path.join(d, f); out[p] = (open(p, "rb").read(), os.stat(p).st_mtime_ns)
+        return out
+    before = snap()
+
+    d = json.loads(a2a("cost", "--json"))
+    rows = {r["key"]: r for r in d["rows"]}
+    c, x, h = rows["claude"], rows["codex"], rows["hermes"]
+    assert (c["input"], c["output"], c["cache_read"], c["cache_write"]) == (16, 130, 1090, 50), c
+    assert abs(c["cost_usd"] - 0.83) < 1e-9 and not c["cost_partial"] and c["sessions"] == 2, c
+    assert (x["input"], x["output"], x["cache_read"], x["cache_write"]) == (160, 37, 210, 3), x
+    assert x["cost_usd"] is None and x["total"] == 160 + 37 + 210 + 3, x
+    assert (h["input"], h["output"], h["cache_read"], h["cache_write"]) == (10, 12, 9, 1), h
+    assert abs(h["cost_usd"] - 0.05) < 1e-9 and h["cost_partial"], h  # h2 tem tokens e nao tem custo
+    assert abs(c["cache_hit"] - round(1090 / 1106, 4)) < 1e-9, c
+    assert d["files"]["read"] == 6 and d["files"]["older_than_since"] == 1 and d["files"]["bad_lines"] == 2, d["files"]
+    assert d["files"]["duplicates"] == 3 and d["total"]["cost_partial"], d
+    assert all(p["found"] for p in d["sources"]["claude"] + d["sources"]["hermes"][:1]), d["sources"]
+    out = a2a("cost")
+    assert out.startswith("custo · todos os projetos · desde ") and "· por agente" in out.splitlines()[0], out
+    line = next(l for l in out.splitlines() if l.startswith("claude"))
+    assert line.split() == ["claude", "2", "16", "130", "1.090", "50", "1.286", "98.6%", "US$", "0,83"], line
+    assert next(l for l in out.splitlines() if l.startswith("codex")).endswith(" n/d"), out
+    assert next(l for l in out.splitlines() if l.startswith("hermes")).endswith("US$ 0,05*"), out
+    assert "arquivos lidos: 6, ignorados: 1 (1 mais antigos que o periodo); linhas invalidas: 2" in out, out
+    assert "nao e o valor cobrado" in out and "O Codex nao grava custo" in out and "* parcial" in out, out
+    assert "medido" not in out and "cobrado" not in out.replace("nao e o valor cobrado", ""), out
+    # --by projeto: cwd na pasta do projeto ou na copia de um agente -> lagu; o resto -> '-'
+    d = json.loads(a2a("cost", "--by", "projeto", "--json"))
+    rows = {r["key"]: r for r in d["rows"]}
+    assert set(rows) == {"lagu", "-"}, rows
+    assert rows["lagu"]["input"] == 16 + 60 + 7 and rows["-"]["input"] == 100 + 3, rows
+    assert rows["lagu"]["sessions"] == 4 and rows["-"]["sessions"] == 2, rows
+    d = json.loads(a2a("cost", "--by", "modelo", "--json"))
+    rows = {r["key"]: r for r in d["rows"]}
+    assert rows["claude-opus-x"]["output"] == 110 and abs(rows["claude-opus-x"]["cost_usd"] - 0.82) < 1e-9, rows
+    assert rows["claude-haiku-y"]["output"] == 20 and rows["gpt-5-codex"]["output"] == 30 and rows["gpt-5.5"]["output"] == 7, rows
+    assert "<synthetic>" not in rows and rows["openrouter/x"]["cost_usd"] is None, rows
+    day = datetime.fromtimestamp(T - 1800, timezone.utc).strftime("%Y-%m-%d")
+    d = json.loads(a2a("cost", "--by", "dia", "--json"))
+    assert day in [r["key"] for r in d["rows"]] and all(re.fullmatch(r"\d{4}-\d\d-\d\d", r["key"]) for r in d["rows"]), d["rows"]
+    s = a2a("cost", "--by", "sessao", "--project", "lagu")
+    assert "claude s1 (lagu)" in s and "claude s2 (lagu)" in s and "codex cb (lagu)" in s and "hermes h1 (lagu)" in s, s
+    assert "codex ca" not in s and "h2" not in s, s
+    d = json.loads(a2a("cost", "--project", "-", "--agent", "hermes", "--json"))
+    assert [r["key"] for r in d["rows"]] == ["hermes"] and d["rows"][0]["input"] == 3 and list(d["sources"]) == ["hermes"], d
+    # --since: 45m pula o arquivo de 1h pelo mtime; uma data antiga traz o arquivo velho e a sessao velha do Hermes
+    d = json.loads(a2a("cost", "--since", "45m", "--agent", "claude", "--json"))
+    assert d["rows"][0]["input"] == 1 and abs(d["rows"][0]["cost_usd"] - 0.02) < 1e-9 and d["files"]["older_than_since"] == 3, d
+    d = json.loads(a2a("cost", "--since", "2000-01-01", "--json"))
+    rows = {r["key"]: r for r in d["rows"]}
+    assert rows["claude"]["input"] == 1016 and rows["hermes"]["input"] == 510 and d["files"]["skipped"] == 0, rows
+    assert "--since invalido" in a2a("cost", "--since", "ontem", code=1)
+    assert "invalid choice" in a2a("cost", "--by", "mes", code=2)
+    # --mission: so as copias de trabalho dos participantes, na janela da missao (aproximado)
+    mid = re.search(r"missao (m[0-9a-f]{7})", a2a("mission", "new", "--project", "lagu", "--title", "custo",
+                                                  "--agents", "claude,codex", "--from", "luiz")).group(1)
+    mp = os.path.join(home, "missions", mid + ".json"); m = json.load(open(mp))
+    m["created"] = datetime.fromtimestamp(T - 2 * 3600 - 60, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"); json.dump(m, open(mp, "w"))
+    d = json.loads(a2a("cost", "--mission", mid, "--json"))
+    rows = {r["key"]: r for r in d["rows"]}
+    assert set(rows) == {"claude", "codex"} and d["mission"]["approx"], d
+    assert rows["claude"]["input"] == 1 and rows["codex"]["input"] == 60 and rows["codex"]["cache_write"] == 3, rows
+    out = a2a("cost", "--mission", mid)
+    assert out.startswith(f"custo · missao {mid} (lagu; claude, codex)") and "aproximado" in out.splitlines()[0], out
+    assert "missao 'mzzzzzzz' nao encontrada" in a2a("cost", "--mission", "mzzzzzzz", code=1)
+    # so leitura: bytes e mtime iguais, nenhum arquivo novo (-wal/-shm/-journal) nas pastas das CLIs
+    assert snap() == before, "a2a cost alterou os registros das CLIs"
+    # sem nenhuma fonte: nao quebra
+    env2 = dict(env, CLAUDE_CONFIG_DIR=os.path.join(tmp, "x1"), CODEX_HOME=os.path.join(tmp, "x2"), HERMES_HOME=os.path.join(tmp, "x3"))
+    r = subprocess.run([sys.executable, str(A2A), "cost"], capture_output=True, text=True, env=env2)
+    assert r.returncode == 0 and "(nenhum uso encontrado no periodo)" in r.stdout and "claude nao encontrado" in r.stdout, r.stdout
+    hp = subprocess.run([sys.executable, str(A2A), "cost", "--help"], capture_output=True, text=True, env=env).stdout
+    assert "exemplos:\n" in hp and "a2a cost --mission" in hp and "mode=ro" in hp, hp
+    assert "a2a cost" in a2a("onboard", "--agent", "claude") and "a2a cost" not in a2a("onboard", "--agents-md")
+    print("OK: a2a cost (Claude com dedup/cost-state/costUSD, Codex token_count e token_usage_record, Hermes state.db ro, "
+          "projeto/copia/'-', --by agente|projeto|modelo|dia|sessao, --since por mtime e data, --mission aproximado, "
+          "linha corrompida, n/d, --json, so leitura)")
+
 if __name__ == "__main__":
     main()
     fase1()
@@ -2346,3 +2534,4 @@ if __name__ == "__main__":
     loops_fase()
     watch_fase()
     seguranca_fase()
+    cost_fase()

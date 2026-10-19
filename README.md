@@ -262,6 +262,41 @@ hermes chat --oneshot -Q --query-file - --source tool --max-turns 30 --usage-fil
 ```
 A allowlist do Claude é por **subcomando** do `a2a` (`send`, `brief`, `read`, `status`, `ack`, `whereami`, `mission approve`, `mission reject`, `fact add`, `fact list`, `project which`) mais `git status`/`git diff`/`git log`, nas formas `Bash(...)` e `PowerShell(...)`. Nunca `python *`, `a2a *` inteiro, `git push`, `git merge` nem `git -C`. O modo `dontAsk` nega tudo o que não está liberado (regra de negação em Bash dá para contornar; a contenção é a allowlist).
 
+## Custo e tokens (`a2a cost`)
+Soma os tokens que o Claude Code, o Codex e o Hermes **já gravam** no disco, por agente, projeto, modelo, dia ou sessão. **Só lê:** os JSONL são lidos linha a linha e o `state.db` do Hermes é aberto com `mode=ro` (se o WAL impedir, `immutable=1`); nada é criado nem alterado nessas pastas, que ficam fora do `~/.a2a`.
+```
+a2a cost [--since 7d|24h|AAAA-MM-DD] [--project P] [--agent claude|codex|hermes] [--by agente|projeto|modelo|dia|sessao] [--mission ID] [--json]
+```
+```
+custo · lagu · desde 2026-10-12T03:38:11Z · por agente
+agente  sessoes  entrada  saida  cache_lido  cache_escrito  total  cache%  custo estimado
+claude        2       16    130       1.090             50  1.286   98.6%        US$ 0,83
+codex         1       60      7          10              3     80   14.3%             n/d
+hermes        1        7      8           9              1     25   56.2%        US$ 0,05
+total         4       83    145       1.109             54  1.391   93.0%       US$ 0,88*
+tokens reportados pelas CLIs; total = entrada + saida + cache_lido + cache_escrito; cache% = cache_lido / (entrada + cache_lido)
+custo estimado = o valor que a propria fonte grava: Claude Code e Hermes calculam no cliente, a preco de tabela; nao e o valor cobrado. ...
+* parcial: ha sessoes sem custo na fonte (ex.: Codex)
+arquivos lidos: 6, ignorados: 1 (1 mais antigos que o periodo); linhas invalidas: 2
+fontes: claude ~/.claude/projects · codex ~/.codex/sessions, ~/.codex/archived_sessions · hermes ~/.hermes/state.db
+```
+- **Projeto:** cada sessão vai para o projeto registrado cuja pasta, ou a cópia de trabalho de um agente, contém o `cwd` dela (a mesma regra do `project which`; no Windows sem diferenciar maiúsculas). Fora de qualquer projeto: `-`.
+- **Colunas:** `entrada` é a entrada sem cache; `cache_lido` e `cache_escrito` vêm separados; `total` é a soma das quatro ("tokens reportados"). `cache%` = `cache_lido / (entrada + cache_lido)`: serve para conferir se o prefixo estável do `a2a prompt` está caindo no cache.
+- **Custo estimado** só aparece quando a própria fonte grava um custo; senão, `n/d`. O Dove não tem tabela de preços e nunca chama nada de "medido" ou "cobrado". O Claude Code calcula o valor no cliente, a preço de tabela, e a doc dele diz que é estimativa e que, para assinantes Pro/Max, não serve para cobrança ([Manage costs](https://code.claude.com/docs/en/costs)). O Hermes grava `estimated_cost_usd` (e `actual_cost_usd` quando o provedor informa; usado só se não houver estimativa). O Codex não grava custo. `*` = parcial: no grupo há sessões com tokens e sem custo.
+- **`--since`** (padrão `7d`; `24h`, `90m`, `AAAA-MM-DD` em UTC): arquivos com data de modificação anterior nem são abertos (contam em "ignorados"). `--by dia` usa o dia UTC.
+- **`--mission ID`** (aproximado): soma só as sessões cujo `cwd` é a cópia de trabalho de um participante, entre a criação da missão e a confirmação do humano (ou agora).
+- **Teto:** no máximo 20.000 arquivos por chamada, os mais novos primeiro; o resto aparece em "ignorados". Linha cortada (arquivo sendo escrito) ou corrompida conta em "linhas invalidas" e é pulada; campo ausente vira zero ou `n/d`.
+- `--json`: `rows`, `total` (com `cost_usd` = `null` quando `n/d`, `cost_partial`, `cache_hit`), `files` (lidos, ignorados, duplicados, linhas inválidas), `sources` e `mission`.
+
+### De onde vem cada número (formatos conferidos em 2026-10-19)
+| CLI | Onde | O que o Dove lê | Conferido em |
+|---|---|---|---|
+| Claude Code | `$CLAUDE_CONFIG_DIR/projects` ou `~/.claude/projects/<pasta>/<sessao>.jsonl`, mais `<sessao>/subagents/agent-*.jsonl` | linhas `type: "assistant"`: `message.usage` (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`), `message.model`, `message.id`, `cwd`, `sessionId`, `timestamp`. A mesma resposta aparece em várias linhas (uma por bloco do streaming) e de novo em sessões retomadas: conta uma vez por `message.id`. Custo: linhas `type: "cost-state"` (`totalCostUSD` e `modelUsage.<modelo>.costUSD`, acumulados por processo, `startTime`; o Dove soma as diferenças) ou `costUSD` na linha (versões antigas). Respostas `<synthetic>` são ignoradas. | Local e caminho: [claude-directory](https://code.claude.com/docs/en/claude-directory) (`projects/<project>/<session>.jsonl`), [data-usage](https://code.claude.com/docs/en/data-usage) e [settings](https://code.claude.com/docs/en/settings) (`CLAUDE_CONFIG_DIR`). Os campos não têm doc pública (o Claude Code é fechado): conferidos numa transcrição real do Claude Code 2.1.302; `costUSD` por linha é suposição de versões antigas. |
+| Codex | `$CODEX_HOME` ou `~/.codex`: `sessions/AAAA/MM/DD/rollout-*.jsonl` e `archived_sessions/` | `session_meta.payload.cwd`, `turn_context.payload.{cwd,model}`; uso: `token_usage_record.payload.usage` (por resposta, dedup por `response_id`) ou, em rollouts sem ele, `event_msg` com `payload.type: "token_count"` → `info.last_token_usage` (evento com o mesmo `total_token_usage` do anterior não soma). `input_tokens` **inclui** `cached_input_tokens`: entrada = `input_tokens − cached_input_tokens`; `cache_escrito` = `cache_write_input_tokens`. Sem custo. | Código do [openai/codex](https://github.com/openai/codex) (commit `89461ea`): `codex-rs/protocol/src/protocol.rs` (`TokenUsage`, `TokenUsageInfo`, `TokenCountEvent`, `SessionMeta`, `TurnContextItem`, `TokenUsageRecord`), `codex-rs/history/src/rollout_payload.rs` (tipos das linhas), `codex-rs/rollout/src/policy.rs` (quais eventos vão para o arquivo), `codex-rs/rollout/src/lib.rs` (`sessions`, `archived_sessions`). Sem rollout real nesta máquina: fixture montado a partir do código. |
+| Hermes | `$HERMES_HOME/state.db` (Windows nativo `%LOCALAPPDATA%\hermes`, senão `~/.hermes`) e `profiles/*/state.db` | `session_model_usage` (tokens e custo por sessão e modelo, `last_seen`) junto com `sessions` (`cwd`, `last_activity_at`/`ended_at`/`started_at`); sessão sem linha por modelo usa os totais de `sessions` (`input_tokens` já sem cache, `cache_read_tokens`, `cache_write_tokens`, `estimated_cost_usd`, `actual_cost_usd`, `cost_status`). Colunas ausentes viram `n/d`. | Código do [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) (commit `71fa6e1`): `hermes_state_common.py` (esquema v32), `hermes_state_usage.py` (`update_token_counts`), `agent/usage_pricing.py` (`CanonicalUsage`, `cost_status`), `hermes_constants.py` (pasta padrão). Sem `state.db` real nesta máquina: fixture criado com `sqlite3` no mesmo esquema. |
+
+Limites: só entra o que a CLI gravou na máquina (sessões apagadas pelo `cleanupPeriodDays` do Claude Code, por exemplo, somem). O custo do `cost-state` do Claude cobre a sessão inteira, inclusive subagentes, e vai para o `cwd` da sessão principal. Um rollout do Codex criado por fork pode repetir eventos `token_count` do original (os `token_usage_record` têm dedup).
+
 ## Modo herdr (estado dos agentes)
 Cada agente publica o próprio estado — `working`, `idle`, `blocked`, `done` ou `unknown` — em `~/.a2a/status/<agente>.json`. Assim você (ou outro agente) vê num quadro quem está trabalhando, quem travou e quem terminou.
 
@@ -537,6 +572,7 @@ a2a loops [--project P] [--agent X] [--since H] [--json] [--strict]
 | `prompt --agent X --project P [--task ID] [--for claude\|codex\|hermes] [--prefix-hash] [--max-tail-chars N]` | imprime (não executa) o prompt em camadas para um vigia headless: núcleo + papel, pasta, fronteira, brief + tarefa; `--prefix-hash` mostra o hash do prefixo estável |
 | `loops [--project P] [--agent X] [--since H] [--json] [--strict]` | detector de loop entre agentes, só leitura: rodadas sem o humano, repetição, ping-pong, conversa sem origem humana, tetos por hora; sai 0 (com `--strict`, 1 se houver achados) |
 | `watch check [--project P] [--agent X] [--json] [--show-command]` | pré-checagem do vigia, só leitura: CLIs, versões, login, sandbox, cópias limpas, `STOP`; `--show-command` imprime o comando exato do vigia sem rodar |
+| `cost [--since 7d\|24h\|AAAA-MM-DD] [--project P] [--agent claude\|codex\|hermes] [--by agente\|projeto\|modelo\|dia\|sessao] [--mission ID] [--json]` | tokens (entrada, saída, cache lido/escrito, cache%) e custo estimado quando a fonte grava, lidos (só leitura) dos registros do Claude Code, Codex e Hermes; `n/d` sem custo na fonte |
 
 ## Envelope da mensagem (JSON)
 `data` (ISO 8601 UTC) · `task_id` · `msg_id` · `from` · `to` · `project` · `in_reply_to` · `kind` (task | report | question | correction | ack) · `state` (AGUARDANDO_ACEITE | ACEITO | EM_EXECUCAO | BLOQUEADO | AGUARDANDO_APROVACAO | EM_REVISAO | CONCLUIDO | CANCELADO) · `result` · `evidence` · `pending` · `next_action` · `body`

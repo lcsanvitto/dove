@@ -2394,6 +2394,7 @@ Este projeto é trabalhado por vários agentes ao mesmo tempo, que se coordenam 
 - Antes de mexer num arquivo que outro agente pode estar editando, avise no canal.
 - Conversa indo e voltando sem decisão? Pare e pergunte ao Luiz. `a2a loops --project <projeto> --agent <seu-nome>` mostra o que parece loop entre agentes (só leitura).
 - Informe seu contexto quando souber: `a2a status --agent <seu-nome> --set working --context <0-100>`; com 80%+ faça o handoff (abaixo).
+- Tokens e custo estimado do projeto (só leitura dos registros do Claude, Codex e Hermes): `a2a cost --project <projeto> --since 24h --by agente`.
 
 ### Contexto e handoff
 Ao passar de 80% de contexto:
@@ -2981,6 +2982,375 @@ def cmd_watch(a):
               + ("" if n["ERRO"] else " · pronto para o vigia (so leitura: nada foi executado alem de --version/--help/auth status)"))
     if n["ERRO"]: sys.exit(1)
 
+# ---------------------------------------------------------------- custo e tokens (a2a cost: so leitura dos registros das CLIs)
+# Le o que as CLIs ja gravam; nunca escreve nesses arquivos (JSONL linha a linha; SQLite com mode=ro). Formatos:
+#   claude: $CLAUDE_CONFIG_DIR/projects ou ~/.claude/projects/<pasta>/<sessao>.jsonl (+ <sessao>/subagents/*.jsonl);
+#           linhas type=assistant com message.{id,model,usage}, cwd, sessionId, timestamp (dedup por message.id);
+#           custo: costUSD na linha (versoes antigas) ou linhas type=cost-state (totalCostUSD/modelUsage acumulados no processo)
+#   codex:  $CODEX_HOME/sessions/AAAA/MM/DD/rollout-*.jsonl (+ archived_sessions/): session_meta (cwd), turn_context
+#           (cwd, model), token_usage_record (uso por resposta, dedup por response_id) ou event_msg token_count
+#           (info.last_token_usage; input_tokens inclui cached_input_tokens). Sem campo de custo.
+#   hermes: $HERMES_HOME/state.db (Windows nativo %LOCALAPPDATA%\hermes, senao ~/.hermes; + profiles/*/state.db):
+#           tabelas sessions (cwd, tokens, estimated_cost_usd/actual_cost_usd) e session_model_usage (por modelo)
+COST_AGENTS = ("claude", "codex", "hermes")
+COST_BY = {"agente": "agente", "agent": "agente", "projeto": "projeto", "project": "projeto", "modelo": "modelo",
+           "model": "modelo", "dia": "dia", "day": "dia", "sessao": "sessao", "session": "sessao"}
+COST_MAX_FILES = 20000   # teto de arquivos lidos por chamada (os mais novos primeiro); o resto conta como ignorado
+COST_FIELDS = ("input", "output", "cache_read", "cache_write")
+COST_NOTE = ("custo estimado = o valor que a propria fonte grava: Claude Code e Hermes calculam no cliente, a preco de "
+             "tabela; nao e o valor cobrado. Uso por assinatura (Claude Pro/Max, ChatGPT) nao vira cobranca por token. "
+             "O Codex nao grava custo (n/d).")
+TS_RE = re.compile(r"^(\d{4}-\d\d-\d\d)[T ](\d\d:\d\d:\d\d)(?:\.\d+)?(Z|[+-]\d\d:?\d\d)?$")
+def log_epoch(ts):
+    """Data ISO dos registros (2026-10-18T19:15:05.746Z, com ou sem fracao/fuso) -> epoch; None se invalida."""
+    if isinstance(ts, (int, float)): return float(ts) / (1000 if ts > 1e11 else 1)
+    m = TS_RE.match(str(ts or "").strip())
+    if not m: return None
+    tz = m.group(3) or "Z"
+    try:
+        t = datetime.strptime(m.group(1) + "T" + m.group(2), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError: return None
+    if tz != "Z":
+        sign = -1 if tz[0] == "+" else 1; hh, mm = tz[1:3], tz[-2:]
+        t += sign * (int(hh) * 3600 + int(mm) * 60)
+    return t
+def parse_since(v, now=None):
+    """--since: 7d, 24h, 90m ou AAAA-MM-DD (meia-noite UTC) -> epoch."""
+    now = time.time() if now is None else now; v = (v or "").strip()
+    m = re.fullmatch(r"(\d+)([dhm])", v)
+    if m and int(m.group(1)) > 0: return now - int(m.group(1)) * {"d": 86400, "h": 3600, "m": 60}[m.group(2)]
+    try: return datetime.strptime(v, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError: raise DoveError(f"--since invalido: '{v}' (use 7d, 24h ou AAAA-MM-DD)")
+def _env_dir(var, *default):
+    v = (os.environ.get(var) or "").strip()
+    return os.path.expanduser(v) if v else os.path.join(os.path.expanduser("~"), *default)
+def cost_sources():
+    """Onde cada CLI grava (respeita CLAUDE_CONFIG_DIR, CODEX_HOME e HERMES_HOME)."""
+    hermes = (os.environ.get("HERMES_HOME") or "").strip()
+    if hermes: hermes = os.path.expanduser(hermes)
+    elif is_windows(): hermes = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local"), "hermes")
+    else: hermes = os.path.join(os.path.expanduser("~"), ".hermes")
+    codex = _env_dir("CODEX_HOME", ".codex")
+    return {"claude": [os.path.join(_env_dir("CLAUDE_CONFIG_DIR", ".claude"), "projects")],
+            "codex": [os.path.join(codex, "sessions"), os.path.join(codex, "archived_sessions")],
+            "hermes": [os.path.join(hermes, "state.db")] + sorted(glob.glob(os.path.join(hermes, "profiles", "*", "state.db")))}
+def _jsonl_files(root, pattern):
+    out = []
+    for d, dirs, files in os.walk(root):
+        dirs[:] = [x for x in dirs if x not in ("tool-results", "memory")]
+        out += [os.path.join(d, f) for f in files if re.fullmatch(pattern, f)]
+    return out
+def _iter_lines(path, needles, stats):
+    """Linhas JSON (dict) que contem um dos needles (bytes); linha cortada/corrompida conta em bad_lines e segue."""
+    try:
+        with open(path, "rb") as f:
+            for raw in f:
+                if not any(n in raw for n in needles): continue
+                try: d = json.loads(raw.decode("utf-8", errors="replace"))
+                except ValueError: stats["bad_lines"] += 1; continue
+                if isinstance(d, dict): yield d
+    except OSError as e: stats["errors"].append(f"{path}: {e}")
+def _num(x):
+    try: return max(int(x or 0), 0)
+    except (TypeError, ValueError): return 0
+def _usd(x):
+    try: return float(x) if x is not None and str(x).strip() != "" else None
+    except (TypeError, ValueError): return None
+
+class CostAcc:
+    """Soma os registros por grupo. Registro: agent, session, cwd, model, ts, input/output/cache_read/cache_write, cost."""
+    def __init__(self, by="agente", since=None, until=None, project=None, agent=None, mission=None):
+        self.by, self.since, self.until, self.project, self.agent, self.mission = by, since, until, project, agent, mission
+        self.groups, self.where, self.seen = {}, {}, {}
+        self.stats = {"read": 0, "skipped": 0, "old": 0, "cap": 0, "missing": [], "bad_lines": 0, "errors": [], "dup": 0}
+    def locate(self, cwd):
+        """cwd -> (projeto, agente da copia de trabalho) via project_which; '-' se nenhum projeto contem cwd."""
+        if cwd not in self.where:
+            pj, ag = (None, "")
+            if cwd:
+                try: pj, ag = project_which(cwd)
+                except (DoveError, OSError, ValueError): pass
+            self.where[cwd] = (pj or "-", ag or "")
+        return self.where[cwd]
+    def key(self, r, pj):
+        if self.by == "agente": return r["agent"]
+        if self.by == "projeto": return pj
+        if self.by == "modelo": return r.get("model") or "n/d"
+        if self.by == "dia": return datetime.fromtimestamp(r["ts"], timezone.utc).strftime("%Y-%m-%d") if r.get("ts") else "n/d"
+        return f"{r['agent']} {str(r.get('session') or 'n/d')[:12]} ({pj})"
+    def accept(self, r):
+        if self.agent and r["agent"] != self.agent: return None
+        ts = r.get("ts")
+        if ts is not None and ((self.since is not None and ts < self.since) or (self.until is not None and ts > self.until)): return None
+        pj, ag = self.locate(r.get("cwd") or "")
+        if self.project and pj != self.project: return None
+        if self.mission and (pj != self.mission["project"] or ag not in self.mission.get("agents", [])): return None
+        return self.key(r, pj)
+    def add(self, r, dedup=None):
+        """dedup: id da resposta; a mesma resposta repetida (streaming, sessao retomada) conta uma vez (o maior valor de cada campo)."""
+        k = self.accept(r)
+        if k is None: return
+        vals = {f: _num(r.get(f)) for f in COST_FIELDS}
+        if dedup:
+            old = self.seen.get(dedup)
+            if old:
+                self.stats["dup"] += 1
+                k, prev = old
+                delta = {f: max(vals[f] - prev[f], 0) for f in COST_FIELDS}
+                for f in COST_FIELDS: prev[f] = max(prev[f], vals[f])
+                vals = delta; r = dict(r, cost=None)
+            else: self.seen[dedup] = (k, dict(vals))
+        g = self.groups.setdefault(k, {"key": k, **{f: 0 for f in COST_FIELDS}, "cost": 0.0, "tok_sessions": set(),
+                                        "cost_sessions": set(), "sessions": set()})
+        for f in COST_FIELDS: g[f] += vals[f]
+        sid = (r["agent"], r.get("session") or "")
+        g["sessions"].add(sid)
+        if any(vals.values()): g["tok_sessions"].add(sid)
+        c = _usd(r.get("cost"))
+        if c is not None: g["cost"] += c; g["cost_sessions"].add(sid)
+
+def cost_claude(acc, root):
+    """Transcricoes do Claude Code. Custo: costUSD por linha ou deltas dos cost-state (acumulados por processo)."""
+    state = {}  # (sessao, startTime) -> custo acumulado por modelo; global: copia do mesmo cost-state em outro arquivo soma 0
+    for path in _cost_files(acc, root, r"[^.].*\.jsonl"):
+        last_ts, last_cwd, sid = None, "", ""
+        for d in _iter_lines(path, (b'"assistant"', b'cost-state', b'costUSD'), acc.stats):
+            ts = log_epoch(d.get("timestamp"))
+            if ts is not None: last_ts = ts
+            if isinstance(d.get("cwd"), str): last_cwd = d["cwd"]
+            if isinstance(d.get("sessionId"), str): sid = d["sessionId"]
+            if d.get("type") == "cost-state":
+                proc = (d.get("sessionId") or sid, d.get("startTime"))
+                prev = state.get(proc, {})
+                mu = d.get("modelUsage") if isinstance(d.get("modelUsage"), dict) else {}
+                cur = {m: _usd((v or {}).get("costUSD")) for m, v in mu.items() if isinstance(v, dict)}
+                cur = {m: c for m, c in cur.items() if c is not None}
+                if not cur and _usd(d.get("totalCostUSD")) is not None: cur = {"n/d": _usd(d.get("totalCostUSD"))}
+                for m, c in cur.items():
+                    delta = c - prev.get(m, 0.0)
+                    if delta > 1e-12:
+                        acc.add({"agent": "claude", "session": proc[0], "cwd": last_cwd, "model": m,
+                                 "ts": last_ts if last_ts is not None else _mtime(path), "cost": delta})
+                state[proc] = {**prev, **cur}
+                continue
+            msg = d.get("message")
+            if d.get("type") != "assistant" or not isinstance(msg, dict): continue
+            u = msg.get("usage") if isinstance(msg.get("usage"), dict) else {}
+            model = msg.get("model") if isinstance(msg.get("model"), str) else ""
+            if model == "<synthetic>": continue
+            mid = msg.get("id") if isinstance(msg.get("id"), str) else ""
+            acc.add({"agent": "claude", "session": sid, "cwd": last_cwd, "model": model or "n/d",
+                     "ts": ts if ts is not None else _mtime(path),
+                     "input": u.get("input_tokens"), "output": u.get("output_tokens"),
+                     "cache_read": u.get("cache_read_input_tokens"), "cache_write": u.get("cache_creation_input_tokens"),
+                     "cost": d.get("costUSD")}, dedup=("claude", mid) if mid else None)
+
+def _codex_usage(u):
+    u = u if isinstance(u, dict) else {}
+    inp, cached = _num(u.get("input_tokens")), _num(u.get("cached_input_tokens"))
+    return {"input": max(inp - cached, 0), "cache_read": cached, "cache_write": _num(u.get("cache_write_input_tokens")),
+            "output": _num(u.get("output_tokens"))}
+def cost_codex(acc, root):
+    """Rollouts do Codex: token_usage_record (por resposta) quando existe; senao event_msg token_count."""
+    for path in _cost_files(acc, root, r"rollout-.*\.jsonl"):
+        sid, cwd, model, pending, has_records, last_total = "", "", "", [], False, None
+        for d in _iter_lines(path, (b"session_meta", b"turn_context", b"token_count", b"token_usage_record"), acc.stats):
+            p, typ = d.get("payload") if isinstance(d.get("payload"), dict) else {}, d.get("type")
+            ts = log_epoch(d.get("timestamp"))
+            ts = ts if ts is not None else _mtime(path)
+            if typ == "session_meta":
+                sid = str(p.get("id") or p.get("session_id") or sid); cwd = p.get("cwd") if isinstance(p.get("cwd"), str) else cwd
+            elif typ == "turn_context":
+                if isinstance(p.get("cwd"), str): cwd = p["cwd"]
+                if isinstance(p.get("model"), str): model = p["model"]
+            elif typ == "token_usage_record":
+                has_records = True
+                acc.add({"agent": "codex", "session": str(p.get("session_id") or sid), "cwd": cwd, "model": model or "n/d",
+                         "ts": ts, **_codex_usage(p.get("usage"))},
+                        dedup=("codex", str(p["response_id"])) if p.get("response_id") else None)
+            elif typ == "event_msg" and p.get("type") == "token_count":
+                info = p.get("info") if isinstance(p.get("info"), dict) else None
+                if not info: continue
+                total = json.dumps(info.get("total_token_usage"), sort_keys=True)
+                if total == last_total: continue  # evento repetido (so rate limit): nada novo
+                last_total = total
+                pending.append({"agent": "codex", "session": sid, "cwd": cwd, "model": model or "n/d", "ts": ts,
+                                **_codex_usage(info.get("last_token_usage"))})
+        if not has_records:
+            for r in pending: acc.add(r)
+
+def _sqlite_ro(path):
+    """Abre o SQLite so para leitura (mode=ro; se o WAL impedir, immutable=1). Nunca cria nem altera arquivo."""
+    import sqlite3, pathlib
+    uri = pathlib.Path(os.path.abspath(path)).as_uri()
+    try:
+        con = sqlite3.connect(uri + "?mode=ro", uri=True, timeout=2); con.execute("SELECT 1 FROM sqlite_master LIMIT 1")
+        return con
+    except sqlite3.Error:
+        con = sqlite3.connect(uri + "?mode=ro&immutable=1", uri=True, timeout=2); con.execute("SELECT 1 FROM sqlite_master LIMIT 1")
+        return con
+def _hermes_cost(est, act, status):
+    est, act = _usd(est), _usd(act)
+    if est is not None and (est > 0 or status in ("estimated", "included", "actual")): return est
+    if act: return act
+    return None
+def cost_hermes(acc, path):
+    """state.db do Hermes: session_model_usage (por modelo) quando existe; senao a linha da sessao."""
+    import sqlite3
+    if not os.path.isfile(path): acc.stats["missing"].append(path); return
+    acc.stats["read"] += 1
+    try:
+        con = _sqlite_ro(path)
+        try:
+            tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "sessions" not in tables: acc.stats["errors"].append(f"{path}: sem tabela sessions"); return
+            cols = {r[1] for r in con.execute("PRAGMA table_info(sessions)")}
+            c = lambda n, t="s": f"{t}.{n}" if n in cols else "NULL"
+            tcol = "COALESCE(" + ", ".join([c(x) for x in ("last_activity_at", "ended_at", "started_at") if x in cols] or ["NULL"]) + ")"
+            where, args = [], []
+            if acc.since is not None: where.append(f"({tcol} IS NULL OR {tcol} >= ?)"); args.append(acc.since)
+            if acc.until is not None: where.append(f"({tcol} IS NULL OR {tcol} <= ?)"); args.append(acc.until)
+            w = (" WHERE " + " AND ".join(where)) if where else ""
+            if "session_model_usage" in tables:
+                mcols = {r[1] for r in con.execute("PRAGMA table_info(session_model_usage)")}
+                mc = lambda n: f"m.{n}" if n in mcols else "NULL"
+                mt = f"COALESCE({mc('last_seen')}, {tcol})"
+                w2 = w.replace(tcol, mt)
+                q = (f"SELECT s.id, {c('cwd')}, {mc('model')}, {mt}, {mc('input_tokens')}, {mc('output_tokens')}, "
+                     f"{mc('cache_read_tokens')}, {mc('cache_write_tokens')}, {mc('estimated_cost_usd')}, "
+                     f"{mc('actual_cost_usd')}, {mc('cost_status')} FROM session_model_usage m JOIN sessions s "
+                     f"ON s.id = m.session_id{w2}")
+                rows = list(con.execute(q, args))
+                seen = {r[0] for r in rows}
+                # sessoes antigas sem linha em session_model_usage: usa os totais da sessao
+                q2 = (f"SELECT s.id, {c('cwd')}, {c('model')}, {tcol}, {c('input_tokens')}, {c('output_tokens')}, "
+                      f"{c('cache_read_tokens')}, {c('cache_write_tokens')}, {c('estimated_cost_usd')}, "
+                      f"{c('actual_cost_usd')}, {c('cost_status')} FROM sessions s{w}")
+                rows += [r for r in con.execute(q2, args) if r[0] not in seen]
+            else:
+                q = (f"SELECT s.id, {c('cwd')}, {c('model')}, {tcol}, {c('input_tokens')}, {c('output_tokens')}, "
+                     f"{c('cache_read_tokens')}, {c('cache_write_tokens')}, {c('estimated_cost_usd')}, "
+                     f"{c('actual_cost_usd')}, {c('cost_status')} FROM sessions s{w}")
+                rows = list(con.execute(q, args))
+        finally: con.close()
+    except sqlite3.Error as e:
+        acc.stats["read"] -= 1; acc.stats["skipped"] += 1; acc.stats["errors"].append(f"{path}: {e}"); return
+    for sid, cwd, model, t, i, o, cr, cw, est, act, status in rows:
+        acc.add({"agent": "hermes", "session": str(sid), "cwd": cwd if isinstance(cwd, str) else "", "model": model or "n/d",
+                 "ts": _usd(t), "input": i, "output": o, "cache_read": cr, "cache_write": cw,
+                 "cost": _hermes_cost(est, act, status)})
+
+def _mtime(p):
+    try: return os.path.getmtime(p)
+    except OSError: return None
+def _cost_files(acc, root, pattern):
+    """Arquivos da fonte, mais novos primeiro; pula os mais antigos que --since (mtime) e os acima do teto."""
+    if not os.path.isdir(root): acc.stats["missing"].append(root); return []
+    out = []
+    for p in _jsonl_files(root, pattern):
+        m = _mtime(p)
+        if m is None: acc.stats["skipped"] += 1; continue
+        if acc.since is not None and m < acc.since: acc.stats["skipped"] += 1; acc.stats["old"] += 1; continue
+        out.append((m, p))
+    out.sort(reverse=True)
+    room = max(COST_MAX_FILES - acc.stats["read"], 0)
+    if len(out) > room:
+        acc.stats["skipped"] += len(out) - room; acc.stats["cap"] += len(out) - room; out = out[:room]
+    acc.stats["read"] += len(out)
+    return [p for _, p in out]
+
+def cost_data(since=None, until=None, project=None, agent=None, by="agente", mission_id=None, now=None):
+    now = time.time() if now is None else now
+    by = COST_BY.get(by or "agente")
+    if not by: raise DoveError("--by invalido (use agente, projeto, modelo, dia ou sessao)")
+    if agent and agent not in COST_AGENTS: raise DoveError(f"--agent invalido: '{agent}' (use {', '.join(COST_AGENTS)})")
+    mission = None
+    if mission_id:
+        m = load_mission(mission_id)
+        start = iso_epoch(m.get("created")); end = iso_epoch((m.get("human") or {}).get("ts")) or now
+        mission = {"id": m["id"], "project": m.get("project"), "agents": list(m.get("agents") or []),
+                   "from": epoch_iso(start) if start else None, "to": epoch_iso(end), "approx": True}
+        since, until = start, end
+    elif since is None: since = parse_since("7d", now)
+    acc = CostAcc(by, since, until, project, agent, mission)
+    src = cost_sources()
+    for ag in COST_AGENTS:
+        if agent and ag != agent: continue
+        for root in src[ag]:
+            if ag == "claude": cost_claude(acc, root)
+            elif ag == "codex": cost_codex(acc, root)
+            else: cost_hermes(acc, root)
+    rows = [cost_row(g) for g in acc.groups.values()]
+    rows.sort(key=lambda r: r["key"] if by == "dia" else (-r["total"], r["key"]))
+    tot = {"key": "total", **{f: 0 for f in COST_FIELDS}, "cost": 0.0, "tok_sessions": set(), "cost_sessions": set(), "sessions": set()}
+    for g in acc.groups.values():
+        for f in COST_FIELDS: tot[f] += g[f]
+        tot["cost"] += g["cost"]
+        for s in ("tok_sessions", "cost_sessions", "sessions"): tot[s] |= g[s]
+    st = acc.stats
+    return {"since": epoch_iso(since) if since is not None else None, "until": epoch_iso(until) if until is not None else None,
+            "by": by, "project": project or None, "agent": agent or None, "mission": mission,
+            "rows": rows, "total": cost_row(tot),
+            "files": {"read": st["read"], "skipped": st["skipped"], "older_than_since": st["old"], "over_cap": st["cap"],
+                      "bad_lines": st["bad_lines"], "duplicates": st["dup"], "errors": st["errors"][:20]},
+            "sources": {ag: [{"path": p, "found": p not in st["missing"]} for p in src[ag]]
+                        for ag in COST_AGENTS if not agent or ag == agent},
+            "note": COST_NOTE}
+def cost_row(g):
+    tot = sum(g[f] for f in COST_FIELDS); denom = g["input"] + g["cache_read"]
+    has_cost = bool(g["cost_sessions"])
+    return {"key": g["key"], "sessions": len(g["sessions"]), **{f: g[f] for f in COST_FIELDS}, "total": tot,
+            "cache_hit": round(g["cache_read"] / denom, 4) if denom else None,
+            "cost_usd": round(g["cost"], 6) if has_cost else None,
+            "cost_partial": has_cost and bool(g["tok_sessions"] - g["cost_sessions"])}
+def fmt_int(n): return f"{n:,}".replace(",", ".")
+def fmt_usd(r):
+    if r["cost_usd"] is None: return "n/d"
+    return "US$ " + f"{r['cost_usd']:,.2f}".replace(",", "x").replace(".", ",").replace("x", ".") + ("*" if r["cost_partial"] else "")
+def cost_lines(d):
+    by = d["by"]
+    scope = d["project"] or "todos os projetos"
+    if d["mission"]:
+        mm = d["mission"]
+        head = (f"custo · missao {mm['id']} ({mm['project']}; {', '.join(mm['agents'])}) · {mm['from'] or '?'} a {mm['to']} "
+                f"· por {by} · aproximado")
+    else: head = f"custo · {scope}" + (f" · {d['agent']}" if d["agent"] else "") + f" · desde {d['since']} · por {by}"
+    cols = ("sessoes", "entrada", "saida", "cache_lido", "cache_escrito", "total", "cache%", "custo estimado")
+    table = [[r["key"], str(r["sessions"]), fmt_int(r["input"]), fmt_int(r["output"]), fmt_int(r["cache_read"]),
+              fmt_int(r["cache_write"]), fmt_int(r["total"]),
+              "n/d" if r["cache_hit"] is None else f"{r['cache_hit'] * 100:.1f}%", fmt_usd(r)] for r in d["rows"] + [d["total"]]]
+    w0 = max([len(by)] + [len(t[0]) for t in table])
+    ws = [max(len(c), *(len(t[i + 1]) for t in table)) for i, c in enumerate(cols)]
+    out = [head, f"{by:<{w0}}  " + "  ".join(c.rjust(ws[i]) for i, c in enumerate(cols))]
+    if not d["rows"]: out.append("(nenhum uso encontrado no periodo)")
+    for t in table:
+        if t[0] == "total" and not d["rows"]: continue
+        out.append(f"{t[0]:<{w0}}  " + "  ".join(v.rjust(ws[i]) for i, v in enumerate(t[1:])))
+    out.append("tokens reportados pelas CLIs; total = entrada + saida + cache_lido + cache_escrito; "
+               "cache% = cache_lido / (entrada + cache_lido)")
+    out.append(COST_NOTE)
+    if any(r["cost_partial"] for r in d["rows"] + [d["total"]]): out.append("* parcial: ha sessoes sem custo na fonte (ex.: Codex)")
+    if d["mission"]: out.append("aproximado: sessoes cujo cwd e a copia de trabalho de um participante, dentro da janela da missao")
+    f = d["files"]
+    extra = [f"{f['older_than_since']} mais antigos que o periodo"] if f["older_than_since"] else []
+    if f["over_cap"]: extra.append(f"{f['over_cap']} acima do teto de {COST_MAX_FILES}")
+    out.append(f"arquivos lidos: {f['read']}, ignorados: {f['skipped']}" + (f" ({'; '.join(extra)})" if extra else "")
+               + (f"; linhas invalidas: {f['bad_lines']}" if f["bad_lines"] else ""))
+    srcs = []
+    for ag, ps in d["sources"].items():
+        found = [p["path"] for p in ps if p["found"]]
+        srcs.append(f"{ag} " + (", ".join(found) if found else "nao encontrado"))
+    out.append("fontes: " + " · ".join(srcs))
+    for e in f["errors"][:5]: out.append(f"aviso: {e}")
+    return out
+def cmd_cost(a):
+    try:
+        since = parse_since(a.since) if a.since else None
+        d = cost_data(since=since, project=a.project, agent=a.agent, by=a.by, mission_id=a.mission)
+    except DoveError as e: fail(f"erro: {e}")
+    if a.json: print(json.dumps(d, ensure_ascii=False, indent=2)); return
+    print("\n".join(cost_lines(d)))
+
 class ExemplosFormatter(argparse.RawDescriptionHelpFormatter):
     """Como o RawDescriptionHelpFormatter, mas so para texto com quebra de linha (os exemplos do epilog);
     descricoes de uma linha continuam quebradas pela largura do terminal como antes."""
@@ -3262,6 +3632,24 @@ def build_parser():
         x.add_argument("--agents", help="lista separada por virgula: claude,codex[,hermes] (padrao: claude,codex)")
         if nm not in ("status", "check"): x.add_argument("--dry-run", dest="dry_run", action="store_true", help="so mostra o plano e o diff")
     ins.set_defaults(func=cmd_instructions)
+    co = sub.add_parser("cost", help="tokens e custo estimado a partir dos registros do Claude, Codex e Hermes (so leitura)",
+        description="Le (nunca grava) o uso que as CLIs ja registram: Claude Code ($CLAUDE_CONFIG_DIR ou ~/.claude/projects/*.jsonl), "
+        "Codex ($CODEX_HOME ou ~/.codex/sessions/AAAA/MM/DD/rollout-*.jsonl) e Hermes ($HERMES_HOME ou ~/.hermes/state.db, "
+        "aberto com mode=ro). Cada sessao vai para o projeto registrado cuja pasta (ou copia de trabalho de um agente) "
+        "contem o cwd dela; senao, projeto '-'. Colunas: tokens reportados (entrada sem cache, saida, cache lido, cache "
+        "escrito, total), cache% = cache_lido/(entrada+cache_lido) e custo estimado so quando a propria fonte grava um "
+        "custo (Claude Code e Hermes, calculado no cliente); senao n/d. Nao e o valor cobrado: uso por assinatura nao vira "
+        "cobranca por token, e o Codex nao grava custo. --mission soma as sessoes nas copias de trabalho dos participantes "
+        "dentro da janela da missao (aproximado).", **ex(
+        "a2a cost", "a2a cost --since 24h --by modelo", "a2a cost --project lagu --by dia --since 2026-10-01",
+        "a2a cost --agent claude --by sessao", "a2a cost --mission m4c1e9a0 --by agente", "a2a cost --since 30d --json"))
+    co.add_argument("--since", help="periodo: 7d (padrao), 24h, 90m ou AAAA-MM-DD (UTC)")
+    co.add_argument("--project", help="so este projeto registrado ('-' = sessoes fora de projeto registrado)")
+    co.add_argument("--agent", choices=list(COST_AGENTS), help="so esta CLI")
+    co.add_argument("--by", default="agente", type=lambda v: COST_BY.get(v, v), choices=sorted(set(COST_BY.values())), help="agrupar por agente (padrao), projeto, modelo, dia ou sessao")
+    co.add_argument("--mission", metavar="ID", help="sessoes nas copias de trabalho dos participantes, na janela da missao (aproximado)")
+    co.add_argument("--json", action="store_true")
+    co.set_defaults(func=cmd_cost)
     return p
 
 def main(argv=None):
