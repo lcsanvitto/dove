@@ -240,6 +240,25 @@ cauda   sha256=2f5312307ceb chars=1316
 - `--task` que não existe: `erro: mensagem X nao encontrada` (código 1).
 - `python tests/measure_tokens.py` (M2) confere o mesmo hash de prefixo com 2 mensagens novas, uma troca de status e o relógio 10 minutos adiante.
 
+## Pré-checagem do vigia (`a2a watch check`)
+Antes de existir o vigia (Fase 3, item 1), o Dove já confere se ele poderia rodar cada agente — **sem chamar nenhum modelo**: só roda `--version`, `--help` e `claude auth status`, com timeout curto, e lê arquivos de configuração.
+```
+a2a watch check [--project P] [--agent claude|codex|hermes] [--json] [--show-command]
+```
+Cada linha é `OK`, `AVISO`, `ERRO` ou `PULADO`; sai 1 se houver `ERRO`.
+- **claude:** executável no PATH (e o shim `.cmd` no Windows), versão, `auth status` (assinatura × chave de API: `--bare` exige `ANTHROPIC_API_KEY` e não usa a assinatura, por isso o vigia não usa `--bare`), `--permission-prompts` no `claude --help` (Claude Code 2.1.259+), `CLAUDE_CODE_USE_POWERSHELL_TOOL` (no Windows o PowerShell é o shell principal e regra `Bash(...)` não vale para ele).
+- **codex:** executável, versão e, no Windows, `[windows] sandbox = "elevated"` (ou `"unelevated"`) no `~/.codex/config.toml`; sem isso: `ERRO nao pronto` (sem sandbox o `codex exec` recusa os comandos). Aviso fixo: `workspace-write` deixa `.git` só leitura, então o codex não commita na cópia.
+- **hermes:** versão e `approvals.mode`, se legível; sempre `desabilitado no vigia` até o Luiz confirmar as flags de contenção.
+- **Dove:** a tabela `WATCH_RUNNERS` sem padrões proibidos, `~/.a2a/STOP` (aviso: o vigia não iniciaria nada), `A2A_RUNNER` definido no shell e, com `--project`, a cópia de trabalho de cada agente registrado (sem cópia: o vigia recusaria; `git status --porcelain` não vazio: `copia suja: vigia esperaria`).
+
+`--show-command` só imprime o argv exato que o vigia usaria (a tabela `WATCH_RUNNERS` em `a2a.py`; mudar permissão é sempre mudança de código revisada):
+```
+claude -p --output-format json --permission-mode dontAsk --permission-prompts none --max-turns 30 --allowedTools 'Read,Grep,Glob,Edit,Write,Bash(a2a send *),…,Bash(git log *),PowerShell(a2a send *),…,PowerShell(git log *)'
+codex exec --json -s workspace-write -C <cópia do agente> --add-dir ~/.a2a -
+hermes chat --oneshot -Q --query-file - --source tool --max-turns 30 --usage-file ~/.a2a/runs/<run_id>/usage.json   # desabilitado
+```
+A allowlist do Claude é por **subcomando** do `a2a` (`send`, `brief`, `read`, `status`, `ack`, `whereami`, `mission approve`, `mission reject`, `fact add`, `fact list`, `project which`) mais `git status`/`git diff`/`git log`, nas formas `Bash(...)` e `PowerShell(...)`. Nunca `python *`, `a2a *` inteiro, `git push`, `git merge` nem `git -C`. O modo `dontAsk` nega tudo o que não está liberado (regra de negação em Bash dá para contornar; a contenção é a allowlist).
+
 ## Modo herdr (estado dos agentes)
 Cada agente publica o próprio estado — `working`, `idle`, `blocked`, `done` ou `unknown` — em `~/.a2a/status/<agente>.json`. Assim você (ou outro agente) vê num quadro quem está trabalhando, quem travou e quem terminou.
 
@@ -507,6 +526,7 @@ a2a loops [--project P] [--agent X] [--since H] [--json] [--strict]
 | `project which [--path P]` | nome do projeto registrado cuja pasta (ou cópia de um agente) contém P (padrão: pasta atual); sai 1 se nenhum |
 | `prompt --agent X --project P [--task ID] [--for claude\|codex\|hermes] [--prefix-hash] [--max-tail-chars N]` | imprime (não executa) o prompt em camadas para um vigia headless: núcleo + papel, pasta, fronteira, brief + tarefa; `--prefix-hash` mostra o hash do prefixo estável |
 | `loops [--project P] [--agent X] [--since H] [--json] [--strict]` | detector de loop entre agentes, só leitura: rodadas sem o humano, repetição, ping-pong, conversa sem origem humana, tetos por hora; sai 0 (com `--strict`, 1 se houver achados) |
+| `watch check [--project P] [--agent X] [--json] [--show-command]` | pré-checagem do vigia, só leitura: CLIs, versões, login, sandbox, cópias limpas, `STOP`; `--show-command` imprime o comando exato do vigia sem rodar |
 
 ## Envelope da mensagem (JSON)
 `data` (ISO 8601 UTC) · `task_id` · `msg_id` · `from` · `to` · `project` · `in_reply_to` · `kind` (task | report | question | correction | ack) · `state` (AGUARDANDO_ACEITE | ACEITO | EM_EXECUCAO | BLOQUEADO | AGUARDANDO_APROVACAO | EM_REVISAO | CONCLUIDO | CANCELADO) · `result` · `evidence` · `pending` · `next_action` · `body`

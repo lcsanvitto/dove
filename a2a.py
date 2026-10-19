@@ -2727,6 +2727,232 @@ def cmd_prompt(a):
         print(f"cauda   sha256={prompt_hash(tail)} chars={len(tail)}")
     else: sys.stdout.write(prefix + tail)
 
+# ---------------------------------------------------------------- vigia: tabela dos executores + pre-checagem (a2a watch check)
+# Como o vigia (Fase 3, item 1) vai chamar cada CLI. Mudar permissao e sempre mudanca de codigo revisada, nunca configuracao.
+# Fontes (conferidas em 2026-10-19): code.claude.com/docs/en/cli-reference, /headless, /permissions, /tools-reference;
+# github.com/openai/codex (codex-rs/exec/src/cli.rs, codex-rs/utils/cli/src/shared_options.rs), developers.openai.com/codex/windows.
+# Allowlist por SUBCOMANDO do a2a e git so de leitura. Nunca: python *, a2a * (inteiro), git push, git merge, git -C.
+# O espaco antes do * importa: "Bash(git diff *)" nao casa git diff-index. Regra de negacao em Bash da para contornar
+# (caminho, sh -c): a contencao e a allowlist + --permission-mode dontAsk (o que nao esta liberado e negado).
+# No Windows nativo o PowerShell e o shell principal e regra Bash(...) nao vale para ele: cada regra existe nas duas formas.
+WATCH_A2A_SUBCMDS = ("send", "brief", "read", "status", "ack", "whereami", "mission approve", "mission reject",
+                     "fact add", "fact list", "project which")
+WATCH_GIT_READ = ("status", "diff", "log")
+def _watch_rules(shell):
+    return tuple(f"{shell}(a2a {c} *)" for c in WATCH_A2A_SUBCMDS) + tuple(f"{shell}(git {c} *)" for c in WATCH_GIT_READ)
+WATCH_CLAUDE_ALLOW = ("Read", "Grep", "Glob", "Edit", "Write") + _watch_rules("Bash") + _watch_rules("PowerShell")
+WATCH_RUNNERS = {
+    "claude": {"exe": "claude", "enabled": True, "permission_mode": "dontAsk", "allow": WATCH_CLAUDE_ALLOW,
+               "argv": ("-p", "--output-format", "json", "--permission-mode", "dontAsk", "--permission-prompts", "none",
+                        "--max-turns", "30", "--allowedTools", "{allow}"),
+               "stdin": "prompt (a2a prompt --for claude)", "cwd": "{worktree}",
+               "note": "sem --bare: --bare exige ANTHROPIC_API_KEY (nao usa a assinatura); sandbox de SO so no macOS/Linux/WSL2"},
+    "codex": {"exe": "codex", "enabled": True, "permission_mode": "workspace-write", "allow": (),
+              "argv": ("exec", "--json", "-s", "workspace-write", "-C", "{worktree}", "--add-dir", "{a2a_home}", "-"),
+              "stdin": "prompt (a2a prompt --for codex)", "cwd": "{worktree}",
+              "note": "exec nunca pede aprovacao; workspace-write deixa .git (inclusive o gitdir da copia) so leitura: "
+                      "o codex nao commita na copia; --add-dir libera a escrita em ~/.a2a"},
+    "hermes": {"exe": "hermes", "enabled": False, "permission_mode": "", "allow": (),
+               "argv": ("chat", "--oneshot", "-Q", "--query-file", "-", "--source", "tool", "--max-turns", "30",
+                        "--usage-file", "{run_dir}/usage.json"),
+               "stdin": "prompt (a2a prompt --for hermes)", "cwd": "{worktree}",
+               "note": "desabilitado ate o Luiz confirmar: approvals.mode smart usa um LLM auxiliar (custa) e off equivale a "
+                       "--yolo; sem sandbox de SO por padrao"},
+}
+WATCH_FORBIDDEN = re.compile(r"python|\ba2a \*|git push|git merge|git -C|bypassPermissions|danger-full-access|--yolo|"
+                             r"dangerously|--bare", re.I)
+WATCH_PROBES = (("--version",), ("--help",), ("auth", "status"))  # unicos comandos que o check roda (nunca o modelo)
+WATCH_PROBE_TIMEOUT = 10
+def watch_forbidden():
+    """Textos proibidos na tabela (argv, allowlist, modo); a nota explicativa fica de fora. Vazio = ok."""
+    bad = []
+    for ag, r in WATCH_RUNNERS.items():
+        for s in (r["exe"], r["permission_mode"], *r["argv"], *r["allow"]):
+            if WATCH_FORBIDDEN.search(s): bad.append(f"{ag}: {s}")
+    return bad
+def watch_argv(agent, worktree="", a2a_home="", run_dir=""):
+    """argv exato que o vigia usaria (o prompt vai pelo stdin)."""
+    r = WATCH_RUNNERS[agent]
+    sub = {"{allow}": ",".join(r["allow"]), "{worktree}": worktree or f"<copia de {agent}>",
+           "{a2a_home}": a2a_home or HOME, "{run_dir}": run_dir or os.path.join(HOME, "runs", "<run_id>")}
+    out = [r["exe"]]
+    for x in r["argv"]:
+        for k, v in sub.items(): x = x.replace(k, v)
+        out.append(x)
+    return out
+def _watch_windows(): return is_windows()  # os testes trocam esta funcao para simular o Windows
+def _watch_probe(exe, args):
+    """Roda so `--version`, `--help` ou `auth status`, com timeout curto. Devolve (codigo, saida) ou (None, erro)."""
+    if tuple(args) not in WATCH_PROBES: raise DoveError(f"watch check nao roda '{' '.join(args)}'")
+    try:
+        r = subprocess.run([exe, *args], capture_output=True, stdin=subprocess.DEVNULL, timeout=WATCH_PROBE_TIMEOUT)
+    except subprocess.TimeoutExpired: return None, f"demorou mais de {WATCH_PROBE_TIMEOUT}s"
+    except OSError as e: return None, f"nao consegui rodar: {e}"
+    dec = lambda b: (b or b"").decode("utf-8", "replace")
+    return r.returncode, (dec(r.stdout) + dec(r.stderr)).strip()
+def _first_line(t): return next((l.strip() for l in (t or "").splitlines() if l.strip()), "")
+def _toml_get(text, section, key):
+    """Le `key = "valor"` de [section] (ou `section.key = ...` no topo) num TOML simples, sem dependencia."""
+    cur = ""
+    for raw in (text or "").splitlines():
+        l = raw.split("#", 1)[0].strip()
+        m = re.match(r"^\[([^\]]+)\]$", l)
+        if m: cur = m.group(1).strip(); continue
+        m = re.match(r'^([A-Za-z0-9_.-]+)\s*=\s*["\']([^"\']*)["\']', l)
+        if m and ((cur == section and m.group(1) == key) or (not cur and m.group(1) == f"{section}.{key}")): return m.group(2)
+    return None
+def codex_config_path():
+    return os.path.join(os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex"), "config.toml")
+def hermes_config_path():
+    h = os.environ.get("HERMES_HOME") or (os.path.join(os.environ.get("LOCALAPPDATA", ""), "hermes") if _watch_windows()
+                                          and os.environ.get("LOCALAPPDATA") else os.path.join(os.path.expanduser("~"), ".hermes"))
+    return os.path.join(h, "config.yaml")
+def _watch_exe(agent, out, which):
+    exe = WATCH_RUNNERS[agent]["exe"]; w = which(exe)
+    if not w:
+        lvl = "PULADO" if not WATCH_RUNNERS[agent]["enabled"] else "ERRO"
+        out.append((lvl, "executavel", f"{exe} nao encontrado no PATH" + ("" if lvl == "ERRO" else " (desabilitado no vigia)")))
+        return None
+    shim = " (shim .cmd/.bat do npm: o vigia chamaria via cmd.exe)" if w.lower().endswith((".cmd", ".bat")) else ""
+    out.append(("OK", "executavel", w + shim))
+    return w
+def _watch_version(exe, out):
+    rc, txt = _watch_probe(exe, ("--version",))
+    if rc == 0 and txt: out.append(("OK", "versao", _first_line(txt)))
+    else: out.append(("ERRO", "versao", f"--version falhou ({txt or 'codigo ' + str(rc)})"))
+def watch_check_claude(which):
+    out = []; exe = _watch_exe("claude", out, which)
+    if not exe: return out + [("PULADO", c, "sem executavel") for c in ("versao", "auth", "--permission-prompts", "powershell")]
+    _watch_version(exe, out)
+    rc, txt = _watch_probe(exe, ("auth", "status"))
+    try: auth = json.loads(txt) if rc is not None else None
+    except ValueError: auth = None
+    method = (auth or {}).get("authMethod") if isinstance(auth, dict) else None
+    if rc is None: out.append(("ERRO", "auth", f"auth status falhou: {txt}"))
+    elif method in ("claude.ai", "oauth_token"):
+        out.append(("OK", "auth", f"assinatura ({method}): o vigia roda sem --bare (--bare exige ANTHROPIC_API_KEY); quando "
+                                  "--bare virar o padrao do -p, sera preciso fixar o modo atual"))
+    elif method in ("api_key", "api_key_helper"):
+        out.append(("AVISO", "auth", f"chave de API ({method}): cobranca por token, nao pela assinatura; --bare funcionaria"))
+    elif method == "third_party": out.append(("OK", "auth", "provedor de nuvem (third_party): credenciais do provedor"))
+    elif rc != 0 or method == "none": out.append(("ERRO", "auth", "nao logado: rode claude auth login"))
+    else: out.append(("AVISO", "auth", f"auth status sem authMethod reconhecido: {short(_first_line(txt), 120)}"))
+    if os.environ.get("ANTHROPIC_API_KEY") and method not in ("api_key", "api_key_helper"):
+        out.append(("AVISO", "auth", "ANTHROPIC_API_KEY definida neste shell: confira se o -p usaria a chave em vez da assinatura"))
+    rc, txt = _watch_probe(exe, ("--help",))
+    if rc == 0 and "--permission-prompts" in txt: out.append(("OK", "--permission-prompts", "presente no claude --help"))
+    else: out.append(("ERRO", "--permission-prompts", "ausente no claude --help (exige Claude Code 2.1.259+): atualize o claude"))
+    v = os.environ.get("CLAUDE_CODE_USE_POWERSHELL_TOOL")
+    if _watch_windows():
+        if v == "0": out.append(("OK", "powershell", "CLAUDE_CODE_USE_POWERSHELL_TOOL=0: so a ferramenta Bash; valem as regras Bash(...)"))
+        else: out.append(("OK", "powershell", f"CLAUDE_CODE_USE_POWERSHELL_TOOL={v if v is not None else '(nao definida)'}: "
+                          "PowerShell e o shell principal; regras Bash(...) nao valem para ele, a tabela tem as PowerShell(...) "
+                          "equivalentes; sem sandbox de SO no Windows"))
+    else:
+        out.append(("OK", "powershell", "fora do Windows a ferramenta PowerShell e opt-in" +
+                    (f" (CLAUDE_CODE_USE_POWERSHELL_TOOL={v}: a tabela tem as regras PowerShell(...))" if v else "")))
+    return out
+def watch_check_codex(which):
+    out = []; exe = _watch_exe("codex", out, which)
+    if not exe: return out + [("PULADO", c, "sem executavel") for c in ("versao", "sandbox")]
+    _watch_version(exe, out)
+    if _watch_windows():
+        p = codex_config_path(); mode = _toml_get(_read_text(p), "windows", "sandbox")
+        if mode in ("elevated", "unelevated"):
+            out.append(("OK", "sandbox", f"[windows] sandbox = \"{mode}\" em {p}"
+                        + (" (unelevated: isolamento de rede mais fraco)" if mode == "unelevated" else "")))
+        else:
+            out.append(("ERRO", "sandbox", f"nao pronto: sem [windows] sandbox = \"elevated\" (ou \"unelevated\") em {p}; "
+                        "sem sandbox o codex exec recusa os comandos (Forbidden)"))
+    else: out.append(("OK", "sandbox", "sandbox de SO nativo (fora do Windows); o vigia usa -s workspace-write"))
+    out.append(("AVISO", "commit", "workspace-write deixa .git so leitura: o codex nao commita na copia (o vigia entregaria sem commit)"))
+    return out
+def watch_check_hermes(which):
+    out = []; exe = _watch_exe("hermes", out, which)
+    if exe:
+        _watch_version(exe, out)
+        p = hermes_config_path(); txt = _read_text(p)
+        m = re.search(r"^approvals:\s*\n(?:[ \t]+.*\n)*?[ \t]+mode:\s*['\"]?(\w+)", txt + "\n", re.M)
+        if m: out.append(("OK", "aprovacoes", f"approvals.mode = {m.group(1)} ({p})"))
+        else: out.append(("PULADO", "aprovacoes", f"approvals.mode nao encontrado em {p}"))
+    out.append(("AVISO", "vigia", "desabilitado no vigia ate o Luiz confirmar as flags de contencao"))
+    return out
+WATCH_AGENT_CHECKS = {"claude": watch_check_claude, "codex": watch_check_codex, "hermes": watch_check_hermes}
+def watch_check_dove(project=None, agent=None):
+    out = []
+    bad = watch_forbidden()
+    out.append(("ERRO", "tabela", "padroes proibidos: " + "; ".join(bad)) if bad else
+               ("OK", "tabela", "WATCH_RUNNERS sem python, a2a * inteiro, git push/merge/-C nem modo sem contencao"))
+    stop = os.path.join(HOME, "STOP")
+    out.append(("AVISO", "STOP", f"{stop} presente: o vigia nao iniciaria nada") if os.path.exists(stop) else ("OK", "STOP", "ausente"))
+    r = os.environ.get("A2A_RUNNER")
+    if r: out.append(("AVISO", "A2A_RUNNER", f"A2A_RUNNER={r} neste shell: parece uma execucao do vigia; rode o check num terminal seu"))
+    if not project:
+        out.append(("PULADO", "copias", "use --project P para conferir as copias de trabalho")); return out
+    try: p = find_project(project)
+    except DoveError as e: out.append(("ERRO", "copias", str(e))); return out
+    names = [a for a in registered_agents() if a != human_name() and (not agent or a == agent)]
+    if agent and agent not in names: names.append(agent)
+    if not names: out.append(("AVISO", "copias", "nenhum agente registrado"))
+    wts = project_worktrees(p)
+    for a in names:
+        enabled = WATCH_RUNNERS.get(a, {}).get("enabled")
+        if a not in wts:
+            out.append(("ERRO" if enabled else "AVISO", f"copia {a}", f"sem copia de trabalho em '{p['name']}': o vigia recusaria rodar "
+                        f"{a} (a2a worktree create --project {p['name']} --agent {a} --from {human_name()})")); continue
+        try:
+            t = git_target(p["name"], a); files = git_files(t["path"])
+        except DoveError as e: out.append(("ERRO", f"copia {a}", str(e))); continue
+        if files: out.append(("AVISO", f"copia {a}", f"copia suja: vigia esperaria ({len(files)} arquivo(s) sem commit em {t['path']})"))
+        else: out.append(("OK", f"copia {a}", f"{t['path']} limpa"))
+    return out
+def watch_checks(project=None, agent=None, which=None):
+    import shutil
+    which = which or shutil.which
+    rows = []
+    for ag in ([agent] if agent else list(WATCH_RUNNERS)):
+        for lvl, chk, det in WATCH_AGENT_CHECKS[ag](which): rows.append({"level": lvl, "agent": ag, "check": chk, "detail": det})
+    for lvl, chk, det in watch_check_dove(project, agent): rows.append({"level": lvl, "agent": "dove", "check": chk, "detail": det})
+    return rows
+WATCH_LEVELS = ("OK", "AVISO", "ERRO", "PULADO")
+def watch_counts(rows): return {k: sum(1 for r in rows if r["level"] == k) for k in WATCH_LEVELS}
+def watch_quote(argv):
+    if _watch_windows(): return subprocess.list2cmdline(argv)
+    import shlex
+    return " ".join(shlex.quote(x) for x in argv)
+def watch_commands(project=None, agent=None):
+    """[{agent, enabled, cwd, argv, stdin, note}] sem rodar nada; a pasta vem da copia registrada (se houver)."""
+    wts = {}
+    if project:
+        try: wts = project_worktrees(find_project(project))
+        except DoveError: wts = {}
+    res = []
+    for ag in ([agent] if agent else list(WATCH_RUNNERS)):
+        r = WATCH_RUNNERS[ag]; wt = (wts.get(ag) or {}).get("path", "")
+        res.append({"agent": ag, "enabled": r["enabled"], "cwd": wt or f"<copia de {ag}>", "argv": watch_argv(ag, wt),
+                    "stdin": r["stdin"], "permission_mode": r["permission_mode"], "allow": list(r["allow"]), "note": r["note"]})
+    return res
+def cmd_watch(a):
+    utf8_stdout()
+    if a.wcmd != "check": fail("erro: so existe a2a watch check por enquanto")
+    if a.show_command:
+        cmds = watch_commands(a.project, a.agent)
+        if a.json: print(json.dumps({"commands": cmds}, ensure_ascii=False)); return
+        for c in cmds:
+            print(f"# {c['agent']}" + ("" if c["enabled"] else " (desabilitado ate o Luiz confirmar)") + f" · pasta: {c['cwd']} · stdin: {c['stdin']}")
+            print(watch_quote(c["argv"]))
+            print(f"# {c['note']}")
+        return
+    rows = watch_checks(a.project, a.agent)
+    n = watch_counts(rows)
+    if a.json: print(json.dumps({"checks": rows, "counts": n, "ready": n["ERRO"] == 0}, ensure_ascii=False))
+    else:
+        print(f"dove watch check - {now_iso()}" + (f" · projeto {a.project}" if a.project else ""))
+        for r in rows: print(f"{r['level']:<6} {r['agent']}: {r['check']}: {r['detail']}")
+        print(f"-- {n['OK']} OK, {n['AVISO']} aviso(s), {n['ERRO']} erro(s), {n['PULADO']} pulado(s)"
+              + ("" if n["ERRO"] else " · pronto para o vigia (so leitura: nada foi executado alem de --version/--help/auth status)"))
+    if n["ERRO"]: sys.exit(1)
+
 class ExemplosFormatter(argparse.RawDescriptionHelpFormatter):
     """Como o RawDescriptionHelpFormatter, mas so para texto com quebra de linha (os exemplos do epilog);
     descricoes de uma linha continuam quebradas pela largura do terminal como antes."""
@@ -2932,6 +3158,23 @@ def build_parser():
     pm.add_argument("--max-tail-chars", dest="max_tail_chars", type=int, default=4000,
                     help="tamanho maximo da parte variavel (padrao 4000; 0 = sem corte)")
     pm.set_defaults(func=cmd_prompt)
+    wa = sub.add_parser("watch", help="vigia (Fase 3): por enquanto so a pre-checagem (watch check, so leitura)")
+    was = wa.add_subparsers(dest="wcmd", required=True)
+    x = was.add_parser("check", help="pre-checagem do vigia: CLIs, versoes, login, sandbox, copias limpas, STOP (so leitura)",
+        description="Confere se o vigia poderia rodar cada agente, sem chamar nenhum modelo: so roda `--version`, `--help` e "
+        "`claude auth status`, com timeout curto. Por agente: executavel no PATH, versao; claude: login (assinatura x chave "
+        "de API e o efeito no --bare), --permission-prompts no --help, CLAUDE_CODE_USE_POWERSHELL_TOOL; codex: [windows] "
+        "sandbox no config.toml (no Windows); hermes: versao e approvals.mode, sempre desabilitado no vigia. Dove: tabela sem "
+        "padroes proibidos, ~/.a2a/STOP, A2A_RUNNER e, com --project, a copia de trabalho de cada agente registrado (limpa). "
+        "Niveis: OK, AVISO, ERRO, PULADO; sai 1 se houver ERRO. --show-command so imprime o comando exato do vigia.", **ex(
+        "a2a watch check", "a2a watch check --project lagu", "a2a watch check --project lagu --agent codex --json",
+        "a2a watch check --project lagu --show-command"))
+    x.add_argument("--project", help="confere as copias de trabalho dos agentes neste projeto")
+    x.add_argument("--agent", choices=list(WATCH_RUNNERS), help="so este agente")
+    x.add_argument("--json", action="store_true", help="resultado em uma linha de JSON")
+    x.add_argument("--show-command", dest="show_command", action="store_true",
+                   help="imprime o argv exato que o vigia usaria (com a allowlist), sem rodar nada")
+    wa.set_defaults(func=cmd_watch)
     o = sub.add_parser("onboard", help="imprime as instrucoes do canal para um agente ou para o AGENTS.md")
     og = o.add_mutually_exclusive_group(required=True)
     og.add_argument("--agent"); og.add_argument("--agents-md", dest="agents_md", action="store_true")

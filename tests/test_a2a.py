@@ -2082,6 +2082,161 @@ def loops_fase():
     assert "a2a loops" in g and "loops" not in run(env, "onboard", "--agents-md").stdout
     print("OK: a2a loops (linhas LOOP + resumo, --json, --strict, --project, --agent, runs/, so leitura: bus/cursor/status/indice intactos)")
 
+FAKE_CLI = r'''
+import json, os, sys
+name, args = os.path.splitext(os.path.basename(sys.argv[0]))[0], sys.argv[1:]
+with open(os.environ["FAKE_SPY"], "a", encoding="utf-8") as f: f.write(json.dumps([name] + args) + "\n")
+old = os.environ.get("FAKE_CLAUDE_OLD") == "1"
+if args == ["--version"]:
+    print({"claude": "2.1.300 (Claude Code)", "codex": "codex-cli 0.50.0", "hermes": "Hermes Agent v0.9.0"}[name])
+elif name == "claude" and args == ["auth", "status"]:
+    m = os.environ.get("FAKE_CLAUDE_AUTH", "claude.ai"); print(json.dumps({"loggedIn": m != "none", "authMethod": m}))
+    sys.exit(1 if m == "none" else 0)
+elif args == ["--help"]:
+    print("Usage: claude [options]\n  --permission-mode <mode>\n" + ("" if old else "  --permission-prompts <target>\n"))
+else:
+    print("fake: comando inesperado", args, file=sys.stderr); sys.exit(3)
+'''
+WATCH_INPROC = r"""
+import sys
+mode, root = sys.argv[1], sys.argv[2]
+sys.path.insert(0, root); import a2a
+if "win" in mode: a2a._watch_windows = lambda: True
+if "bad" in mode: a2a.WATCH_RUNNERS["claude"]["allow"] += ("Bash(python *)", "Bash(git push *)")
+if mode == "table":
+    import json; print(json.dumps({"bad": a2a.watch_forbidden(), "runners": {k: {"argv": list(v["argv"]), "allow": list(v["allow"]),
+          "mode": v["permission_mode"], "enabled": v["enabled"]} for k, v in a2a.WATCH_RUNNERS.items()},
+          "subcmds": list(a2a.WATCH_A2A_SUBCMDS)})); sys.exit(0)
+a2a.main(sys.argv[3:])
+"""
+def watch_fase():
+    """a2a watch check (etapa 5 da Fase 3): so leitura, executaveis falsos num PATH temporario, espiao de argv."""
+    import shutil
+    tmp = tempfile.mkdtemp(); home = os.path.join(tmp, "home"); fake = os.path.join(tmp, "bin"); os.makedirs(fake)
+    spy = os.path.join(tmp, "spy.jsonl"); open(spy, "w").close()
+    gitdir = os.path.dirname(shutil.which("git"))
+    gcfg = os.path.join(tmp, "gitconfig")
+    open(gcfg, "w").write("[user]\n\tname = Teste\n\temail = teste@example.com\n[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = false\n")
+    base = {k: v for k, v in os.environ.items() if k not in ("A2A_RUNNER", "ANTHROPIC_API_KEY", "CLAUDE_CODE_USE_POWERSHELL_TOOL",
+                                                               "CODEX_HOME", "HERMES_HOME", "FAKE_CLAUDE_OLD", "FAKE_CLAUDE_AUTH")}
+    env = dict(base, A2A_HOME=home, PYTHONIOENCODING="utf-8", PATH=fake + os.pathsep + gitdir, FAKE_SPY=spy,
+               GIT_CONFIG_GLOBAL=gcfg, GIT_CONFIG_NOSYSTEM="1", CODEX_HOME=os.path.join(tmp, "codexhome"),
+               HERMES_HOME=os.path.join(tmp, "hermeshome"))
+    real = {n: shutil.which(n, path=gitdir) for n in ("claude", "codex", "hermes")}  # na pasta do git (nao deveria haver)
+    def check(*args, e=None, mode="plain", code=None):
+        r = subprocess.run([sys.executable, "-c", WATCH_INPROC, mode, str(ROOT), "watch", "check", *args],
+                           capture_output=True, env=e or env)
+        out = r.stdout.decode("utf-8")
+        if code is not None: assert r.returncode == code, (args, r.returncode, out, r.stderr.decode("utf-8", "replace"))
+        return out, r.returncode
+    def rows(*args, **kw):
+        out, rc = check("--json", *args, **kw); j = json.loads(out)
+        return {(x["agent"], x["check"]): (x["level"], x["detail"]) for x in j["checks"]}, j, rc
+    def put_fake(name):
+        py = os.path.join(fake, name + ".py"); open(py, "w").write(FAKE_CLI)
+        if os.name == "nt": open(os.path.join(fake, name + ".cmd"), "w").write(f'@"{sys.executable}" "{py}" %*\n')
+        else:
+            p = os.path.join(fake, name); open(p, "w").write(f"#!{sys.executable}\n" + FAKE_CLI); os.chmod(p, 0o755)
+    # 1) sem executaveis: claude/codex ERRO, hermes PULADO (desabilitado), sai 1
+    run(env, "init")
+    if not real["claude"] and not real["codex"]:
+        r, j, rc = rows()
+        assert rc == 1 and not j["ready"] and r[("claude", "executavel")][0] == "ERRO" and r[("codex", "executavel")][0] == "ERRO", r
+        assert r[("claude", "versao")][0] == "PULADO" and r[("hermes", "vigia")][0] == "AVISO", r
+        assert "nao encontrado no PATH" in r[("codex", "executavel")][1] and r[("dove", "copias")][0] == "PULADO", r
+    for n in ("claude", "codex", "hermes"): put_fake(n)
+    # 2) tudo presente (fora do Windows): pronto
+    r, j, rc = rows(code=0)
+    assert j["ready"] and j["counts"]["ERRO"] == 0, j
+    assert r[("claude", "versao")] == ("OK", "2.1.300 (Claude Code)") and r[("codex", "versao")] == ("OK", "codex-cli 0.50.0"), r
+    assert r[("claude", "auth")][0] == "OK" and "assinatura" in r[("claude", "auth")][1] and "--bare" in r[("claude", "auth")][1], r
+    assert r[("claude", "--permission-prompts")][0] == "OK" and r[("codex", "sandbox")][0] == "OK", r
+    assert r[("codex", "commit")][0] == "AVISO" and ".git so leitura" in r[("codex", "commit")][1], r
+    assert r[("hermes", "versao")][0] == "OK" and r[("hermes", "vigia")] == ("AVISO", "desabilitado no vigia ate o Luiz confirmar as flags de contencao"), r
+    assert r[("dove", "tabela")][0] == "OK" and r[("dove", "STOP")][0] == "OK" and ("dove", "A2A_RUNNER") not in r, r
+    out, _ = check(code=0)
+    assert out.startswith("dove watch check - ") and "OK     claude: versao: 2.1.300 (Claude Code)\n" in out and "-- " in out, out
+    # 3) claude antigo (sem --permission-prompts), chave de API, nao logado
+    r, _, rc = rows(e=dict(env, FAKE_CLAUDE_OLD="1", FAKE_CLAUDE_AUTH="api_key"), code=1)
+    assert r[("claude", "--permission-prompts")][0] == "ERRO" and "2.1.259" in r[("claude", "--permission-prompts")][1], r
+    assert r[("claude", "auth")][0] == "AVISO" and "chave de API" in r[("claude", "auth")][1], r
+    r, _, _ = rows(e=dict(env, FAKE_CLAUDE_AUTH="none"), code=1)
+    assert r[("claude", "auth")] == ("ERRO", "nao logado: rode claude auth login"), r
+    # 4) Windows simulado: codex sem [windows] sandbox -> nao pronto; com sandbox -> ok; PowerShell explicado
+    os.makedirs(env["CODEX_HOME"]); cfg = os.path.join(env["CODEX_HOME"], "config.toml")
+    open(cfg, "w").write('model = "gpt-5"\n[profiles.x]\nsandbox = "elevated"\n')
+    r, j, rc = rows("--agent", "codex", mode="win", code=1)
+    assert r[("codex", "sandbox")][0] == "ERRO" and "nao pronto" in r[("codex", "sandbox")][1] and cfg in r[("codex", "sandbox")][1], r
+    assert not any(a == "claude" for a, _ in r), "--agent codex: so o codex (e o dove)"
+    open(cfg, "w").write('model = "gpt-5"\n\n[windows]\nsandbox = "elevated" # nativo\n')
+    r, _, _ = rows("--agent", "codex", mode="win", code=0)
+    assert r[("codex", "sandbox")] == ("OK", f'[windows] sandbox = "elevated" em {cfg}'), r
+    r, _, _ = rows("--agent", "claude", mode="win", code=0)
+    assert "PowerShell e o shell principal" in r[("claude", "powershell")][1] and "PowerShell(...)" in r[("claude", "powershell")][1], r
+    r, _, _ = rows("--agent", "claude", mode="win", e=dict(env, CLAUDE_CODE_USE_POWERSHELL_TOOL="0"), code=0)
+    assert r[("claude", "powershell")][1].startswith("CLAUDE_CODE_USE_POWERSHELL_TOOL=0"), r
+    # 5) copias de trabalho: sem copia (ERRO para agente do vigia), limpa (OK), suja (AVISO); STOP; A2A_RUNNER
+    def g(cwd, *a):
+        x = subprocess.run(["git", *a], cwd=cwd, env=env, capture_output=True, text=True); assert x.returncode == 0, (a, x.stderr)
+    lagu = os.path.join(tmp, "lagu"); os.makedirs(lagu); g(lagu, "init", "-q", "-b", "main")
+    open(os.path.join(lagu, "a.txt"), "w").write("a\n"); g(lagu, "add", "."); g(lagu, "commit", "-qm", "inicio")
+    for ag in ("claude", "codex"): run(env, "join", "--agent", ag)
+    assert run(env, "project", "add", "lagu", lagu).returncode == 0
+    x = run(env, "worktree", "create", "--project", "lagu", "--agent", "claude", "--from", "luiz"); assert x.returncode == 0, x.stderr
+    wt = lagu + "-claude"
+    r, _, rc = rows("--project", "lagu", code=1)
+    assert r[("dove", "copia claude")] == ("OK", f"{wt} limpa"), r
+    assert r[("dove", "copia codex")][0] == "ERRO" and "o vigia recusaria" in r[("dove", "copia codex")][1], r
+    r, _, _ = rows("--project", "lagu", "--agent", "claude", code=0)
+    assert ("dove", "copia codex") not in r and r[("dove", "copia claude")][0] == "OK", r
+    open(os.path.join(wt, "novo.txt"), "w").write("x\n")
+    open(os.path.join(home, "STOP"), "w").close()
+    r, j, _ = rows("--project", "lagu", "--agent", "claude", e=dict(env, A2A_RUNNER="watch"), code=0)
+    assert r[("dove", "copia claude")][0] == "AVISO" and "copia suja: vigia esperaria" in r[("dove", "copia claude")][1], r
+    assert r[("dove", "STOP")][0] == "AVISO" and "nao iniciaria" in r[("dove", "STOP")][1], r
+    assert r[("dove", "A2A_RUNNER")][0] == "AVISO", r
+    os.remove(os.path.join(home, "STOP")); os.remove(os.path.join(wt, "novo.txt"))
+    # 6) a tabela nunca tem padroes proibidos; cada subcomando nas formas Bash e PowerShell; check acusa tabela adulterada
+    t = json.loads(subprocess.run([sys.executable, "-c", WATCH_INPROC, "table", str(ROOT)], capture_output=True, env=env).stdout)
+    assert t["bad"] == [] and set(t["runners"]) == {"claude", "codex", "hermes"}, t
+    forbidden = re.compile(r"python|\ba2a \*|git push|git merge|git -C|bypassPermissions|danger-full-access|--yolo|dangerously", re.I)
+    for ag, rr in t["runners"].items():
+        for s in rr["argv"] + rr["allow"] + [rr["mode"]]: assert not forbidden.search(s), (ag, s)
+    allow = t["runners"]["claude"]["allow"]
+    for sh in ("Bash", "PowerShell"):
+        for c in t["subcmds"] + ["git status", "git diff", "git log"]: assert f"{sh}({'' if c.startswith('git') else 'a2a '}{c} *)" in allow, (sh, c)
+    assert set(t["subcmds"]) == {"send", "brief", "read", "status", "ack", "whereami", "mission approve", "mission reject",
+                                 "fact add", "fact list", "project which"}, t["subcmds"]
+    assert t["runners"]["claude"]["mode"] == "dontAsk" and "--permission-mode" in t["runners"]["claude"]["argv"], t
+    assert t["runners"]["codex"]["argv"] == ["exec", "--json", "-s", "workspace-write", "-C", "{worktree}", "--add-dir", "{a2a_home}", "-"], t
+    assert t["runners"]["hermes"]["enabled"] is False and t["runners"]["claude"]["enabled"] and t["runners"]["codex"]["enabled"], t
+    r, _, _ = rows("--agent", "claude", mode="bad", code=1)
+    assert r[("dove", "tabela")][0] == "ERRO" and "Bash(python *)" in r[("dove", "tabela")][1] and "Bash(git push *)" in r[("dove", "tabela")][1], r
+    # 7) --show-command: argv exato sem rodar nada (o espiao nao muda)
+    before = open(spy, encoding="utf-8").read()
+    out, _ = check("--project", "lagu", "--show-command", code=0)
+    assert open(spy, encoding="utf-8").read() == before, "--show-command nao pode executar nada"
+    lines = out.splitlines()
+    cl = next(l for l in lines if l.startswith("claude "))
+    assert cl.startswith("claude -p --output-format json --permission-mode dontAsk --permission-prompts none --max-turns 30 --allowedTools "), cl
+    assert "Bash(git diff *)" in cl and "PowerShell(a2a mission approve *)" in cl and "python" not in cl and "--bare" not in cl, cl
+    assert f"# claude · pasta: {wt} · stdin:" in out and "# codex · pasta: <copia de codex>" in out, out
+    cx = next(l for l in lines if l.startswith("codex "))
+    assert cx.startswith("codex exec --json -s workspace-write -C ") and "--add-dir" in cx and home in cx and cx.endswith(" -"), cx
+    assert "# hermes (desabilitado ate o Luiz confirmar)" in out and any(l.startswith("hermes chat --oneshot") for l in lines), out
+    j = json.loads(check("--show-command", "--json", "--agent", "claude", code=0)[0])
+    assert j["commands"][0]["argv"][:2] == ["claude", "-p"] and j["commands"][0]["argv"][-1] == ",".join(allow), j
+    assert open(spy, encoding="utf-8").read() == before
+    # 8) espiao: nada alem de --version, --help e auth status
+    calls = [json.loads(l) for l in open(spy, encoding="utf-8") if l.strip()]
+    assert calls and {tuple(c[1:]) for c in calls} <= {("--version",), ("--help",), ("auth", "status")}, calls
+    assert {c[0] for c in calls} == {"claude", "codex", "hermes"}, calls
+    h = run(env, "watch", "check", "--help").stdout
+    assert "exemplos:\n" in h and "--show-command" in h and "a2a watch check --project lagu" in h, h
+    print("OK: a2a watch check (exe ausente, versao, auth assinatura/API/nao logado, --permission-prompts, Windows sem sandbox = "
+          "nao pronto, PowerShell, copia limpa/suja/ausente, STOP, A2A_RUNNER, tabela sem padroes proibidos, --show-command, "
+          "espiao: so --version/--help/auth status)")
+
 if __name__ == "__main__":
     main()
     fase1()
@@ -2098,3 +2253,4 @@ if __name__ == "__main__":
     instructions_fase()
     fact_fase()
     loops_fase()
+    watch_fase()
