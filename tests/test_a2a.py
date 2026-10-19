@@ -2338,10 +2338,11 @@ def plan_fase():
             ps = [{"name": "lagu", "path": self.lagu, "worktrees": {"claude": {"path": self.wt, "branch": "dove/claude", "base": "main"}} if wt else {}},
                   {"name": "dove", "path": self.lagu + "d", "worktrees": {"claude": {"path": self.wt, "branch": "dove/claude", "base": "main"}}}]
             if projects: json.dump(ps, open(os.path.join(self.home, "projects.json"), "w"))
-        def msg(self, frm, to, off, kind="task", project="lagu", reply="", task="", body=None, state=""):
+        def msg(self, frm, to, off, kind="task", project="lagu", reply="", task="", body=None, state="", assignee=""):
             mid = uuid.uuid4().hex[:12]; ts = iso(B + off)
             m = {"data": ts, "task_id": task, "msg_id": mid, "from": frm, "to": to, "project": project, "in_reply_to": reply,
                  "kind": kind, "state": state, "result": "", "evidence": "", "pending": "", "next_action": "", "body": body or f"{kind} {mid}"}
+            if assignee: m["assignee"] = assignee
             json.dump(m, open(os.path.join(self.home, "bus", ts.replace(":", "").replace("-", "") + "-" + mid + ".json"), "w"))
             time.sleep(0.002)  # mtime desempata mensagens no mesmo segundo
             return mid
@@ -2491,9 +2492,28 @@ def plan_fase():
     hp = run(h.env, "watch", "plan", "--help").stdout
     assert "exemplos:\n" in hp and "--check-git" in hp and "sessao interativa" in hp, hp
     assert "a2a watch --dry-run --once" in run(h.env, "watch", "--help").stdout
+    # 10) assignee (etapa 14): com responsavel definido (missao ou tarefa avulsa), so ele e acionado; sem o campo, como hoje
+    h = H()
+    json.dump({"id": "m10", "created_by": "luiz", "agents": ["claude", "codex"], "assignee": "claude"},
+              open(os.path.join(h.home, "missions", "m10.json"), "w"))
+    h.msg("luiz", "claude", 0, task="m10"); h.msg("luiz", "codex", 0, task="m10")
+    r = h.plan(5)
+    assert ("claude", "lagu") in r and r[("claude", "lagu")]["action"] != "NADA", r
+    assert ("codex", "lagu") not in r, r  # filtrado: nao e o responsavel da missao
+    h2 = H()
+    json.dump({"id": "m11", "created_by": "luiz", "agents": ["claude", "codex"]},
+              open(os.path.join(h2.home, "missions", "m11.json"), "w"))
+    h2.msg("luiz", "claude", 0, task="m11"); h2.msg("luiz", "codex", 0, task="m11")
+    r2 = h2.plan(5)
+    assert ("claude", "lagu") in r2 and ("codex", "lagu") in r2, r2  # sem assignee: os dois continuam acionaveis
+    h3 = H(); h3.msg("luiz", "all", 0, kind="task", assignee="codex")
+    r3 = h3.plan(5)
+    assert ("codex", "lagu") in r3 and r3[("codex", "lagu")]["action"] != "NADA", r3
+    assert ("claude", "lagu") not in r3 and ("hermes", "lagu") not in r3, r3  # tarefa avulsa (--to all --assignee codex)
     print("OK: a2a watch plan (debounce 90s/silencio 30s, uma execucao por agente+projeto, origem humana, report como resposta, "
           "ja acionadas, STOP, desabilitados, sem projeto/copia, sessao interativa, trava, loop, filtros, JSON, --dry-run --once, "
-          "so leitura, nenhum processo; --check-git so git status --porcelain; watch real sai 2)")
+          "so leitura, nenhum processo; --check-git so git status --porcelain; watch real sai 2; assignee (etapa 14) restringe "
+          "o acionamento ao responsavel da missao/tarefa, sem ele continua acionando todo participante)")
 
 def seguranca_fase():
     """Fase 3, passos 0 e 1: so o humano conclui missao, --from obrigatorio, vigia reservado, human_name(),
@@ -3180,6 +3200,99 @@ try:
 except a2a.DoveError as e:
     print(json.dumps({"error": str(e)})); sys.exit(1)
 """
+def assignee_fase():
+    """Responsavel unico (assignee) em missoes e tarefas (etapa 14): opcional, precisa ser participante registrado
+    (nao o humano, nao reservado); so ele marca EM_EXECUCAO/AGUARDANDO_APROVACAO (por --task ou por --reply-to); o
+    humano sempre pode; os demais participantes seguem comentando/revisando (outros estados e aval de missao livres);
+    sem o campo, nada muda. O filtro do vigia (etapa 7) tem teste proprio em plan_fase."""
+    import glob
+    tmp = tempfile.mkdtemp(); env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8")
+    assert run(env, "init").returncode == 0
+    for ag in ("claude", "codex", "hermes"): run(env, "join", "--agent", ag)
+
+    # mission new: assignee fora dos participantes -> erro, nada gravado (nem missao nem mensagem)
+    r = run(env, "mission", "new", "--project", "lagu", "--title", "t1", "--agents", "claude,codex",
+            "--assignee", "hermes", "--from", "luiz")
+    assert r.returncode == 1 and "assignee" in r.stderr and "participantes" in r.stderr, r.stderr
+    assert not glob.glob(os.path.join(tmp, "missions", "*.json")) and not glob.glob(os.path.join(tmp, "bus", "*.json")), \
+        "assignee invalido nao pode deixar rastro"
+    # assignee == humano -> erro
+    r = run(env, "mission", "new", "--project", "lagu", "--title", "t2", "--agents", "claude,codex",
+            "--assignee", "luiz", "--from", "luiz")
+    assert r.returncode == 1 and "humano" in r.stderr, r.stderr
+
+    # ok: assignee participante -> grava e aparece no criar/mostrar
+    r = run(env, "mission", "new", "--project", "lagu", "--title", "t3", "--agents", "claude,codex",
+            "--assignee", "claude", "--from", "luiz")
+    assert r.returncode == 0 and "responsavel: claude" in r.stdout, r.stdout
+    mid = r.stdout.split()[1]
+    assert "responsavel: claude" in run(env, "mission", "show", mid).stdout
+
+    # sem --assignee: nada aparece e nada muda (compat)
+    r0 = run(env, "mission", "new", "--project", "lagu", "--title", "t0", "--agents", "claude,codex", "--from", "luiz")
+    assert r0.returncode == 0 and "responsavel:" not in r0.stdout, r0.stdout
+    mid0 = r0.stdout.split()[1]
+    assert "responsavel:" not in run(env, "mission", "show", mid0).stdout
+
+    # estado restrito por --task: so o assignee da missao marca EM_EXECUCAO/AGUARDANDO_APROVACAO
+    r = run(env, "send", "--from", "codex", "--to", "claude", "--project", "lagu", "--kind", "report",
+            "--task", mid, "--state", "EM_EXECUCAO", "--body", "eu cuido")
+    assert r.returncode == 1 and "responsavel ('claude')" in r.stderr, r.stderr
+    r = run(env, "send", "--from", "claude", "--to", "codex", "--project", "lagu", "--kind", "report",
+            "--task", mid, "--state", "EM_EXECUCAO", "--body", "comecando")
+    assert r.returncode == 0, r.stderr
+    r = run(env, "send", "--from", "codex", "--to", "claude", "--project", "lagu", "--kind", "report",
+            "--task", mid, "--state", "AGUARDANDO_APROVACAO", "--body", "pedindo aval")
+    assert r.returncode == 1, r.stderr
+
+    # nao-assignee segue comentando/revisando: outros estados e aval de missao continuam livres
+    r = run(env, "send", "--from", "codex", "--to", "claude", "--project", "lagu", "--kind", "report",
+            "--task", mid, "--state", "CONCLUIDO", "--body", "revisei, parece ok")
+    assert r.returncode == 0, r.stderr
+    assert run(env, "mission", "reject", mid, "--agent", "codex", "--reason", "falta um teste").returncode == 0
+
+    # o humano sempre pode, mesmo sem ser o assignee
+    r = run(env, "send", "--from", "luiz", "--to", "codex", "--project", "lagu", "--kind", "report",
+            "--task", mid, "--state", "EM_EXECUCAO", "--body", "retomando eu mesmo")
+    assert r.returncode == 0, r.stderr
+
+    # por --reply-to (sem --task): a restricao segue o assignee da mensagem respondida
+    r = run(env, "send", "--from", "claude", "--to", "codex", "--project", "lagu", "--kind", "task",
+            "--assignee", "codex", "--body", "revisar modulo Y")
+    assert r.returncode == 0, r.stderr
+    tmsg = r.stdout.split()[1]
+    r = run(env, "send", "--from", "hermes", "--to", "claude", "--project", "lagu", "--kind", "report",
+            "--reply-to", tmsg, "--state", "EM_EXECUCAO", "--body", "eu assumo")
+    assert r.returncode == 1 and "responsavel ('codex')" in r.stderr, r.stderr
+    r = run(env, "send", "--from", "codex", "--to", "claude", "--project", "lagu", "--kind", "report",
+            "--reply-to", tmsg, "--state", "EM_EXECUCAO", "--body", "comecando")
+    assert r.returncode == 0, r.stderr
+
+    # --assignee do send: so com kind=task, precisa ser registrado e casar com --to (ou --to all)
+    r = run(env, "send", "--from", "luiz", "--to", "codex", "--project", "lagu", "--kind", "report",
+            "--assignee", "codex", "--body", "x")
+    assert r.returncode == 1 and "--kind task" in r.stderr, r.stderr
+    r = run(env, "send", "--from", "luiz", "--to", "codex", "--project", "lagu", "--kind", "task",
+            "--assignee", "fantasma", "--body", "x")
+    assert r.returncode == 1 and "nao esta registrado" in r.stderr, r.stderr
+    r = run(env, "send", "--from", "luiz", "--to", "codex", "--project", "lagu", "--kind", "task",
+            "--assignee", "claude", "--body", "x")
+    assert r.returncode == 1 and "precisa ser o destinatario" in r.stderr, r.stderr
+    assert run(env, "send", "--from", "luiz", "--to", "all", "--project", "lagu", "--kind", "task",
+               "--assignee", "codex", "--body", "aviso geral").returncode == 0
+
+    # sem assignee em lugar nenhum: qualquer participante marca os estados restritos (comportamento de sempre)
+    r = run(env, "mission", "new", "--project", "lagu", "--title", "t4", "--agents", "claude,codex", "--from", "luiz")
+    mid4 = r.stdout.split()[1]
+    for who in ("claude", "codex"):
+        r = run(env, "send", "--from", who, "--to", "luiz", "--project", "lagu", "--kind", "report",
+                "--task", mid4, "--state", "EM_EXECUCAO", "--body", f"{who} cuidando")
+        assert r.returncode == 0, (who, r.stderr)
+    print("OK: assignee (etapa 14) - missao/tarefa com responsavel opcional (precisa ser participante registrado, nao "
+          "o humano, nao reservado; invalido nao grava nada), so ele marca EM_EXECUCAO/AGUARDANDO_APROVACAO (por --task "
+          "ou --reply-to), humano sempre pode, demais participantes seguem comentando/revisando (outros estados e aval "
+          "de missao livres), --assignee do send so com kind=task e precisa casar com --to (ou --to all), sem o campo "
+          "nada muda")
 def budget_fase():
     """Etapa 8 da Fase 3: consumo por execucao (claude json/stream-json/parado, codex exec --json cumulativo, hermes
     --usage-file), watch usage grava no registro, orcamento de missao e de projeto/dia so do humano, budget_status com
@@ -3426,3 +3539,4 @@ if __name__ == "__main__":
     supervisor_fase()
     models_fase()
     budget_fase()
+    assignee_fase()

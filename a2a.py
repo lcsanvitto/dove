@@ -205,9 +205,9 @@ def cmd_agents(a):
     n = registered_agents()
     print("\n".join(n) if n else "(nenhum agente registrado)")
 def post_message(_from, to, body, kind="task", project="", task="", reply_to="", state="", result="",
-                 evidence="", pending="", next_action="", auto_status=True, files=None):
-    """Caminho unico de escrita no bus (CLI, missoes e painel). files (so do send --file) vira o campo opcional
-    `files`; sem ele o envelope tem os 14 campos de sempre."""
+                 evidence="", pending="", next_action="", auto_status=True, files=None, assignee=""):
+    """Caminho unico de escrita no bus (CLI, missoes e painel). files (so do send --file) e assignee (so tarefas,
+    etapa 14) viram campos opcionais; sem eles o envelope tem os 14 campos de sempre."""
     ensure_dirs(); mid = uuid.uuid4().hex[:12]; ts = now_iso()
     msg = {"data": ts, "task_id": task or "", "msg_id": mid, "from": _from,
            "to": to, "project": project or "", "in_reply_to": reply_to or "",
@@ -215,6 +215,7 @@ def post_message(_from, to, body, kind="task", project="", task="", reply_to="",
            "evidence": evidence or "", "pending": pending or "",
            "next_action": next_action or "", "body": body or ""}
     if files: msg["files"] = files
+    if assignee: msg["assignee"] = assignee
     fn = f"{ts.replace(':','').replace('-','')}-{mid}.json"
     write_json(os.path.join(BUS, fn), msg)
     index_append(fn, msg)
@@ -254,13 +255,37 @@ def file_ref(spec, root):
 def msg_files(m):
     f = m.get("files"); return [x for x in f if isinstance(x, dict)] if isinstance(f, list) else []
 def file_label(x): return f"{x.get('path', '')}" + (f":{x['lines']}" if x.get("lines") else "")
+def task_owner(task_id, reply_to="", mission_asg=None):
+    """Responsavel (assignee) de uma missao ou tarefa (etapa 14): pelo task_id (missao ou outra mensagem kind=task
+    com o mesmo id) ou, sem task_id, pela mensagem respondida (--reply-to). So leitura; "" se nao houver (nada muda
+    sem o campo)."""
+    mission_asg = mission_assignees() if mission_asg is None else mission_asg
+    orig = find_message(reply_to) if reply_to else None
+    tid = task_id or (orig.get("task_id") if orig else "") or ""
+    if tid:
+        if tid in mission_asg: return mission_asg[tid]
+        for x in all_messages():
+            if x.get("task_id") == tid and x.get("kind") == "task" and x.get("assignee"): return x["assignee"]
+    return (orig.get("assignee") if orig else "") or ""
 def cmd_send(a):
-    refuse_if_runner_as_human(a._from); files = None
-    if getattr(a, "file", None):  # confere tudo antes: arquivo faltando = erro e nenhuma mensagem gravada
-        try: root = file_root(a._from, a.project); files = [file_ref(x, root) for x in a.file]
-        except DoveError as e: fail(f"erro: {e}")
-    m = post_message(a._from, a.to, a.body, a.kind, a.project, a.task, a.reply_to, a.state, a.result,
-                     a.evidence, a.pending, a.next_action, not getattr(a, "no_auto_status", False), files)
+    refuse_if_runner_as_human(a._from)
+    try:
+        if a.state in ("EM_EXECUCAO", "AGUARDANDO_APROVACAO") and a._from != human_name():
+            owner = task_owner(a.task, a.reply_to)
+            if owner and owner != a._from:
+                raise DoveError(f"so o responsavel ('{owner}') pode marcar '{a.state}' (demais participantes: comentar ou revisar)")
+        files = None
+        if getattr(a, "file", None):  # confere tudo antes: arquivo faltando = erro e nenhuma mensagem gravada
+            root = file_root(a._from, a.project); files = [file_ref(x, root) for x in a.file]
+        assignee = (getattr(a, "assignee", None) or "").strip()
+        if assignee:
+            if a.kind != "task": raise DoveError("--assignee so vale com --kind task")
+            if assignee not in registered_agents(): raise DoveError(f"assignee '{assignee}' nao esta registrado (a2a join)")
+            if a.to != "all" and assignee != a.to:
+                raise DoveError(f"assignee '{assignee}' precisa ser o destinatario ('{a.to}') ou use --to all")
+        m = post_message(a._from, a.to, a.body, a.kind, a.project, a.task, a.reply_to, a.state, a.result,
+                         a.evidence, a.pending, a.next_action, not getattr(a, "no_auto_status", False), files, assignee)
+    except DoveError as e: fail(f"erro: {e}")
     print(f"enviado {m['msg_id']} ({a._from} -> {a.to})")
 def auto(a, agent):
     if not getattr(a, "no_auto_status", False): touch_status(agent)
@@ -1215,6 +1240,13 @@ def all_missions():
         m = read_json(f)
         if isinstance(m, dict) and m.get("id"): out.append(m)
     return sorted(out, key=lambda m: m.get("created", ""))
+def mission_assignees():
+    """So leitura, sem ensure_dirs (usado no vigia): {missao_id: assignee} das missoes com assignee (etapa 14)."""
+    out = {}
+    for f in glob.glob(os.path.join(MISSIONS, "*.json")):
+        m = read_json(f)
+        if isinstance(m, dict) and m.get("id") and m.get("assignee"): out[m["id"]] = m["assignee"]
+    return out
 def mission_status(m):
     ap = m.get("approvals") or {}
     v = [(ap.get(a) or {}).get("verdict") for a in m.get("agents", [])]
@@ -1226,18 +1258,24 @@ def mission_view(m):
     return dict(m, status=mission_status(m),
                 approved=sum(1 for a in m.get("agents", []) if (ap.get(a) or {}).get("verdict") == "approve"),
                 total=len(m.get("agents", [])))
-def mission_new(project, title, desc="", agents=None, created_by=None):
+def mission_new(project, title, desc="", agents=None, created_by=None, assignee=""):
     project, title = (project or "").strip(), (title or "").strip()
     if not project: raise DoveError("missao exige --project")
     if not title: raise DoveError("missao exige --title")
     ags = [x.strip() for x in (agents or []) if x and x.strip()] or registered_agents()
     ags = list(dict.fromkeys(ags))
     if not ags: raise DoveError("nenhum agente participante (registre com a2a join ou use --agents)")
+    assignee = (assignee or "").strip()
+    if assignee:  # etapa 14: responsavel unico, precisa ser um dos participantes
+        if assignee == human_name(): raise DoveError("assignee precisa ser um agente participante, nao o humano")
+        if assignee in RESERVED_AGENTS: raise DoveError(f"assignee '{assignee}' e reservado")
+        if assignee not in ags: raise DoveError(f"assignee '{assignee}' precisa estar entre os participantes ({', '.join(ags)})")
     created_by = (created_by or "").strip() or human_name()
     refuse_if_runner_as_human(created_by)
     mid = "m" + uuid.uuid4().hex[:7]; ensure_dirs()
     m = {"id": mid, "project": project, "title": title, "description": desc or "", "agents": ags,
-         "created_by": created_by, "created": now_iso(), "approvals": {}, "history": [], "human": None}
+         "created_by": created_by, "created": now_iso(), "approvals": {}, "history": [], "human": None,
+         "assignee": assignee}
     write_json(mission_path(mid), m)
     human = created_by == human_name()
     for ag in ags:
@@ -1285,8 +1323,9 @@ def cmd_mission(a):
     try:
         if a.mcmd == "new":
             ags = [x for x in (a.agents or "").split(",") if x.strip()]
-            m = mission_new(a.project, a.title, a.desc, ags, a._from)
-            print(f"missao {m['id']} criada ({', '.join(m['agents'])}): {m['title']}")
+            m = mission_new(a.project, a.title, a.desc, ags, a._from, a.assignee)
+            print(f"missao {m['id']} criada ({', '.join(m['agents'])}): {m['title']}"
+                  + (f" · responsavel: {m['assignee']}" if m.get("assignee") else ""))
         elif a.mcmd == "approve":
             m = mission_verdict(a.id, a.agent, "approve", a.evidence)
             print(f"aval de '{a.agent}' registrado na missao {a.id} -> {mission_status(m)}")
@@ -1308,6 +1347,7 @@ def cmd_mission(a):
             print(f"{v['id']}  {v['title']}\nprojeto: {v['project']}  status: {v['status']}  "
                   f"avais: {v['approved']}/{v['total']}  criada por {v['created_by']} em {v['created']}")
             if v.get("description"): print(f"descricao: {v['description']}")
+            if v.get("assignee"): print(f"responsavel: {v['assignee']}")
             for ag in v["agents"]:
                 x = (v.get("approvals") or {}).get(ag)
                 if not x: print(f"  {ag:<12} pendente")
@@ -3243,15 +3283,17 @@ def watch_plan(now=None, project=None, agent=None, check_git=False):
     conversa que nasceu do humano (ou de missao criada por ele). Um agente+projeto = uma execucao com todos os gatilhos."""
     now = time.time() if now is None else now
     msgs, missions = loop_inputs(); hn = human_name(); runs = loop_runs()
+    mission_asg = mission_assignees()  # etapa 14: so o responsavel (quando definido) e acionado, nao todo participante
     acted = set()
     for r in runs or []:
         if isinstance(r, dict) and isinstance(r.get("trigger_ids"), list): acted.update(x for x in r["trigger_ids"] if isinstance(x, str))
     by_id = {m["msg_id"]: m for m in msgs}
-    conv = {}  # msg_id -> (raiz, mensagens da conversa, nasceu do humano)
+    conv, owner = {}, {}  # msg_id -> (raiz, mensagens da conversa, nasceu do humano); msg_id -> responsavel ("" = todos)
     for root, ms in loop_conversations(msgs):
         tids = {m.get("task_id") for m in ms if m.get("task_id")}
         human = root.get("from") == hn or any(missions.get(t) == hn for t in tids)
-        for m in ms: conv[m["msg_id"]] = (root, ms, human)
+        ow = next((mission_asg[t] for t in tids if t in mission_asg), "") or root.get("assignee") or ""
+        for m in ms: conv[m["msg_id"]] = (root, ms, human); owner[m["msg_id"]] = ow
     found = [f for f in loop_check(msgs, runs, now=now, missions=missions, human=hn)["findings"] if f["kind"] != "teto"]
     found += [f for f in loop_check(msgs, runs, now=now, missions=missions, human=hn, since=1)["findings"] if f["kind"] == "teto"]
     stop = os.path.exists(watch_stop_path())
@@ -3261,6 +3303,7 @@ def watch_plan(now=None, project=None, agent=None, check_git=False):
         seen, groups = load_seen(ag), {}
         for m in msgs:
             if not visible_for(m, ag) or m["msg_id"] in seen or m["msg_id"] in acted or m.get("from") in RESERVED_AGENTS: continue
+            if owner.get(m["msg_id"]) and owner[m["msg_id"]] != ag: continue  # etapa 14: so o responsavel e acionado
             k = m.get("kind")
             if k == "report":
                 if (by_id.get(m.get("in_reply_to") or "") or {}).get("from") != ag: continue
@@ -4798,6 +4841,8 @@ def build_parser():
     s.add_argument("--file", action="append", metavar="CAMINHO[:L1-L2]",
                    help="cita um arquivo (repetivel): grava caminho relativo, sha (6 hex) e linhas no campo files, sem o "
                         "conteudo. Base: a pasta do agente no --project registrado (whereami), senao a pasta atual")
+    s.add_argument("--assignee", help="responsavel unico da tarefa (so com --kind task, etapa 14): precisa ser o "
+                   "destinatario (--to) ou, com --to all, um agente registrado; so ele marca EM_EXECUCAO/AGUARDANDO_APROVACAO")
     s.add_argument("--no-auto-status", dest="no_auto_status", action="store_true",
                    help="nao atualiza o status do remetente"); s.set_defaults(func=cmd_send)
     i = sub.add_parser("inbox"); i.add_argument("--agent", required=True); i.add_argument("--project")
@@ -4880,6 +4925,8 @@ def build_parser():
     ms = mi.add_subparsers(dest="mcmd", required=True)
     x = ms.add_parser("new"); x.add_argument("--project", required=True); x.add_argument("--title", required=True)
     x.add_argument("--desc", default=""); x.add_argument("--agents", help="a,b,c (padrao: todos os registrados)")
+    x.add_argument("--assignee", help="responsavel unico (etapa 14): precisa estar em --agents; so ele marca "
+                   "EM_EXECUCAO/AGUARDANDO_APROVACAO; os demais participantes so comentam ou revisam (aval continua livre)")
     x.add_argument("--from", dest="_from", required=True, help="quem cria (o humano ou um agente)")
     x = ms.add_parser("approve", **ex('a2a mission approve m3f9a2c1 --agent claude --evidence "rodei os testes de contrato: 48 ok"')); x.add_argument("id"); x.add_argument("--agent", required=True)
     x.add_argument("--evidence", required=True)
