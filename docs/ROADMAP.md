@@ -62,6 +62,22 @@ Todos os passos têm aval do Luiz; o 12 foi aceito com risco em 2026-10-19 (desl
 | 11 | Orquestrador (só leitura + mensagens) | próximo (aprovado) · depende do 7 |
 | 12 | Hermes no vigia | **APROVADO COM RISCO** (Luiz, 2026-10-19: "quero arriscar"): desligado por padrão, só com opt-in explícito |
 | 13 | Política de subagentes | **FEITO** · 898c637 (+ c65d148 teste determinístico) |
+| 14 | `assignee` (responsável único) em missões e tarefas | **APROVADO** (Luiz, 2026-10-19: "sim") · **pré-requisito do passo 7** (entra antes dele) |
+| 15 | `parent` (missão-mãe) em missões | **APROVADO** (Luiz, 2026-10-19: "sim") · entra junto com o 11, depois do 7 |
+
+Ordem de dependência: **14 → 7 → (9, 11 + 15)**.
+
+**Passo 14 — `assignee`** (pré-requisito do 7; a especificação do passo 7 continua como está):
+- Campo opcional `assignee` em missões e tarefas: um único agente responsável.
+- Regra: só o `assignee` marca `EM_EXECUCAO` ou `AGUARDANDO_APROVACAO`; os demais participantes só comentam ou revisam.
+- O vigia (passo 7) acorda só o `assignee`, não todos os participantes: menos gasto, menos risco de loop, dono claro.
+- Sem o campo, tudo se comporta exatamente como hoje (nenhuma mudança de comportamento).
+
+**Passo 15 — `parent`** (junto com o 11, depois do 7):
+- Campo opcional `parent` em missões: id da missão-mãe.
+- Escopo mínimo: o campo + somar o gasto das filhas no orçamento da mãe e no `a2a cost`.
+- A mãe só fecha quando todas as filhas estiverem `CONCLUIDO` ou `CANCELADO`; fechar continua só humano (`require_human`).
+- **Sem** automação de propagação de estado e **sem** UI de árvore.
 
 **Nota para quem implementar o passo 7** (o orçamento do passo 8 já existe, falta ligar no executor):
 - Gravar `"mission"` e `"usage_file"` (Hermes) nos registros de run.
@@ -81,8 +97,11 @@ Todos os passos têm aval do Luiz; o 12 foi aceito com risco em 2026-10-19 (desl
 
 - Hermes no vigia (passo 12): o Luiz aceitou o risco em 2026-10-19 ("quero arriscar"); desligado por padrão, exige opt-in explícito.
 
+- `assignee` (passo 14) e `parent` (passo 15): aprovados pelo Luiz em 2026-10-19 ("sim"), nos termos acima.
+- **Descartados** explicitamente: prioridade, tags, dependências entre tarefas e qualquer coisa que o agente já leia no texto da missão.
+
 **Pendentes**
-- Executor real do vigia (passo 7) — decisão do Luiz; os passos 9 e 11 dependem dele.
+- Executor real do vigia (passo 7) — decisão do Luiz; os passos 9 e 11 dependem dele. O passo 14 (`assignee`) entra antes do 7.
 
 ## 6. Depois da Fase 3
 - Canal entre máquinas: VPS Ubuntu 24.04 + Omarchy + Windows.
