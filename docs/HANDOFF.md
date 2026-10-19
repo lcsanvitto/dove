@@ -62,8 +62,8 @@ Para uma sessão nova retomar sem reexplicar nada. Estado detalhado: [`docs/ROAD
 - Soma o gasto das filhas no orçamento/teto da mãe (`budget_status`/`run_budget_cap`) e no `a2a cost --mission` numa **única passada** de escopo-família (ids mãe+filhas, agentes em união) — não soma chamadas independentes por missão, pra não contar o mesmo registro do vigia duas vezes. O rollup é só pra cima (a filha nunca vê o gasto da mãe).
 - `mission done` só fecha a mãe com **todas** as filhas diretas `concluida` (reprovada não conta como fechada).
 - `mission show` lista mãe/filhas.
-- **Pendente, decisão explícita de não fazer agora**: `run_budget_cap` não propaga o teto da mãe pra baixo quando a filha roda direto (sem passar `--mission <mãe>`).
-- **Pergunta aberta pro Luiz**: quer um `mission cancel` humano-only? Hoje não existe conceito de cancelamento; o gate do 15 exige `concluida` nas filhas pra fechar a mãe (reprovada não basta).
+- **Decisão resolvida (@@HASH@@)**: `run_budget_cap` agora propaga o teto das missões-mãe (pai, avô, ... até a raiz, guarda de ciclo/profundidade 16): rodar a filha pelo id dela respeita o que resta de cada mãe ativa. Limite conhecido: o gasto de netas só entra na mãe direta delas (rollup de 1 nível, passo 15), não na avó.
+- **Decisão resolvida (@@HASH@@)**: `a2a mission cancel <id> --from <humano>` (só humano, `require_human`; recusado em `A2A_RUNNER`): `state: CANCELADO` + quem/quando/motivo. Filha CANCELADO conta como resolvida no gate da mãe (reprovada continua travando); cancelada não acorda o vigia, sai do `brief` e dos orçamentos ativos, não recebe aval nem filha nova; não desfaz.
 
 **Etapa 16 — Controle remoto pelo celular** · aprovada (Luiz, 2026-10-19: "Sim", **MUITO IMPORTANTE**)
 Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas/2026-10-19-orca-controle-remoto-mobile.md) (pesquisa do Orca + design).
@@ -102,7 +102,7 @@ Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas
 
 **Etapa 12 — Hermes**: o Luiz aceitou o risco em 2026-10-19 ("quero arriscar"). Sem sandbox de SO (`approvals.mode`), então fica **desligado por padrão** e só liga com opt-in explícito.
 
-**Fase 3 (0+1 a 15) está completa; restam 16 e 17.**
+**Fase 3 (0+1 a 15) está completa, com as duas decisões abertas do 15 resolvidas (cap herdado das mães e `mission cancel`, @@HASH@@); restam 16 e depois 17.**
 
 **Depois**: roteiro de ativação para o Luiz no Windows; canal entre máquinas (VPS/Omarchy); retomada visual com o Claude Design; qLink.
 
@@ -122,6 +122,14 @@ a2a worktree create --project lagu --agent claude --from luiz
 a2a worktree create --project lagu --agent codex --from luiz
 dove   # painel
 ```
+
+**Checklist da primeira ativação no Windows** (antes de ligar o vigia):
+1. `a2a` no PATH tem de ser o do **Dove**, não o `qlink`: `where.exe a2a` / `Get-Command a2a -All` e `a2a --version` (deve dizer Dove 0.6.0). Se aparecer o qlink primeiro, corrigir a ordem do PATH ou o `install.ps1`.
+2. `a2a watch check --project lagu` sem erro (claude, codex e hermes; hermes aparece desabilitado até o opt-in).
+3. Codex: `[windows] sandbox = "elevated"` (ou `"unelevated"`) no `config.toml` do Codex, senão o `watch check` acusa.
+4. Orçamento antes do primeiro run: `a2a cost budget` (teto por execução; padrão US$ 0,50). Sem projeto/missão o limite do dia vale.
+5. Primeira execução real **só com o `claude`**, acompanhada pelo Luiz, via `a2a watch --once` (nunca contínuo ainda), numa missão pequena. **PARAR na mão** se algo sair do esperado: `a2a watch stop` (STOP) e conferir `a2a watch runs`.
+6. Só depois, `codex`; o `hermes` só com `a2a watch hermes --enable --from luiz` (risco aceito, sem sandbox de SO).
 
 ## Decisões registradas
 - token-optimizer não adotado.

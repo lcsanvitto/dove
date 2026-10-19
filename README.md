@@ -476,7 +476,7 @@ O app só escuta em `127.0.0.1` por padrão e protege toda escrita:
 - Passar outro `--host` (ex. `0.0.0.0`) expõe a leitura na rede — o `a2a` avisa.
 
 ### Execução automática (`A2A_RUNNER`) nunca age como humano
-Quem roda agentes sem ninguém olhando (vigias, cron, CI) define `A2A_RUNNER` (qualquer valor não vazio) no ambiente. Com ele, a CLI recusa — saída 2 e `acao reservada ao humano; recusada em execucao automatica (A2A_RUNNER)` — toda ação do humano, **mesmo com `--from <humano>`**: `worktree create/remove/merge/sync`, `archive` (e `--restore`), `fact prune`, `mission done`, `instructions install/remove/uninstall`, `mission new --from <humano>` e `send`/`ack` com `--from <humano>`. O resto (send/ack/brief/read/status/mission approve dos agentes) funciona igual. Só vale o ambiente do próprio processo: o painel que você abriu continua sendo o humano. Nomes reservados do Dove: ninguém entra no canal como `vigia`; o humano é o `human` do `config.json` (padrão `luiz`).
+Quem roda agentes sem ninguém olhando (vigias, cron, CI) define `A2A_RUNNER` (qualquer valor não vazio) no ambiente. Com ele, a CLI recusa — saída 2 e `acao reservada ao humano; recusada em execucao automatica (A2A_RUNNER)` — toda ação do humano, **mesmo com `--from <humano>`**: `worktree create/remove/merge/sync`, `archive` (e `--restore`), `fact prune`, `mission done`, `mission cancel`, `instructions install/remove/uninstall`, `mission new --from <humano>` e `send`/`ack` com `--from <humano>`. O resto (send/ack/brief/read/status/mission approve dos agentes) funciona igual. Só vale o ambiente do próprio processo: o painel que você abriu continua sendo o humano. Nomes reservados do Dove: ninguém entra no canal como `vigia`; o humano é o `human` do `config.json` (padrão `luiz`).
 
 ### API
 | Rota | O que faz |
@@ -554,11 +554,14 @@ a2a mission new --project lagu --title "Checkout pronto" --desc "cupom, frete, p
 a2a mission approve <id> --agent claude --evidence "rodei os testes: 212/212"
 a2a mission reject  <id> --agent codex  --reason "falta teste de frete"
 a2a mission done    <id> --from luiz     # só com o aval de todos
+a2a mission cancel  <id> --from luiz [--reason "..."]   # só o humano; estado CANCELADO (não desfaz)
 a2a mission list [--project lagu]
 a2a mission show <id>
 ```
 - **Mudança incompatível:** `--from` agora é **obrigatório** em `mission new` e `mission done` (antes o padrão era `luiz`). Scripts que chamavam sem `--from` recebem erro do argparse (saída 2): acrescente `--from <humano>` (ou `--from <agente>` no `new`). O painel não muda: o servidor passa o humano sozinho.
 - `mission done` é só do humano (`--from` igual ao `human` do `config.json`, padrão `luiz`); agente recebe erro.
+- `mission cancel` também é só do humano (agente e `A2A_RUNNER` são recusados): grava `state: CANCELADO` com quem e quando. Missão concluída não cancela. A cancelada não acorda o vigia, sai do `brief` e dos orçamentos ativos, não recebe aval nem filha nova, e uma **filha cancelada conta como resolvida** para a mãe fechar (`mission done` da mãe exige filhas `concluida` ou `CANCELADO`; reprovada continua travando).
+- O teto de uma execução (`run_budget_cap`) respeita também o orçamento de cada missão-mãe (até a raiz): rodar a filha pelo id dela não contorna o limite da mãe.
 - Sem `--agents`, participam todos os agentes registrados.
 - `new` manda uma `task` para cada participante (com `task_id` = id da missão). `approve`/`reject` mandam um `report` ao criador (`CONCLUIDO`/`BLOQUEADO`), respondendo à task.
 - Evidência é obrigatória e só participantes votam. Vale o último veredito de cada agente.
@@ -646,6 +649,7 @@ a2a loops [--project P] [--agent X] [--since H] [--json] [--strict]
 | `project scan RAIZ [--depth 3] [--add]` | descobre repositórios git sob RAIZ (sem rodar git) |
 | `mission new --project P --title T [--desc D] [--agents a,b] --from X` | cria missão e avisa os participantes |
 | `mission approve ID --agent X --evidence E` | aval do agente (evidência obrigatória) |
+| `mission cancel ID --from luiz [--reason R]` | cancela a missão (só o humano; filha cancelada libera a mãe) |
 | `mission reject ID --agent X --reason R` | reprovação do agente |
 | `mission done ID --from luiz` | confirmação final do humano (só com aval de todos) |
 | `mission list [--project P]` · `mission show ID` | lista / detalha missões |

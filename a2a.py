@@ -1265,7 +1265,22 @@ def mission_children(mid):
         m = read_json(f)
         if isinstance(m, dict) and m.get("id") and m.get("parent") == mid: out.append(m)
     return sorted(out, key=lambda m: m.get("created", ""))
+def mission_cancelled(m): return isinstance(m, dict) and bool(m.get("cancelled"))
+def mission_closed(m):
+    """Missao encerrada (concluida pelo humano ou cancelada): nao e mais trabalho ativo (etapa 15/cancel)."""
+    return isinstance(m, dict) and bool(m.get("human") or m.get("cancelled"))
+def mission_end_ts(m):
+    """Quando a janela de gasto da missao fecha: conclusao do humano ou cancelamento (senao None = ainda aberta)."""
+    return ((m.get("human") or {}).get("ts") or (m.get("cancelled") or {}).get("ts") or None) if isinstance(m, dict) else None
+def mission_cancelled_ids():
+    """So leitura, sem ensure_dirs (usado no vigia): ids das missoes canceladas."""
+    out = set()
+    for f in glob.glob(os.path.join(MISSIONS, "*.json")):
+        m = read_json(f)
+        if isinstance(m, dict) and m.get("id") and mission_cancelled(m): out.add(m["id"])
+    return out
 def mission_status(m):
+    if mission_cancelled(m): return "CANCELADO"
     ap = m.get("approvals") or {}
     v = [(ap.get(a) or {}).get("verdict") for a in m.get("agents", [])]
     if "reject" in v: return "reprovada"
@@ -1292,6 +1307,8 @@ def mission_new(project, title, desc="", agents=None, created_by=None, assignee=
     if parent:  # etapa 15: missao-mae precisa existir, estar aberta e ser do mesmo projeto
         pm = load_mission(parent)
         if pm.get("human"): raise DoveError(f"parent '{parent}' ja foi concluida: nao pode receber filha nova")
+        if mission_cancelled(pm): raise DoveError(f"parent '{parent}' foi cancelada: nao pode receber filha nova")
+        parent = pm["id"]  # id canonico: load_mission ignora caracteres fora de [A-Za-z0-9_-], senao a filha nunca casaria com a mae
         if pm.get("project") != project:
             raise DoveError(f"parent '{parent}' e do projeto '{pm.get('project')}': a filha precisa ser do mesmo projeto")
     created_by = (created_by or "").strip() or human_name()
@@ -1319,6 +1336,7 @@ def mission_verdict(mid, agent, verdict, text):
         if agent not in m.get("agents", []):
             raise DoveError(f"'{agent}' nao participa da missao {mid} (participantes: {', '.join(m['agents'])})")
         if m.get("human"): raise DoveError(f"missao {mid} ja foi concluida")
+        if mission_cancelled(m): raise DoveError(f"missao {mid} foi cancelada")
         v = {"verdict": verdict, "ts": now_iso(), "evidence": text if verdict == "approve" else "",
              "reason": text if verdict == "reject" else ""}
         m.setdefault("approvals", {})[agent] = v  # o ultimo veredito de cada agente vale
@@ -1340,10 +1358,23 @@ def mission_done(mid, by):
         if st == "concluida": raise DoveError(f"missao {mid} ja estava concluida")
         if st != "aval_completo":
             raise DoveError(f"missao {mid} esta '{st}': a conclusao so vale com o aval de todos os agentes")
-        abertas = [c["id"] for c in mission_children(mid) if mission_status(c) != "concluida"]  # etapa 15
+        abertas = [c["id"] for c in mission_children(mid) if mission_status(c) not in ("concluida", "CANCELADO")]  # etapa 15
         if abertas:
             raise DoveError(f"missao {mid} tem filha(s) nao concluida(s): {', '.join(abertas)}")
         m["human"] = {"by": by, "ts": now_iso()}; write_json(mission_path(mid), m)
+    return m
+def mission_cancel(mid, by, reason=""):
+    """Cancela a missao (so o humano; nunca em A2A_RUNNER): state CANCELADO + quem/quando. Concluida nao cancela.
+    Filha cancelada conta como resolvida no gate da mae; a missao sai do vigia e dos orcamentos ativos."""
+    by = (by or "").strip(); require_human(by)
+    with FileLock(mission_path(mid)):
+        m = load_mission(mid)
+        if m.get("human"): raise DoveError(f"missao {mid} ja foi concluida: nao da para cancelar")
+        if mission_cancelled(m): raise DoveError(f"missao {mid} ja estava cancelada")
+        m["state"] = "CANCELADO"
+        m["cancelled"] = {"by": by, "ts": now_iso(), "reason": (reason or "").strip()}
+        m.setdefault("history", []).append({"cancelled": by, "ts": m["cancelled"]["ts"]})
+        write_json(mission_path(mid), m)
     return m
 def mission_line(m):
     v = mission_view(m)
@@ -1364,6 +1395,8 @@ def cmd_mission(a):
             print(f"reprovacao de '{a.agent}' registrada na missao {a.id} -> {mission_status(m)}")
         elif a.mcmd == "done":
             mission_done(a.id, a._from); print(f"missao {a.id} concluida (confirmada por {a._from})")
+        elif a.mcmd == "cancel":
+            mission_cancel(a.id, a._from, a.reason); print(f"missao {a.id} cancelada (por {a._from})")
         elif a.mcmd == "budget":
             b = mission_budget(a.id, a._from, a.usd, a.tokens)["budget"]
             print(f"orcamento da missao {a.id}: {usd_text(b['usd'])}" + (f" e {fmt_int(b['tokens'])} tokens" if b["tokens"] else "")
@@ -1387,6 +1420,9 @@ def cmd_mission(a):
                 elif x["verdict"] == "approve": print(f"  {ag:<12} aprovado  {x['ts']}  evidencia: {x['evidence']}")
                 else: print(f"  {ag:<12} reprovado {x['ts']}  motivo: {x['reason']}")
             if v.get("human"): print(f"conclusao confirmada por {v['human']['by']} em {v['human']['ts']}")
+            if mission_cancelled(v):
+                print(f"cancelada por {v['cancelled'].get('by')} em {v['cancelled'].get('ts')}"
+                      + (f": {v['cancelled']['reason']}" if v['cancelled'].get("reason") else ""))
             if isinstance(v.get("budget"), dict):
                 st = budget_status(mission=v)
                 print(f"orcamento: {_budget_amount(st)} ({st['pct']:.0f}%, estimado)" + (" · esgotado" if st["exceeded"] else ""))
@@ -1415,7 +1451,8 @@ def summary_data(project=None, msgs=None, agents=None, missions=None, stale_min=
                       "project": m.get("project", ""), "data": m.get("data", ""), "body": short(m.get("body"), 120)}
     ot, mids = open_tasks(msgs), {m["id"] for m in missions}
     by_status = {s: 0 for s in ("aberta", "reprovada", "aval_completo", "concluida")}
-    for m in missions: by_status[mission_status(m)] += 1
+    for m in missions:
+        if mission_status(m) in by_status: by_status[mission_status(m)] += 1  # cancelada nao e ativa nem conta aqui
     done = [{"type": "message", "when": m.get("data", ""), "who": m.get("from", ""), "project": m.get("project", ""),
              "text": short(m.get("body"), 120)} for m in msgs if m.get("state") == "CONCLUIDO"
             and m.get("task_id") not in mids]  # avais de missao nao sao "conclusoes"
@@ -1465,7 +1502,7 @@ def brief_data(agent, project=None, limit=20, width=100, stale_min=30, facts=10,
     mids = {m["id"] for m in missions}  # tasks de missao aparecem em M, nao em T
     tasks = [m for m in open_tasks(msgs) if m.get("to") == agent and visible_for(m, agent, project)
              and m["msg_id"] in seen and m.get("task_id") not in mids]
-    mine = [mission_view(m) for m in missions if agent in (m.get("agents") or []) and not m.get("human")
+    mine = [mission_view(m) for m in missions if agent in (m.get("agents") or []) and not mission_closed(m)
             and (not project or m.get("project") == project)
             and ((m.get("approvals") or {}).get(agent) or {}).get("verdict") != "approve"]
     e = effective_status(agent, load_status(agent), stale_min)
@@ -1600,7 +1637,7 @@ def fact_live(f, ctx):
     k, ref = scope_kind(f.get("scope")), scope_ref(f.get("scope"))
     if k == "missao":
         m = ctx.missions.get(ref)
-        return not (m and m.get("human"))
+        return not (m and mission_closed(m))
     if k == "tarefa": return ref in ctx.open_ids
     return True
 def fact_status(f, ctx):
@@ -1641,7 +1678,7 @@ def fact_add(project, who, text, scope="projeto", ttl="", source="", now=None):
         try: m = load_mission(ref)
         except DoveError: raise DoveError(f"missao '{ref}' nao encontrada (escopo {scope})")
         if m.get("project") != project: raise DoveError(f"missao {ref} e do projeto '{m.get('project')}', nao de '{project}'")
-        if m.get("human"): raise DoveError(f"missao {ref} ja foi concluida: o fato nasceria vencido (use escopo projeto ou condense)")
+        if mission_closed(m): raise DoveError(f"missao {ref} ja foi concluida ou cancelada: o fato nasceria vencido (use escopo projeto ou condense)")
     if k == "tarefa":
         t = next((x for x in all_messages() if x["msg_id"] == ref), None)
         if not t or t.get("kind") != "task": raise DoveError(f"'{ref}' nao e uma tarefa (kind=task) no bus")
@@ -2022,7 +2059,7 @@ def archive_plan(older_days=14, entries=None, missions=None, now=None):
         if m.get("in_reply_to"): kids.setdefault(m["in_reply_to"], []).append(m["msg_id"])
         if m.get("task_id"): same.setdefault((m["task_id"], m.get("from")), []).append(m["msg_id"])
     open_ids = {m["msg_id"] for m in open_tasks(msgs)}
-    pending = {x["id"] for x in missions if not x.get("human")}
+    pending = {x["id"] for x in missions if not mission_closed(x)}
     hn, reg, seen = human_name(), registered_agents(), {}
     def unread(m):
         to = reg if m.get("to") == "all" else [m.get("to")]
@@ -3394,6 +3431,7 @@ def watch_plan(now=None, project=None, agent=None, check_git=False):
     now = time.time() if now is None else now
     msgs, missions = loop_inputs(); hn = human_name(); runs = loop_runs()
     mission_asg = mission_assignees()  # etapa 14: so o responsavel (quando definido) e acionado, nao todo participante
+    cancelled = mission_cancelled_ids(); dead = set()  # missao cancelada (mission cancel): nunca acorda o vigia
     acted = set()
     for r in runs or []:
         if isinstance(r, dict) and isinstance(r.get("trigger_ids"), list): acted.update(x for x in r["trigger_ids"] if isinstance(x, str))
@@ -3404,6 +3442,7 @@ def watch_plan(now=None, project=None, agent=None, check_git=False):
         human = root.get("from") == hn or any(missions.get(t) == hn for t in tids)
         ow = next((mission_asg[t] for t in tids if t in mission_asg), "") or root.get("assignee") or ""
         for m in ms: conv[m["msg_id"]] = (root, ms, human); owner[m["msg_id"]] = ow
+        if tids & cancelled: dead.update(m["msg_id"] for m in ms)
     found = [f for f in loop_check(msgs, runs, now=now, missions=missions, human=hn)["findings"] if f["kind"] != "teto"]
     found += [f for f in loop_check(msgs, runs, now=now, missions=missions, human=hn, since=1)["findings"] if f["kind"] == "teto"]
     stop = os.path.exists(watch_stop_path())
@@ -3413,6 +3452,7 @@ def watch_plan(now=None, project=None, agent=None, check_git=False):
         seen, groups = load_seen(ag), {}
         for m in msgs:
             if not visible_for(m, ag) or m["msg_id"] in seen or m["msg_id"] in acted or m.get("from") in RESERVED_AGENTS: continue
+            if m["msg_id"] in dead or m.get("task_id") in cancelled: continue  # missao cancelada
             if owner.get(m["msg_id"]) and owner[m["msg_id"]] != ag: continue  # etapa 14: so o responsavel e acionado
             k = m.get("kind")
             if k == "report":
@@ -3852,7 +3892,7 @@ def cost_data(since=None, until=None, project=None, agent=None, by="agente", mis
         kids = mission_children(m["id"])  # etapa 15: soma o gasto das filhas diretas
         fam = [m] + kids
         start = min(iso_epoch(x.get("created")) or 0.0 for x in fam)
-        end = max(iso_epoch((x.get("human") or {}).get("ts")) or now for x in fam)
+        end = max(iso_epoch(mission_end_ts(x)) or now for x in fam)
         mission = {"id": m["id"], "ids": sorted({x["id"] for x in fam}), "project": m.get("project"),
                    "agents": sorted({a for x in fam for a in (x.get("agents") or [])}),
                    "children": [c["id"] for c in kids],
@@ -4791,7 +4831,7 @@ def budget_status(project=None, mission=None, now=None):
         m = mission if isinstance(mission, dict) else load_mission(mission)
         lim = m.get("budget") if isinstance(m.get("budget"), dict) else {}
         since = iso_epoch(m.get("created")) or 0.0
-        until = iso_epoch((m.get("human") or {}).get("ts")) or now
+        until = iso_epoch(mission_end_ts(m)) or now
         mm = {"id": m["id"], "ids": {m["id"]}, "project": m.get("project"), "agents": list(m.get("agents") or [])}
         st = {"scope": "missao", "id": m["id"], "project": m.get("project") or ""}
         limit = {"usd": _usd(lim.get("usd")), "tokens": _num(lim.get("tokens")) or None}
@@ -4811,7 +4851,7 @@ def budget_status(project=None, mission=None, now=None):
             mm["ids"] |= {c["id"] for c in kids}
             mm["agents"] = sorted(set(mm["agents"]) | {a for c in kids for a in (c.get("agents") or [])})
             since = min([since] + [iso_epoch(c.get("created")) or 0.0 for c in kids])
-            until = max([until] + [iso_epoch((c.get("human") or {}).get("ts")) or now for c in kids])
+            until = max([until] + [iso_epoch(mission_end_ts(c)) or now for c in kids])
             st["from"], st["to"] = epoch_iso(since), epoch_iso(until)
     sp = budget_spent(since, until, None if mm else project, mm)
     rem = {"usd": None if limit["usd"] is None else round(max(limit["usd"] - sp["usd"], 0.0), 6),
@@ -4824,6 +4864,20 @@ def budget_status(project=None, mission=None, now=None):
                (limit["tokens"] is not None and sp["tokens"] >= limit["tokens"])
     st.update(spent=sp, remaining=rem, pct=pct, warn=pct >= BUDGET_WARN, exceeded=bool(exceeded))
     return st
+MISSION_ANCESTOR_MAX = 16
+def mission_ancestor_statuses(m, now=None):
+    """budget_status de cada missao-mae (pai, avo, ...) ativa de m, para o teto nao ser contornado rodando a filha pelo id
+    dela. Guarda de ciclo (ids ja vistos) e de profundidade; mae sumida/ilegivel encerra a subida; mae cancelada ou
+    concluida nao e orcamento ativo e e pulada."""
+    out, seen = [], {m.get("id")} if isinstance(m, dict) else set()
+    cur = m.get("parent") if isinstance(m, dict) else ""
+    while cur and cur not in seen and len(seen) <= MISSION_ANCESTOR_MAX:
+        seen.add(cur)
+        try: pm = load_mission(cur)
+        except DoveError: break
+        if not mission_closed(pm): out.append(budget_status(mission=pm, now=now))
+        cur = pm.get("parent") or ""
+    return out
 def run_budget_cap(project=None, mission=None, now=None):
     """Teto em US$ para a proxima execucao (o --max-budget-usd do claude no vigia, etapa 7): o menor entre o teto por
     execucao (projeto, padrao definido ou 0.50), o que resta do orcamento da missao e o que resta do dia do projeto.
@@ -4831,7 +4885,8 @@ def run_budget_cap(project=None, mission=None, now=None):
     m = load_mission(mission) if isinstance(mission, str) and mission else mission
     project = project or (m.get("project") if isinstance(m, dict) else None)
     caps = [run_usd_max(project)[0]]
-    for st in ([budget_status(mission=m, now=now)] if m else []) + ([budget_status(project=project, now=now)] if project else []):
+    for st in ([budget_status(mission=m, now=now)] if m else []) + mission_ancestor_statuses(m, now) \
+            + ([budget_status(project=project, now=now)] if project else []):
         if not st["has_budget"]: continue
         if st["exceeded"]: return 0.0
         if st["remaining"]["usd"] is not None: caps.append(st["remaining"]["usd"])
@@ -4847,7 +4902,7 @@ def budget_targets(project=None, agent=None, missions=None, days=True):
     """Orcamentos definidos (sem ler registros): [("missao", dict)] das missoes abertas com budget e [("projeto_dia", P)]."""
     out = []
     for m in (all_missions() if missions is None else missions):
-        if m.get("human") or not isinstance(m.get("budget"), dict): continue
+        if mission_closed(m) or not isinstance(m.get("budget"), dict): continue
         if project and m.get("project") != project: continue
         if agent and agent not in (m.get("agents") or []): continue
         out.append(("missao", m))
@@ -5081,6 +5136,12 @@ def build_parser():
     x.add_argument("--reason", required=True)
     x = ms.add_parser("done", help="confirmacao final do humano"); x.add_argument("id")
     x.add_argument("--from", dest="_from", required=True, help="o humano (acao so do humano)")
+    x = ms.add_parser("cancel", help="cancela a missao (so o humano): conta como resolvida para fechar a mae; o vigia nao a aciona mais",
+                      description="Cancela a missao: state CANCELADO, com quem e quando. Concluida nao cancela. Filha cancelada nao trava o "
+                                  "`mission done` da mae; a missao sai do vigia e dos orcamentos ativos. Nao desfaz. So o humano "
+                                  "(--from igual ao human do config; recusado em A2A_RUNNER e com nome de agente).",
+                      epilog="exemplo: a2a mission cancel m4c1e9a0 --from luiz --reason \"obsoleta\"")
+    x.add_argument("id"); x.add_argument("--from", dest="_from", required=True, help="o humano"); x.add_argument("--reason", default="", help="motivo (opcional)")
     x = ms.add_parser("budget", help="define o orcamento da missao em US$ (estimado; so o humano)",
         description="Grava budget: {usd, tokens, set_by, ts} no JSON da missao. O gasto (estimado) soma as execucoes do vigia "
         "da missao e os registros das CLIs nas copias dos participantes, da criacao ate a conclusao. Aos 80% aparece "

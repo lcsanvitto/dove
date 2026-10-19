@@ -3496,6 +3496,133 @@ def parent_fase():
           "sem ele nada muda), budget_status/run_budget_cap/a2a cost somam o gasto das filhas no da mae numa unica "
           "passada (sem contar duas vezes, e sem a filha ver o gasto da mae), mission done so fecha a mae com todas "
           "as filhas concluidas (reprovada nao conta)")
+def cancel_fase():
+    """Cap de orcamento herdado das maes + `mission cancel` (decisoes abertas da etapa 15): run_budget_cap = min(o que
+    resta da propria missao, de cada mae ate a raiz, do dia do projeto) mesmo rodando a filha pelo proprio id (guarda
+    de ciclo e profundidade); `mission cancel` so o humano (agente e A2A_RUNNER recusados), state CANCELADO + quem/quando,
+    filha cancelada conta como resolvida para fechar a mae (reprovada continua travando), cancelada nao e ativa: nao
+    acorda o vigia, nao entra nos orcamentos ativos, nao recebe aval."""
+    import glob
+    from datetime import datetime, timezone
+    tmp = tempfile.mkdtemp(); work = tempfile.mkdtemp()
+    base = {k: v for k, v in os.environ.items() if k not in ("A2A_RUNNER", "A2A_RUN_ID", "A2A_AGENT", "A2A_TESTING", "A2A_RUNNER_OVERRIDE")}
+    env = dict(base, A2A_HOME=tmp, PYTHONIOENCODING="utf-8", CLAUDE_CONFIG_DIR=os.path.join(tmp, "claude"),
+               CODEX_HOME=os.path.join(tmp, "codex"), HERMES_HOME=os.path.join(tmp, "hermes"))
+    drv = os.path.join(work, "cancel_driver.py"); open(drv, "w").write(BUDGET_DRIVER)
+    def a2a(*args, code=0, e=None):
+        r = run(e or env, *args)
+        assert r.returncode == code, (args, r.returncode, r.stdout, r.stderr)
+        return r.stdout + r.stderr
+    def drive(mode, arg):
+        r = subprocess.run([sys.executable, drv, str(ROOT), mode, json.dumps(arg)],
+                           capture_output=True, text=True, encoding="utf-8", env=env)
+        assert r.returncode == 0 and r.stdout.strip(), (mode, arg, r.returncode, r.stdout, r.stderr)
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    a2a("init"); a2a("join", "--agent", "claude"); a2a("join", "--agent", "codex")
+    new = lambda title, *x: a2a("mission", "new", "--project", "lagu", "--title", title, "--agents", "claude", *x, "--from", "luiz").split()[1]
+
+    # ---- cap herdado: rodar a filha (ou a neta) pelo proprio id respeita o que resta da mae e da avo
+    avo = new("avo"); mae = new("mae", "--parent", avo); fil = new("filha", "--parent", mae); neta = new("neta", "--parent", fil)
+    assert abs(drive("cap", {"mission": neta}) - 0.50) < 1e-9  # sem orcamento em ninguem: so o teto padrao
+    a2a("mission", "budget", avo, "--usd", "0.40", "--from", "luiz")
+    a2a("mission", "budget", mae, "--usd", "0.35", "--from", "luiz")
+    a2a("mission", "budget", fil, "--usd", "1", "--from", "luiz")
+    T = time.time(); n = [0]
+    iso = lambda t: datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    def mkrun(mission_id, cost):
+        n[0] += 1
+        rid = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(T)) + "-%06x" % (0xd00000 + n[0])
+        d = os.path.join(tmp, "runs", time.strftime("%Y-%m", time.gmtime(T))); os.makedirs(d, exist_ok=True)
+        rec = {"v": 1, "run_id": rid, "agent": "claude", "project": "lagu", "cwd": work, "argv": ["claude"],
+               "started": iso(T), "ended": iso(T), "duration_s": 1.0, "exit_code": 0, "outcome": "ok", "reason": "",
+               "stdout": "", "stderr": "", "stderr_tail": "", "mission": mission_id,
+               "usage": {"total": 10, "cost_usd_est": cost, "session_id": "sess-" + rid, "parsed": True}}
+        json.dump(rec, open(os.path.join(d, rid + ".json"), "w"))
+    mkrun(fil, 0.10)  # a filha gasta 0,10: conta na propria (resta 0,90), na mae (resta 0,25), na avo? so filhas diretas
+    assert abs(drive("cap", {"mission": neta}) - 0.25) < 1e-6, drive("cap", {"mission": neta})  # neta herda a mae (0,35-0,10)
+    assert abs(drive("cap", {"mission": fil}) - 0.25) < 1e-6  # a filha tambem
+    mkrun(mae, 0.20)  # mae gasta 0,20 propria: mae resta 0,05; avo ve a filha direta (mae) so se ela mesma gastou
+    assert abs(drive("cap", {"mission": fil}) - 0.05) < 1e-6
+    assert abs(drive("cap", {"mission": neta}) - 0.05) < 1e-6
+    mkrun(mae, 0.30)  # mae esgotada -> filha e neta nao rodam mais (0.0), mesmo com orcamento proprio folgado
+    assert drive("cap", {"mission": fil}) == 0.0 and drive("cap", {"mission": neta}) == 0.0
+    assert drive("cap", {"mission": mae}) == 0.0
+    # a mae nunca herda para cima do que e da filha: a avo (0,40) so ve o gasto das filhas diretas dela (a mae: 0,50)
+    assert drive("cap", {"mission": avo}) == 0.0
+    # guarda de ciclo: parent adulterado no disco (a CLI nao deixa criar) nao pode travar nem estourar
+    mp = os.path.join(tmp, "missions", avo + ".json"); mj = json.load(open(mp)); mj["parent"] = neta; json.dump(mj, open(mp, "w"))
+    assert drive("cap", {"mission": neta}) == 0.0
+    mj["parent"] = avo; json.dump(mj, open(mp, "w"))  # auto-parent
+    assert drive("cap", {"mission": avo}) == 0.0
+    mj["parent"] = ""; json.dump(mj, open(mp, "w"))
+    # mae cancelada nao e orcamento ativo: sai do teto da filha
+    a2a("mission", "cancel", mae, "--from", "luiz")
+    assert drive("cap", {"mission": fil}) == 0.0  # a avo (0,40) continua ativa e esgotada (gasto da mae: 0,50): a subida pula so a cancelada
+    a2a("mission", "cancel", avo, "--from", "luiz")
+    assert abs(drive("cap", {"mission": fil}) - 0.50) < 1e-6  # nenhuma mae ativa: so o teto padrao (a propria folga e 0,90)
+
+    # parent com caracteres que load_mission ignora: grava o id canonico (senao a filha escaparia do gate/teto da mae)
+    pj_ = new("mae-canon"); fj_ = new("filha-canon", "--parent", pj_ + "!/..")
+    assert json.load(open(os.path.join(tmp, "missions", fj_ + ".json")))["parent"] == pj_
+    a2a("mission", "cancel", fj_, "--from", "luiz"); a2a("mission", "cancel", pj_, "--from", "luiz")
+
+    # ---- mission cancel: so o humano
+    c1 = new("c1")
+    r = run(env, "mission", "cancel", c1, "--from", "claude")
+    assert r.returncode == 1 and "so o humano" in r.stderr, r.stderr
+    r = run(dict(env, A2A_RUNNER="watch"), "mission", "cancel", c1, "--from", "luiz")
+    assert r.returncode == 2 and "A2A_RUNNER" in r.stderr, r.stderr
+    r = run(dict(env, A2A_RUNNER="watch", A2A_AGENT="claude"), "mission", "cancel", c1, "--from", "claude")
+    assert r.returncode != 0
+    assert "CANCELADO" not in a2a("mission", "show", c1)
+    assert "cancelada" in a2a("mission", "cancel", c1, "--from", "luiz", "--reason", "obsoleta")
+    mj = json.load(open(os.path.join(tmp, "missions", c1 + ".json")))
+    assert mj["state"] == "CANCELADO" and mj["cancelled"]["by"] == "luiz" and mj["cancelled"]["ts"] and mj["cancelled"]["reason"] == "obsoleta", mj
+    assert "CANCELADO" in a2a("mission", "show", c1) and "CANCELADO" in a2a("mission", "list")
+    assert "ja estava cancelada" in a2a("mission", "cancel", c1, "--from", "luiz", code=1)
+    assert "foi cancelada" in a2a("mission", "approve", c1, "--agent", "claude", "--evidence", "x", code=1)
+    assert "foi cancelada" in a2a("mission", "new", "--project", "lagu", "--title", "f", "--agents", "claude", "--parent", c1, "--from", "luiz", code=1)
+    # concluida nao cancela
+    c2 = new("c2"); a2a("mission", "approve", c2, "--agent", "claude", "--evidence", "ok"); a2a("mission", "done", c2, "--from", "luiz")
+    assert "ja foi concluida" in a2a("mission", "cancel", c2, "--from", "luiz", code=1)
+    a2a("mission", "cancel", "mnaoexiste", "--from", "luiz", code=1)
+
+    # ---- gate da mae: filhas concluidas ou canceladas liberam; reprovada (nao cancelada) continua travando
+    m1 = new("mae-gate"); k1 = new("k1", "--parent", m1); k2 = new("k2", "--parent", m1); k3 = new("k3", "--parent", m1)
+    a2a("mission", "approve", m1, "--agent", "claude", "--evidence", "ok")
+    a2a("mission", "approve", k1, "--agent", "claude", "--evidence", "ok"); a2a("mission", "done", k1, "--from", "luiz")
+    r = run(env, "mission", "done", m1, "--from", "luiz")
+    assert r.returncode == 1 and k2 in r.stderr and k3 in r.stderr and k1 not in r.stderr, r.stderr
+    a2a("mission", "cancel", k2, "--from", "luiz")
+    a2a("mission", "reject", k3, "--agent", "claude", "--reason", "falta")
+    r = run(env, "mission", "done", m1, "--from", "luiz")
+    assert r.returncode == 1 and k3 in r.stderr and k2 not in r.stderr, r.stderr  # reprovada != cancelada
+    a2a("mission", "cancel", k3, "--from", "luiz")
+    a2a("mission", "done", m1, "--from", "luiz")
+    assert "concluida" in a2a("mission", "show", m1)
+    assert f"{k2} (CANCELADO)" in a2a("mission", "show", m1)
+
+    # ---- cancelada nao e ativa: vigia nao acorda, brief nao lista, orcamento nao e alvo
+    w = new("w")
+    wmsg = next(json.load(open(f))["msg_id"] for f in glob.glob(os.path.join(tmp, "bus", "*.json"))
+                if json.load(open(f)).get("task_id") == w)
+    trig = lambda: {t for d in json.loads(a2a("watch", "plan", "--json", "--project", "lagu"))["decisions"] for t in d["triggers"]}
+    assert wmsg in trig()  # ativa: a task da missao aciona o vigia
+    a2a("mission", "budget", w, "--usd", "1", "--from", "luiz")
+    assert [l for l in a2a("brief", "--agent", "claude", "--project", "lagu", "--no-auto-status").splitlines()
+            if l.startswith("M ") and w in l]
+    a2a("mission", "cancel", w, "--from", "luiz")
+    assert wmsg not in trig()  # cancelada: o vigia nao a aciona mais
+    assert not [l for l in a2a("brief", "--agent", "claude", "--project", "lagu", "--no-auto-status").splitlines()
+                if l.startswith("M ") and w in l]  # sai da lista M do brief
+    assert drive("status", {"mission": w})["has_budget"]  # status continua consultavel (janela congelada no cancelamento)
+    r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import a2a; "
+                        "print([x['id'] for k, x in a2a.budget_targets(days=False)])", str(ROOT)],
+                       capture_output=True, text=True, env=env)
+    assert w not in r.stdout, r.stdout
+    print("OK: cap herdado das maes (filha/neta rodando pelo proprio id, ciclo/auto-parent sem travar), mission cancel so "
+          "humano (agente e A2A_RUNNER recusados), CANCELADO resolve o gate da mae e reprovada nao, cancelada fora do "
+          "vigia, do brief e dos orcamentos ativos")
 def budget_fase():
     """Etapa 8 da Fase 3: consumo por execucao (claude json/stream-json/parado, codex exec --json cumulativo, hermes
     --usage-file), watch usage grava no registro, orcamento de missao e de projeto/dia so do humano, budget_status com
@@ -3813,3 +3940,4 @@ if __name__ == "__main__":
     assignee_fase()
     endurecimento_fase()
     parent_fase()
+    cancel_fase()

@@ -103,7 +103,8 @@ Ordem restante: **16 → 17** (17 só depois do 16).
 - `mission done` (`mission_done`) só fecha a mãe quando **todas** as filhas diretas estiverem `concluida` (reprovada **não** conta como fechada — o último veredito de cada agente vale, e um reject é retrabalhável); fechar continua só humano (`require_human`).
 - `mission show` lista `mae: <id>` (na filha) e `filhas: <id> (status), ...` (na mãe).
 - **Sem** automação de propagação de estado e **sem** UI de árvore, como no escopo aprovado.
-- **Decisão explícita, não implementada**: `run_budget_cap` soma o orçamento da própria missão (e agora das filhas dela), mas **não propaga** o teto de uma mãe para baixo quando quem está rodando é a filha direto (sem passar pela mãe) — ou seja, uma mãe com orçamento esgotado não impede sozinha a próxima execução de uma filha, a não ser que o teto seja checado explicitamente com `--mission <id-da-mãe>`. Ver "Pendentes".
+- **Decisão resolvida (@@HASH@@)**: `run_budget_cap` agora propaga o teto de cada missão-mãe (`mission_ancestor_statuses`: pai, avô, ... até a raiz, com guarda de ciclo e profundidade máxima 16; mãe sumida encerra a subida; mãe cancelada/concluída é pulada): o cap é o menor entre o que resta da própria missão, de cada mãe ativa e do dia do projeto. Rodar a filha pelo id dela não contorna o limite da mãe. Limite conhecido: o rollup de gasto é de 1 nível (filhas diretas), então o gasto de uma neta entra na mãe direta dela, não na avó.
+- **Decisão resolvida (@@HASH@@)**: `a2a mission cancel <id> --from <humano>` (`mission_cancel`): só humano (`require_human`: recusado em `A2A_RUNNER` e com nome de agente), grava `state: CANCELADO` e `cancelled {by, ts, reason}`; concluída não cancela; não desfaz. Filha `CANCELADO` conta como resolvida no gate da mãe (reprovada, não cancelada, continua travando). Cancelada não acorda o vigia (`watch_plan`), sai do `brief` (lista M), não recebe aval nem filha nova, e não é alvo de orçamento ativo (`budget_targets`); a janela de gasto congela no cancelamento. Não aparece no painel (`ui/` intocada).
 
 **Passo 16 — Controle remoto pelo celular** (aprovado pelo Luiz em 2026-10-19: "Sim", prioridade **MUITO IMPORTANTE**)
 Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas/2026-10-19-orca-controle-remoto-mobile.md) (pesquisa do Orca + design).
@@ -170,8 +171,10 @@ Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas
 - ~~Pergunta única ao `luiz` quando o gasto chegar a 80%~~: feito (`budget_alert_notify`).
 - ~~Achados da revisão de segurança (add-dir do codex, caminhos de Edit/Write, orçamento sem projeto/missão, identidade do executor, aviso do `hermes --enable`)~~: corrigidos.
 - Vigia contínuo (sem `--once`): hoje só existe `a2a watch --once`/`a2a watch plan`. Sem ele, o orquestrador (passo 11) só tem o gatilho por evento (mensagem nova endereçada a ele); o tique periódico e os gatilhos extras (agente `blocked`, `ctx>=80%`, task sem `ACEITO` em 30min) ficam pendentes.
-- `run_budget_cap` não propaga o teto de uma missão-mãe (passo 15) para a execução de uma filha quando ela é acionada direto pelo id dela (sem passar `--mission <mãe>`); decisão explícita de não automatizar isso agora (ver passo 15).
-- Pergunta aberta ao Luiz: hoje missão não tem conceito de cancelamento (só `aberta`/`reprovada`/`aval_completo`/`concluida`); o gate do passo 15 exige `concluida` nas filhas para fechar a mãe. Quer um `mission cancel` humano-only, para destravar uma mãe cuja filha ficou obsoleta sem precisar concluí-la de verdade?
+- ~~Propagação do teto da mãe para a filha~~ e ~~`mission cancel`~~: feitos (@@HASH@@), ver passo 15.
+- Rollup de gasto recursivo (neta na avó): hoje só 1 nível; se importar, tornar `mission_children` recursivo em `budget_status`/`cost_data`.
+- Primeira ativação no Windows: ver checklist no `docs/HANDOFF.md` (`a2a` do Dove no PATH, não o qlink; `a2a watch check`; sandbox `[windows]` do codex; primeiro run real só com o claude, PARAR na mão).
+- Falta rodar a fase 16, depois a 17 (ordem restante: 16 → 17).
 
 ## 6. Depois da Fase 3
 - Canal entre máquinas: VPS Ubuntu 24.04 + Omarchy + Windows.
