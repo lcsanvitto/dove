@@ -7,14 +7,14 @@ Para uma sessão nova retomar sem reexplicar nada. Estado detalhado: [`docs/ROAD
 - Usuário: Luiz, no Windows (`C:\Users\Dell`); projetos em `C:\Users\Dell\Cowork\Codigo` (ex.: `lagu`).
 - Também usa uma VPS Ubuntu 24.04 e uma máquina com Omarchy (canal entre máquinas ainda não existe).
 - Agentes no canal: `claude` (Claude Code), `codex` (Codex), `hermes` (Hermes).
-- Fase atual: Fase 3 (orquestrador/vigia). Feitos 0+1, 2, 3 (75c979d), 4, 5, 6, 7 (396cfd5), 8 (7fca4c3), 9 (`codex` no vigia, 96e904c), 10, 12 (hermes no vigia, opt-in, f95a7b0), 13, 14 (`assignee`, 38d8b13 — emenda ao 7); 11 livre pra seguir (dependia só do 7, depende também do 15). Aprovado em 2026-10-19: 15 (`parent`, junto com o 11). O 7 foi feito **sem** esperar o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"); o 14 entrou depois como emenda — o vigia agora acorda só o `assignee` quando ele está definido, e todo participante elegível quando não está (como antes).
+- Fase atual: Fase 3 (orquestrador/vigia). Feitos 0+1, 2, 3 (75c979d), 4, 5, 6, 7 (396cfd5), 8 (7fca4c3), 9 (`codex` no vigia, 96e904c), 10, 11 (orquestrador, fc7eca4), 12 (hermes no vigia, opt-in, f95a7b0), 13, 14 (`assignee`, 38d8b13 — emenda ao 7). Aprovado em 2026-10-19, ainda não implementado: 15 (`parent`). O 7 foi feito **sem** esperar o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"); o 14 entrou depois como emenda — o vigia agora acorda só o `assignee` quando ele está definido, e todo participante elegível quando não está (como antes). O 11 saiu sem esperar o 15 (só propõe e manda mensagem, não toca em missão/`parent`).
 
 ## Regras do projeto
 - Só stdlib.
 - **NÃO mexer em `ui/`**: parte visual pausada; o Claude Design cuida só da estética, quando o Luiz retomar.
 - `DOVE_VERSION` fica `"0.6.0"` enquanto a UI estiver pausada (a UI compara a versão exata e mostra a faixa "servidor desatualizado").
 - Comportamento existente não muda sem aval do Luiz.
-- Tudo que executa agentes, gasta dinheiro, muda o envelope ou o `~/.a2a` precisa de aval do Luiz. Já aprovados: etapas 0–11 da Fase 3; a 12 com risco aceito pelo Luiz em 2026-10-19 (desligada por padrão, opt-in explícito). A 7 está feita (396cfd5); a 9 (codex no vigia) está feita (96e904c); a 12 (hermes no vigia, opt-in) está feita (f95a7b0); a 14 (`assignee`) está feita (38d8b13, emenda ao 7); a 15 (`parent`) foi aprovada em 2026-10-19 (junto com a 11).
+- Tudo que executa agentes, gasta dinheiro, muda o envelope ou o `~/.a2a` precisa de aval do Luiz. Já aprovados: etapas 0–11 da Fase 3; a 12 com risco aceito pelo Luiz em 2026-10-19 (desligada por padrão, opt-in explícito). A 7 está feita (396cfd5); a 9 (codex no vigia) está feita (96e904c); a 11 (orquestrador) está feita (fc7eca4); a 12 (hermes no vigia, opt-in) está feita (f95a7b0); a 14 (`assignee`) está feita (38d8b13, emenda ao 7); a 15 (`parent`) foi aprovada em 2026-10-19, ainda não implementada.
 - Workers trabalham em worktrees `/home/user/dove-wt/<nome>` com branch própria; rebase só dos próprios commits; rodar os testes completos (`python3 tests/test_a2a.py`); push em `main` sem force.
 - Commits terminam com as linhas `Co-Authored-By:` / `Claude-Session:` usadas no repo.
 
@@ -49,13 +49,13 @@ Para uma sessão nova retomar sem reexplicar nada. Estado detalhado: [`docs/ROAD
 - `watch_disabled()`/`_watch_exe()` usam `agent_enabled()` só para o hermes; claude e codex não mudam.
 - Desligado por padrão (sem sandbox de SO); risco aceito pelo Luiz em 2026-10-19 ("quero arriscar").
 
-**Etapa 11 — orquestrador** (a 7 e a 9 já estão feitas; falta a 15)
-- Só ferramentas de leitura + `a2a send/brief/read/status/fact`.
-- A recusa por `A2A_RUNNER` já protege as ações humanas.
-- Tique só quando o bus muda; entra nos tetos globais de `a2a loops`.
-- Usa `a2a fact` para o estado do projeto; modelo barato na rotina (`a2a models suggest`).
+**Etapa 11 — orquestrador** · **FEITO** · fc7eca4
+- `orquestrador` é agente comum (`a2a join`); na tabela do vigia roda com o `claude` por baixo, mas só leitura + `a2a send/brief/read/status/fact` (nunca Edit/Write, nunca merge/deploy/gasto/exclusão).
+- `mission_verdict` recusa `agent == "orquestrador"` (approve/reject); `mission done`/`archive`/`worktree` já eram só do humano (`require_human`) — a recusa por `A2A_RUNNER`/`require_human` já protegia o resto.
+- Pasta própria (`run/orquestrador-home`), nunca precisa de cópia de projeto. Papel próprio no `a2a prompt` (`PROMPT_ROLE_ORQ`).
+- **Pendente**: tique periódico e os demais gatilhos (`blocked`, `ctx>=80%`, task sem `ACEITO`) dependem do vigia contínuo (sem `--once`), que ainda não existe — hoje só o gatilho por evento funciona.
 
-**Etapa 15 — `parent`** · aprovada (Luiz, 2026-10-19: "sim") · entra junto com a etapa 11 (depois da 7)
+**Etapa 15 — `parent`** · aprovada (Luiz, 2026-10-19: "sim") · a 11 já saiu independente, esta ainda falta
 - Campo opcional `parent` em missões: id da missão-mãe.
 - Escopo mínimo: o campo + somar o gasto das filhas no orçamento da mãe e no `a2a cost`.
 - A mãe só fecha quando todas as filhas estiverem `CONCLUIDO` ou `CANCELADO`; fechar continua só humano (`require_human`).
@@ -86,6 +86,7 @@ dove   # painel
 - Instruções globais (`a2a instructions`) em vez de AGENTS.md por repositório (PR lagu #38 fechado).
 - Hermes sem instruções globais por padrão.
 - Hermes no vigia (12, **FEITO**, f95a7b0): risco aceito pelo Luiz (2026-10-19); desligado por padrão, liga só com `a2a watch hermes --enable --from <humano>`.
+- Orquestrador (11, **FEITO**, fc7eca4): agente comum, restrito a leitura + `a2a send/brief/read/status/fact`; nunca vota/aprova/conclui missão nem merge/deploy/gasto/exclusão; pasta própria, sem cópia de projeto.
 - TOON, memória vetorial/GraphRAG, SupervisorAgent e mcp-compressor não adotados.
 - `assignee` (14) e `parent` (15) aprovados pelo Luiz em 2026-10-19 ("sim"). Descartados: prioridade, tags, dependências entre tarefas e qualquer coisa que o agente já leia no texto da missão.
 - Etapa 7 comitada sem esperar a 14 (Luiz, 2026-10-19: "Comitar a 7 como está agora"): o vigia acorda todos os participantes elegíveis até a 14 entrar como emenda.

@@ -2,7 +2,7 @@
 
 > **Sessão nova? Comece por [`docs/HANDOFF.md`](HANDOFF.md)** — contexto, regras e próximos passos para retomar sem reexplicar.
 
-Estado em 2026-10-19 · base `main` em f95a7b0.
+Estado em 2026-10-19 · base `main` em fc7eca4.
 
 ## 1. O que é o Dove
 Canal A2A local e global: os agentes (`claude`, `codex`, `hermes`) conversam e dividem trabalho por arquivos JSON em `~/.a2a`, sem nuvem.
@@ -59,13 +59,13 @@ Todos os passos têm aval do Luiz; o 12 foi aceito com risco em 2026-10-19 (desl
 | 8 | Orçamento: `parse_run_usage`, `run_budget_cap`, `budget_status`, `budget_alerts`, `a2a mission budget`, `a2a cost budget`/`--budget`, `budgets.json`, `a2a watch usage` | **FEITO** · 7fca4c3 |
 | 9 | Codex no vigia (sandbox do Windows; sem commit) | **FEITO** · 96e904c |
 | 10 | `a2a models` (roteamento de modelo) | **FEITO** · 97ce044 |
-| 11 | Orquestrador (só leitura + mensagens) | próximo (aprovado) · 7 feito, depende também do 15 |
+| 11 | Orquestrador (só leitura + mensagens) | **FEITO** · fc7eca4 (tique periódico e demais gatilhos pendentes: vigia contínuo ainda não existe) |
 | 12 | Hermes no vigia (opt-in) | **FEITO** · f95a7b0 (risco aceito pelo Luiz, 2026-10-19: "quero arriscar"; desligado por padrão) |
 | 13 | Política de subagentes | **FEITO** · 898c637 (+ c65d148 teste determinístico) |
 | 14 | `assignee` (responsável único) em missões e tarefas | **FEITO** · 38d8b13 (emenda ao passo 7) |
 | 15 | `parent` (missão-mãe) em missões | **APROVADO** (Luiz, 2026-10-19: "sim") · entra junto com o 11, depois do 7 |
 
-Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"). O passo 14 entrou depois (38d8b13) como **emenda** ao 7, não como pré-requisito: hoje o vigia acorda **só o `assignee`** quando ele está definido numa missão ou tarefa; sem o campo, continua acordando todo participante elegível, como antes. O passo 9 (96e904c) já usou a 7 atual para liberar o codex. O passo 12 (f95a7b0) acrescentou o opt-in do hermes, independente dos demais. O passo 11 segue livre para usar a 7 atual (depende também do 15).
+Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"). O passo 14 entrou depois (38d8b13) como **emenda** ao 7, não como pré-requisito: hoje o vigia acorda **só o `assignee`** quando ele está definido numa missão ou tarefa; sem o campo, continua acordando todo participante elegível, como antes. O passo 9 (96e904c) já usou a 7 atual para liberar o codex. O passo 12 (f95a7b0) acrescentou o opt-in do hermes, independente dos demais. O passo 11 (fc7eca4) só propõe e manda mensagem — não toca em missão nem em `parent` — então não precisou esperar a 15.
 
 **Passo 9 — Codex no vigia** (**FEITO**, 96e904c):
 - `codex exec --json -s workspace-write -C <cópia> --add-dir <A2A_HOME> -` (já estava na tabela desde a etapa 7; só faltava liberar o gatilho).
@@ -78,13 +78,21 @@ Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** 
 - Só o `assignee` marca `EM_EXECUCAO` ou `AGUARDANDO_APROVACAO` (por `--task` ou por `--reply-to`); os demais participantes seguem comentando/revisando — outros estados e `mission approve`/`reject` continuam livres. O humano está sempre isento da restrição.
 - O vigia (passo 7) já acorda só o `assignee` quando definido (`watch_plan`, e portanto também `watch --once`); sem o campo, tudo se comporta exatamente como antes (nenhuma mudança de comportamento).
 
+**Passo 11 — Orquestrador** (**FEITO**, fc7eca4):
+- `orquestrador` é um agente comum (`a2a join --agent orquestrador`), registrado na tabela do vigia com o `claude` por baixo, mas só leitura + `a2a send/brief/read/status/fact` (`WATCH_ORQ_ALLOW`): nunca `Edit`/`Write`, nunca `mission approve/reject/done`, nunca merge, deploy, gasto ou exclusão.
+- `mission_verdict` recusa `agent == "orquestrador"` explicitamente (approve/reject não passam por `require_human` para os demais participantes, por design; o orquestrador é a única exceção). `mission done`, `archive` e `worktree` já eram só do humano (`require_human`).
+- Nunca precisa de cópia de projeto: usa uma pasta própria (`run/orquestrador-home`), sempre disponível, mesmo sem projeto registrado.
+- Papel próprio no `a2a prompt` (`PROMPT_ROLE_ORQ`): prefixo estável e diferente dos demais agentes.
+- `watch check`/`--show-command` só listam o orquestrador sem `--agent` se ele estiver registrado; claude/codex/hermes continuam sempre listados, registrados ou não.
+- **Pendente**: o tique periódico e os demais gatilhos do orquestrador (agente `blocked`, `ctx>=80%`, task sem `ACEITO` em 30min) dependem de `a2a watch` contínuo (sem `--once`), que ainda não existe (`a2a watch` sem `--once` sai com erro, código 2).
+
 **Passo 12 — Hermes no vigia (opt-in)** (**FEITO**, f95a7b0):
 - `hermes_enabled()`/`hermes_opt_in()`/`agent_enabled()`: chave `hermes_enabled` em `~/.a2a/config.json`; liga/desliga só com `a2a watch hermes --enable|--disable --from <humano>` (`require_human`: nunca sob `A2A_RUNNER`, nenhum agente se auto-habilita).
 - `watch_disabled()` e `_watch_exe()` usam `agent_enabled()` só para o hermes; os demais agentes (claude, codex) não mudam.
 - Desligado por padrão: sem sandbox de SO (`approvals.mode` do hermes só reduz o risco), risco aceito pelo Luiz em 2026-10-19 ("quero arriscar"), por isso opt-in explícito em vez de automático.
 - `a2a watch check` mostra se está ligado por opt-in ou desabilitado (com o comando para habilitar).
 
-**Passo 15 — `parent`** (junto com o 11, depois do 7):
+**Passo 15 — `parent`** (aprovado; o 11 já saiu independente, não precisa mais esperar por este):
 - Campo opcional `parent` em missões: id da missão-mãe.
 - Escopo mínimo: o campo + somar o gasto das filhas no orçamento da mãe e no `a2a cost`.
 - A mãe só fecha quando todas as filhas estiverem `CONCLUIDO` ou `CANCELADO`; fechar continua só humano (`require_human`).
@@ -108,6 +116,7 @@ Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** 
 - Parte visual pausada. O backend já está pronto para: aba Git, cópias de trabalho, memória e custo.
 
 - Hermes no vigia (passo 12, **FEITO**, f95a7b0): o Luiz aceitou o risco em 2026-10-19 ("quero arriscar"); desligado por padrão, liga só com `a2a watch hermes --enable --from <humano>`.
+- Orquestrador (passo 11, **FEITO**, fc7eca4): agente comum (`a2a join`), restrito a leitura + `a2a send/brief/read/status/fact`; nunca vota/aprova/conclui missão nem merge/deploy/gasto/exclusão. Sem cópia de projeto (pasta própria).
 
 - `assignee` (passo 14) e `parent` (passo 15): aprovados pelo Luiz em 2026-10-19 ("sim"), nos termos acima.
 - **Descartados** explicitamente: prioridade, tags, dependências entre tarefas e qualquer coisa que o agente já leia no texto da missão.
@@ -115,6 +124,8 @@ Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** 
 **Pendentes**
 - Teste manual do vigia (passo 7) com o `claude` real, acompanhado pelo Luiz (os testes automáticos usam executor falso).
 - Pergunta única ao `luiz` quando o gasto chegar a 80% (nota do passo 7, ver acima).
+- Vigia contínuo (sem `--once`): hoje só existe `a2a watch --once`/`a2a watch plan`. Sem ele, o orquestrador (passo 11) só tem o gatilho por evento (mensagem nova endereçada a ele); o tique periódico e os gatilhos extras (agente `blocked`, `ctx>=80%`, task sem `ACEITO` em 30min) ficam pendentes.
+- `parent` (passo 15): aprovado, ainda não implementado.
 
 ## 6. Depois da Fase 3
 - Canal entre máquinas: VPS Ubuntu 24.04 + Omarchy + Windows.
