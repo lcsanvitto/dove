@@ -125,6 +125,9 @@ def main():
                 'a2a mission approve m3f9a2c1 --agent codex --evidence', 'a2a mission reject m3f9a2c1 --agent codex --reason',
                 'a2a read <msg_id> --agent codex --compact', '--context <0-100>', 'a2a status --agent codex --set done'):
         assert ex_ in t, (ex_, t)
+    for ex_ in ("### Contexto e handoff", "Próximos passos:", "Bloqueios:", "`/clear`", "`/compact`",
+                "### Para o Claude Code", "crossSessionInbound", "verifique a sintaxe exata na doc do Claude Code"):
+        assert ex_ in t, (ex_, t)
     ob = subprocess.run([sys.executable, str(A2A), "onboard", "--agents-md"], capture_output=True, env=uenv)
     t = ob.stdout.decode("utf-8")
     assert ob.returncode == 0 and "Claude Code → `claude`" in t and "<seu-nome>" in t and "<projeto>" in t, t
@@ -142,6 +145,8 @@ def main():
                "merge, deploy, migração em produção, gasto ou exclusão", "outro agente", "autorização do Luiz",
                "missão só com evidência real", "Sem `a2a`? Avise o Luiz"):
         assert el in core, (el, core)
+    for no in ("Contexto e handoff", "Para o Claude Code", "crossSessionInbound", "/clear", "/compact"):
+        assert no not in core, (no, core)
     assert "<projeto>" not in core and not re.search(r"\d{4}-\d{2}-\d{2}|\d{2}:\d{2}", core), core
     assert core == subprocess.run([sys.executable, str(A2A), "onboard", "--agents-md", "--project", "lagu"],
                                   capture_output=True, env=uenv).stdout.decode("utf-8")  # estavel

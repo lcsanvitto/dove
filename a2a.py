@@ -1920,7 +1920,30 @@ Este projeto é trabalhado por vários agentes ao mesmo tempo, que se coordenam 
 - Travou: `a2a status --agent <seu-nome> --set blocked --note "<o que destrava>"`
 - Ver quem está fazendo o quê: `a2a status`
 - Antes de mexer num arquivo que outro agente pode estar editando, avise no canal.
-- Informe seu contexto quando souber: `a2a status --agent <seu-nome> --set working --context <0-100>`; com 80%+ prepare um handoff (o que foi feito, o que falta, onde parou) e avise no canal.
+- Informe seu contexto quando souber: `a2a status --agent <seu-nome> --set working --context <0-100>`; com 80%+ faça o handoff (abaixo).
+
+### Contexto e handoff
+Ao passar de 80% de contexto:
+1. Escreva um handoff curto (~15 linhas), neste modelo:
+```
+Objetivo: <o que a tarefa pede>
+Feito: <o que já está pronto, com commits>
+Em andamento: <o que estava no meio e onde parou>
+Próximos passos: <1-3 itens, em ordem>
+Arquivos: <caminho[:linhas]> (cite com --file, não cole)
+Decisões: <o que foi decidido e por quê>
+Bloqueios: <o que falta e quem destrava>
+```
+2. Envie pelo canal como report: `a2a send --from <seu-nome> --to <agente> --project <projeto> --kind report --body "<handoff>" --file <arquivo>` (ou salve num arquivo, ex. `HANDOFF.md`, e referencie com `--file HANDOFF.md`).
+3. Publique o status: `a2a status --agent <seu-nome> --set working --context <0-100> --note "handoff enviado"`.
+4. Quando o assunto mudar, use `/clear` (grátis: recomeça do zero e o handoff traz o essencial) em vez de `/compact` (relê a conversa inteira para resumir).
+
+### Para o Claude Code
+Recomendado: `crossSessionInbound: hold` no settings do Claude Code, para mensagens entre sessões não dispararem um turno novo com o contexto inteiro. Trecho sugerido (verifique a sintaxe exata na doc do Claude Code):
+```json
+{ "crossSessionInbound": "hold" }
+```
+No Dove isso não faz falta: o agente se atualiza com `a2a brief --agent <seu-nome> --mark-read` quando quiser.
 
 ### Missões
 - Ao receber uma missão (task_id = id da missão), só aprove depois de verificar de verdade: `a2a mission approve <id> --agent <seu-nome> --evidence "<o que você conferiu>"`. Se algo não está certo: `a2a mission reject <id> --agent <seu-nome> --reason "..."`. Nunca aprove sem evidência.

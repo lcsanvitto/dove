@@ -57,6 +57,9 @@ As instruções para os agentes têm uma fonte única: o próprio `a2a`. Elas v�
 
 - **Núcleo** (`a2a onboard --agents-md`): ~10 linhas estáveis para o `AGENTS.md` — nomes no canal, como começar (`brief` + `status`), `whereami`, como terminar e as regras de segurança/anti-loop. Sem data nem estado, então o texto não muda entre sessões e o prefixo em cache do agente fica pequeno e estável.
 - **Guia completo** (`a2a onboard --agent <nome>`): tudo em detalhe — `brief`, `read --compact`, `--file`, enviar/responder, bloqueio, contexto e handoff, missões, a pasta de trabalho quando existe — com exemplos para copiar. O agente só lê quando precisa; cada comando também tem exemplos no `a2a <comando> --help`.
+  O guia também traz:
+  - **Contexto e handoff:** ao passar de 80% de contexto, o agente escreve um handoff curto (~15 linhas: objetivo, feito, em andamento, próximos passos, arquivos com `--file`, decisões, bloqueios), envia pelo canal como report (ou salva num arquivo e referencia com `--file`), publica `a2a status --context`, e então usa `/clear` (grátis) em vez de `/compact` (relê a conversa inteira) quando o assunto mudar.
+  - **Para o Claude Code:** recomenda `crossSessionInbound: hold` no settings do Claude Code, para mensagens entre sessões não dispararem um turno novo com o contexto inteiro. Trecho sugerido (verifique a sintaxe exata na doc do Claude Code): `{ "crossSessionInbound": "hold" }`. No Dove o agente se atualiza com `a2a brief` quando quiser.
 
 1. Gere o núcleo e cole no `AGENTS.md` do projeto (lido pelo Codex e outros agentes):
    ```
