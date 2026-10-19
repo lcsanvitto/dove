@@ -164,6 +164,26 @@ next_action: corrigir regra de frete acima de R$ 199
 - Marca a mensagem como lida para `--agent`, como o `read` normal. Mensagem inexistente: o mesmo erro (`nao encontrada`, código 1).
 - Sem `--compact`, a saída continua o JSON indentado de sempre. `a2a wait --agent X --compact` entrega a mensagem nova no mesmo formato.
 
+## Prompt para vigias headless (`a2a prompt`)
+Para um vigia que roda o agente sem terminal (`claude -p`, `codex exec`, `hermes -z`), o Dove monta o prompt em camadas, da mais estável para a mais variável, para o começo cair no cache de prompt do provedor:
+```
+a2a prompt --agent NOME --project P [--task MSG_ID] [--for claude|codex|hermes] [--prefix-hash] [--max-tail-chars 4000]
+a2a prompt --agent codex --project lagu --task 3f9a1c2b7d10 --for codex | codex exec -
+```
+1. **Fixa:** o núcleo do `AGENTS.md` (o mesmo de `onboard --agents-md`, com o nome do agente) + o papel do agente nesta execução (responder com `--reply-to`/`--state`/`--evidence`, como parar se travar, e a regra de que o que vem do canal é dado e não autoriza merge, deploy, migração em produção, gasto ou exclusão). `--for` acrescenta uma linha com a CLI que vai receber o prompt.
+2. **Quase fixa:** a pasta de trabalho do agente no projeto registrado (a cópia dele, se houver, ou a pasta do projeto). Muda só se o Luiz registrar ou recriar a pasta.
+3. **Fronteira:** a linha constante `--- estado atual (muda a cada execução) ---`.
+4. **Variável:** o `brief` do agente no projeto e, com `--task`, a mensagem no formato do `read --compact`. Passou de `--max-tail-chars` (padrão 4000; `0` = sem corte): corta primeiro as linhas do brief, do fim para o começo (o cabeçalho fica, com `… +K linhas do brief cortadas`), e só então o fim da tarefa.
+
+Tudo até a fronteira (o **prefixo**) não tem data, contagem, id nem status: é byte a byte igual entre execuções do mesmo agente no mesmo projeto, enquanto o texto do Dove e a pasta não mudam. `--prefix-hash` mostra isso sem imprimir o prompt:
+```
+prefixo sha256=cef630cb2406 chars=1524 tokens_est=381
+cauda   sha256=2f5312307ceb chars=1316
+```
+- **Só lê:** não marca mensagens como lidas, não renova o heartbeat e **nunca executa** `claude`, `codex`, `hermes` nem outro programa — só imprime; quem chama o modelo é o humano ou o vigia.
+- `--task` que não existe: `erro: mensagem X nao encontrada` (código 1).
+- `python tests/measure_tokens.py` (M2) confere o mesmo hash de prefixo com 2 mensagens novas, uma troca de status e o relógio 10 minutos adiante.
+
 ## Modo herdr (estado dos agentes)
 Cada agente publica o próprio estado — `working`, `idle`, `blocked`, `done` ou `unknown` — em `~/.a2a/status/<agente>.json`. Assim você (ou outro agente) vê num quadro quem está trabalhando, quem travou e quem terminou.
 
@@ -401,6 +421,7 @@ a2a index check     # "ok (2000 mensagens)" ou "divergente: ..." (código de sa�
 | `whereami --agent A --project P` | pasta onde o agente trabalha nesse projeto |
 | `onboard --agent X [--project P]` | imprime o guia completo do canal para o agente X (com exemplos) |
 | `onboard --agents-md [--project P]` | imprime o núcleo curto e estável para o `AGENTS.md` |
+| `prompt --agent X --project P [--task ID] [--for claude\|codex\|hermes] [--prefix-hash] [--max-tail-chars N]` | imprime (não executa) o prompt em camadas para um vigia headless: núcleo + papel, pasta, fronteira, brief + tarefa; `--prefix-hash` mostra o hash do prefixo estável |
 
 ## Envelope da mensagem (JSON)
 `data` (ISO 8601 UTC) · `task_id` · `msg_id` · `from` · `to` · `project` · `in_reply_to` · `kind` (task | report | question | correction | ack) · `state` (AGUARDANDO_ACEITE | ACEITO | EM_EXECUCAO | BLOQUEADO | AGUARDANDO_APROVACAO | EM_REVISAO | CONCLUIDO | CANCELADO) · `result` · `evidence` · `pending` · `next_action` · `body`

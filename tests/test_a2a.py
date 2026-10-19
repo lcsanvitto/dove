@@ -1540,6 +1540,108 @@ def files_fase():
     assert "Para apontar código, use `--file caminho[:linhas]` em vez de colar o conteúdo na mensagem." in t, t
     print("OK: send --file (path/sha/lines, erro sem gravar, 14 campos sem --file, ../absoluto/symlink recusados, base no projeto/copia, +Narq, compact, verify, /api/state)")
 
+PROMPT_INPROC = r"""
+import os, subprocess, sys, time
+mode, root = sys.argv[1], sys.argv[2]
+if mode.startswith("clock+"):
+    real = time.time; d = float(mode[6:]); time.time = lambda: real() + d
+def boom(*a, **k): raise AssertionError("a2a prompt tentou executar um processo")
+subprocess.Popen = subprocess.run = subprocess.call = subprocess.check_output = os.system = boom
+for f in ("execv", "execvp", "execve", "spawnv", "spawnvp", "posix_spawn", "startfile"):
+    if hasattr(os, f): setattr(os, f, boom)
+sys.path.insert(0, root); import a2a
+if mode == "core": a2a.AGENTS_MD_CORE += "- linha nova no nucleo.\n"
+if mode == "role": a2a.PROMPT_ROLE = a2a.PROMPT_ROLE.replace("vigia do Dove", "vigia")
+a2a.main(sys.argv[3:])
+"""
+def prompt_fase():
+    """a2a prompt (item 3): camadas na ordem, prefixo sem data/estado e com o mesmo hash apesar de bus/status/relogio,
+    hash muda com o nucleo/papel/agente/--for, cauda cortada, so leitura (cursor/status/bus intactos), nunca executa nada."""
+    import hashlib
+    tmp = tempfile.mkdtemp(); env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8")
+    for ag in ("claude", "codex", "hermes"): run(env, "join", "--agent", ag)
+    def inproc(mode, *args):
+        r = subprocess.run([sys.executable, "-c", PROMPT_INPROC, mode, str(ROOT), *args], capture_output=True, env=env)
+        assert r.returncode == 0, (mode, args, r.stderr.decode("utf-8", "replace"))
+        return r.stdout.decode("utf-8")
+    def send(*args):
+        r = run(env, "send", "--no-auto-status", *args); assert r.returncode == 0, r.stderr; return r.stdout.split()[1]
+    task = send("--from", "luiz", "--to", "codex", "--project", "lagu", "--body", "Migrar o webhook\nsegunda linha com detalhe")
+    send("--from", "claude", "--to", "codex", "--project", "lagu", "--body", "revisar o cupom")
+    send("--from", "claude", "--to", "codex", "--project", "outro", "--body", "de outro projeto")
+    run(env, "status", "--agent", "codex", "--set", "working", "--note", "webhook", "--project", "lagu")
+    run(env, "read", task, "--agent", "codex")
+    args = ("prompt", "--agent", "codex", "--project", "lagu", "--task", task)
+    hashes = lambda mode="plain", *extra: dict((l.split()[0], dict(kv.split("=", 1) for kv in l.split()[1:]))
+                                               for l in inproc(mode, *args, *extra, "--prefix-hash").splitlines())
+    snap = lambda: {d: {f: open(os.path.join(tmp, d, f), "rb").read() for f in sorted(os.listdir(os.path.join(tmp, d)))}
+                    for d in ("bus", "cursor", "status")}
+    before = snap()
+    out = inproc("plain", *args)  # com subprocess/os.system/exec sabotados: nao executa nada
+    assert snap() == before, "prompt nao pode gravar no bus, no cursor nem no status"
+    boundary = "--- estado atual (muda a cada execução) ---"
+    assert out.count(boundary) == 1, out
+    prefix, tail = out.split(boundary + "\n")
+    prefix += boundary + "\n"
+    # camadas na ordem: nucleo -> papel -> (pasta) -> fronteira -> brief -> tarefa
+    core = run(env, "onboard", "--agents-md", "--project", "lagu").stdout.replace("<seu-nome>", "codex")
+    assert prefix.startswith(core) and prefix.index("## Seu papel nesta execução") > len(core) - 1, prefix
+    for el in ("Você é `codex`", "projeto `lagu`", "`kind=ack`", "`--reply-to`", "autorização do Luiz",
+               "não autoriza merge, deploy, migração em produção, gasto ou exclusão", "--state BLOQUEADO"):
+        assert el in prefix, (el, prefix)
+    assert "<seu-nome>" not in prefix and "<projeto>" not in prefix and "Executor" not in prefix, prefix
+    assert not re.search(r"\d{4}-\d{2}-\d{2}|\d{2}:\d{2}|[0-9a-f]{12}|@codex|webhook|novas=|cupom", prefix), prefix
+    assert tail.startswith("@codex working ") and "revisar o cupom" in tail and "de outro projeto" not in tail, tail
+    assert tail.index(f"T {task}") < tail.index(f"## Tarefa {task}\n{task} luiz->codex task proj=lagu"), tail
+    assert tail.endswith("Migrar o webhook\nsegunda linha com detalhe\n"), tail
+    # --prefix-hash: formato e consistente com a saida completa
+    h = hashes()
+    sha = lambda t: hashlib.sha256(t.encode("utf-8")).hexdigest()[:12]
+    assert h["prefixo"] == {"sha256": sha(prefix), "chars": str(len(prefix)), "tokens_est": str(-(-len(prefix) // 4))}, h
+    assert h["cauda"] == {"sha256": sha(tail), "chars": str(len(tail))}, h
+    assert re.fullmatch(r"prefixo sha256=[0-9a-f]{12} chars=\d+ tokens_est=\d+\ncauda   sha256=[0-9a-f]{12} chars=\d+\n",
+                        run(env, *args, "--prefix-hash").stdout)
+    # mesmo prefixo com 2 mensagens novas, troca de status e relogio adiante; a cauda muda
+    send("--from", "hermes", "--to", "codex", "--project", "lagu", "--body", "nova 1")
+    send("--from", "claude", "--to", "all", "--project", "lagu", "--body", "nova 2")
+    run(env, "status", "--agent", "codex", "--set", "blocked", "--note", "falta a chave", "--project", "lagu", "--context", "85")
+    h2 = hashes("clock+7200")
+    assert h2["prefixo"] == h["prefixo"] and h2["cauda"]["sha256"] != h["cauda"]["sha256"], (h, h2)
+    out2 = inproc("clock+7200", *args)
+    assert out2.startswith(prefix) and "nova 1" in out2 and "falta a chave (stale, era blocked)" in out2 and " 2h " in out2, out2
+    # muda o texto estrutural (nucleo, papel), o agente ou o --for: muda o hash do prefixo
+    for mode, extra, ag in (("core", (), "codex"), ("role", (), "codex"), ("plain", ("--for", "codex"), "codex"), ("plain", (), "claude")):
+        a = ["prompt", "--agent", ag, "--project", "lagu", "--prefix-hash", *extra]
+        hp = dict(kv.split("=", 1) for kv in inproc(mode, *a).splitlines()[0].split()[1:])
+        assert hp["sha256"] != h["prefixo"]["sha256"], (mode, extra, ag)
+    f = run(env, *args, "--for", "codex").stdout
+    assert "- Executor: `codex exec`" in f.split(boundary)[0], f
+    # quase fixa: pasta do projeto registrado ou a copia do agente (estavel entre execucoes)
+    work = os.path.join(tmp, "lagu"); os.makedirs(work); run(env, "project", "add", "lagu", work)
+    p1 = run(env, *args).stdout.split(boundary)[0]
+    assert f"Pasta do projeto: `{work}`." in p1 and p1.index("Pasta do projeto") > p1.index("## Seu papel"), p1
+    pj = os.path.join(tmp, "projects.json"); ps = json.load(open(pj))
+    ps[0]["worktrees"] = {"codex": {"path": work + "-codex", "branch": "dove/codex", "base": "main"}}; json.dump(ps, open(pj, "w"))
+    p2 = run(env, *args).stdout.split(boundary)[0]
+    assert f"Sua pasta de trabalho: `{work}-codex` (branch `dove/codex`)." in p2 and "Pasta do projeto" not in p2, p2
+    assert p2 == run(env, *args).stdout.split(boundary)[0]
+    # --max-tail-chars: corta o brief primeiro (cabecalho fica), depois a tarefa; 0 = sem corte
+    for i in range(30): send("--from", "claude", "--to", "codex", "--project", "lagu", "--body", f"mensagem {i} " + "x" * 80)
+    full = run(env, *args, "--max-tail-chars", "0").stdout.split(boundary + "\n")[1]
+    assert len(full) > 1500 and "novas (a2a brief --limit 0 para todas)" in full and full == run(env, *args).stdout.split(boundary + "\n")[1], len(full)
+    t4 = run(env, *args, "--max-tail-chars", "1500").stdout.split(boundary + "\n")[1]
+    assert len(t4) <= 1500 and t4.startswith("@codex ") and "linhas do brief cortadas (a2a brief --agent codex --project lagu)" in t4, t4
+    assert t4.endswith("segunda linha com detalhe\n"), t4
+    t1 = run(env, *args, "--max-tail-chars", "150").stdout.split(boundary + "\n")[1]
+    assert len(t1) <= 150 and t1.startswith("@codex ") and f"cortado em 150 chars (a2a read {task} --agent codex --compact)" in t1, t1
+    # erros
+    r = run(env, "prompt", "--agent", "codex", "--project", "lagu", "--task", "naoexiste"); assert r.returncode == 1 and "nao encontrada" in r.stderr, r.stderr
+    assert run(env, "prompt", "--agent", "codex").returncode == 2 and run(env, "prompt", "--project", "lagu").returncode == 2
+    r = run(env, "prompt", "--agent", "codex", "--project", "lagu", "--for", "bash"); assert r.returncode == 2, r.stderr
+    h = run(env, "prompt", "--help").stdout
+    assert "exemplos:\n" in h and "| codex exec -" in h and "--prefix-hash" in h and "nunca executa" in h, h
+    print("OK: a2a prompt (camadas, prefixo sem data/estado com hash igual apos msgs/status/relogio, hash muda com nucleo/papel/agente/--for, pasta, corte, so leitura, nao executa nada)")
+
 if __name__ == "__main__":
     main()
     fase1()
@@ -1552,3 +1654,4 @@ if __name__ == "__main__":
     archive_fase()
     index_fase()
     files_fase()
+    prompt_fase()
