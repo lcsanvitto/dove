@@ -7,7 +7,7 @@ Para uma sessão nova retomar sem reexplicar nada. Estado detalhado: [`docs/ROAD
 - Usuário: Luiz, no Windows (`C:\Users\Dell`); projetos em `C:\Users\Dell\Cowork\Codigo` (ex.: `lagu`).
 - Também usa uma VPS Ubuntu 24.04 e uma máquina com Omarchy (canal entre máquinas ainda não existe).
 - Agentes no canal: `claude` (Claude Code), `codex` (Codex), `hermes` (Hermes).
-- Fase atual: Fase 3 (orquestrador/vigia). Feitos 0+1, 2, 3 (75c979d), 4, 5, 6, 8 (7fca4c3), 10, 13; 7 bloqueado — aguardando decisão do Luiz; 9 e 11 dependem do 7; 12 aceito com risco (desligado por padrão). Aprovados em 2026-10-19: 14 (`assignee`, antes do 7) e 15 (`parent`, junto com o 11). Ordem: 14 → 7 → (9, 11 + 15) → 12 → 16. Aprovado também o 16 (controle remoto pelo celular), que só começa depois de todos esses.
+- Fase atual: Fase 3 (orquestrador/vigia). Feitos 0+1, 2, 3 (75c979d), 4, 5, 6, 8 (7fca4c3), 10, 13; 7 bloqueado — aguardando decisão do Luiz; 9 e 11 dependem do 7; 12 aceito com risco (desligado por padrão). Aprovados em 2026-10-19: 14 (`assignee`, antes do 7) e 15 (`parent`, junto com o 11). Ordem: 14 → 7 → (9, 11 + 15) → 12 → 16 → 17. Aprovado também o 16 (controle remoto pelo celular), que só começa depois de todos esses; e o 17 (memória de projeto, ideias do Hindsight), só depois do 16.
 
 ## Regras do projeto
 - Só stdlib.
@@ -77,6 +77,19 @@ Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas
   - 11: QR em texto, opcional.
 - **Dependência:** começa só **depois** dos passos 14, 7, 9, 12, 11 e 15, porque mexe no `a2a.py` (evita conflitos).
 
+**Etapa 17 — Memória de projeto: ideias do Hindsight** · aprovada (Luiz, 2026-10-19: "sim") · só depois da etapa 16
+- **Decisão (pesquisa do vectorize-io/hindsight, MIT; PostgreSQL+pgvector, chamada de LLM a cada retain, auto-recall injeta até 1024 tokens por prompt):** **aproveitar só as ideias, NÃO adotar o produto.** Adotar quebraria o só-stdlib/local-first e a prioridade de economia de tokens; os benchmarks são em sua maioria autorrelatados e medem recall em conversas longas, não memória curta de projeto.
+- **Sub-passos em ordem** (pequenos, todos **sem chamadas extras de LLM**):
+  - 1: filtro de segredo/PII por regex ao gravar `a2a fact` (o mais barato, pode ir primeiro).
+  - 2: campos `type`, `tags` e `source` em `a2a fact`, com filtros `brief --type`/`--tag`.
+  - 3: mesma chave reforça/substitui o fato existente e conta confirmações (a ordenação do `brief` usa isso).
+  - 4: limite de tokens no `brief`, priorizado por tipo, confirmações e recência.
+  - 5: ao `done` de uma missão, o agente pode sugerir 0 a 3 fatos duráveis (opt-in, nunca automático).
+  - 6: `a2a fact search` sob demanda (substring ou SQLite FTS5 da stdlib).
+- **Explicitamente NÃO faremos:** instalar plugins/providers do Hindsight, auto-recall/auto-retain, grafo de entidades, embeddings, Postgres/Docker no caminho do a2a, reflect/consolidação por LLM.
+- **Reabrir só se** a memória chegar a milhares de fatos e o filtro por tipo/tag deixar de bastar; aí testar o Hindsight isolado como serviço opcional (modo chunks sem LLM, `max_tokens` baixo, medir antes).
+- **Dependência:** começa só **depois** do passo 16, porque mexe no `a2a.py` (evita conflitos).
+
 **Etapa 12 — Hermes**: o Luiz aceitou o risco em 2026-10-19 ("quero arriscar"). Sem sandbox de SO (`approvals.mode`), então fica **desligado por padrão** e só liga com opt-in explícito.
 
 **Depois**: atualizar o ROADMAP; roteiro de ativação para o Luiz no Windows; canal entre máquinas (VPS/Omarchy); retomada visual com o Claude Design; qLink.
@@ -106,6 +119,7 @@ dove   # painel
 - Hermes no vigia: risco aceito pelo Luiz (2026-10-19); desligado por padrão, opt-in explícito.
 - TOON, memória vetorial/GraphRAG, SupervisorAgent e mcp-compressor não adotados.
 - Controle remoto pelo celular (16): aprovado pelo Luiz em 2026-10-19 ("Sim", MUITO IMPORTANTE); `tailscale serve`, nunca Funnel/túnel público; sub-passos 3, 7 e 10 pedem aval explícito.
+- Memória de projeto (17): aprovada pelo Luiz em 2026-10-19 ("sim"); Hindsight pesquisado, só ideias, produto não adotado; só depois do 16.
 - `assignee` (14) e `parent` (15) aprovados pelo Luiz em 2026-10-19 ("sim"). Descartados: prioridade, tags, dependências entre tarefas e qualquer coisa que o agente já leia no texto da missão.
 
 ## Onde estão as coisas

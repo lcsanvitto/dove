@@ -65,8 +65,9 @@ Todos os passos têm aval do Luiz; o 12 foi aceito com risco em 2026-10-19 (desl
 | 14 | `assignee` (responsável único) em missões e tarefas | **APROVADO** (Luiz, 2026-10-19: "sim") · **pré-requisito do passo 7** (entra antes dele) |
 | 15 | `parent` (missão-mãe) em missões | **APROVADO** (Luiz, 2026-10-19: "sim") · entra junto com o 11, depois do 7 |
 | 16 | Controle remoto pelo celular (`tailscale serve`, papel `remote`) | **APROVADO** (Luiz, 2026-10-19: "Sim", MUITO IMPORTANTE) · só depois de 14, 7, 9, 12, 11 e 15 |
+| 17 | Memória de projeto: ideias do Hindsight (`a2a fact`/`brief`) | **APROVADO** (Luiz, 2026-10-19: "sim") · só depois do 16 |
 
-Ordem de dependência: **14 → 7 → (9, 11 + 15) → 12 → 16**.
+Ordem de dependência: **14 → 7 → (9, 11 + 15) → 12 → 16 → 17**.
 
 **Passo 14 — `assignee`** (pré-requisito do 7; a especificação do passo 7 continua como está):
 - Campo opcional `assignee` em missões e tarefas: um único agente responsável.
@@ -102,6 +103,19 @@ Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas
   - 11: QR em texto, opcional.
 - **Dependência:** começa só **depois** dos passos 14, 7, 9, 12, 11 e 15, porque mexe no `a2a.py` (evita conflitos).
 
+**Passo 17 — Memória de projeto: ideias do Hindsight** (aprovado pelo Luiz em 2026-10-19: "sim")
+- **Decisão (pesquisa do vectorize-io/hindsight, MIT; PostgreSQL+pgvector, chamada de LLM a cada retain, auto-recall injeta até 1024 tokens por prompt):** **aproveitar só as ideias, NÃO adotar o produto.** Adotar quebraria o só-stdlib/local-first e a prioridade de economia de tokens; os benchmarks são em sua maioria autorrelatados e medem recall em conversas longas, não memória curta de projeto.
+- **Sub-passos em ordem** (pequenos, todos **sem chamadas extras de LLM**):
+  - 1: filtro de segredo/PII por regex ao gravar `a2a fact` (o mais barato, pode ir primeiro).
+  - 2: campos `type`, `tags` e `source` em `a2a fact`, com filtros `brief --type`/`--tag`.
+  - 3: mesma chave reforça/substitui o fato existente e conta confirmações (a ordenação do `brief` usa isso).
+  - 4: limite de tokens no `brief`, priorizado por tipo, confirmações e recência.
+  - 5: ao `done` de uma missão, o agente pode sugerir 0 a 3 fatos duráveis (opt-in, nunca automático).
+  - 6: `a2a fact search` sob demanda (substring ou SQLite FTS5 da stdlib).
+- **Explicitamente NÃO faremos:** instalar plugins/providers do Hindsight, auto-recall/auto-retain, grafo de entidades, embeddings, Postgres/Docker no caminho do a2a, reflect/consolidação por LLM.
+- **Reabrir só se** a memória chegar a milhares de fatos e o filtro por tipo/tag deixar de bastar; aí testar o Hindsight isolado como serviço opcional (modo chunks sem LLM, `max_tokens` baixo, medir antes).
+- **Dependência:** começa só **depois** do passo 16, porque mexe no `a2a.py` (evita conflitos).
+
 **Nota para quem implementar o passo 7** (o orçamento do passo 8 já existe, falta ligar no executor):
 - Gravar `"mission"` e `"usage_file"` (Hermes) nos registros de run.
 - Chamar `parse_run_usage()` logo depois de `run_agent()`.
@@ -122,6 +136,7 @@ Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas
 
 - `assignee` (passo 14) e `parent` (passo 15): aprovados pelo Luiz em 2026-10-19 ("sim"), nos termos acima.
 - Controle remoto pelo celular (passo 16): aprovado pelo Luiz em 2026-10-19 ("Sim", MUITO IMPORTANTE), nos termos acima; `tailscale serve`, nunca Funnel/túnel público.
+- Memória de projeto (passo 17): aprovado pelo Luiz em 2026-10-19 ("sim"); só ideias do Hindsight, produto não adotado; só depois do 16.
 - **Descartados** explicitamente: prioridade, tags, dependências entre tarefas e qualquer coisa que o agente já leia no texto da missão.
 
 **Pendentes**
