@@ -2409,7 +2409,7 @@ def plan_fase():
     h = H(); h.msg("luiz", "claude", 0); h.msg("luiz", "codex", 0); h.msg("luiz", "hermes", 0)
     h.msg("luiz", "claude", 0, project=""); h.msg("luiz", "claude", 0, project="naoreg")
     r = h.plan(200)
-    assert r[("codex", "lagu")]["reason"] == "desabilitado (etapa 9)", r[("codex", "lagu")]
+    assert r[("codex", "lagu")]["reason"] == "sem copia de trabalho (a2a worktree create)", r[("codex", "lagu")]
     assert r[("hermes", "lagu")]["reason"] == "desabilitado (ate o Luiz confirmar)", r[("hermes", "lagu")]
     assert r[("claude", "")]["reason"] == "sem projeto" and r[("claude", "naoreg")]["reason"].startswith("sem copia de trabalho (projeto nao registrado"), r
     assert "sem copia de trabalho (a2a worktree create)" in r[("codex", "lagu")]["reasons"], r[("codex", "lagu")]
@@ -2418,7 +2418,8 @@ def plan_fase():
     r = h.plan(200); assert all(d["reason"].startswith("STOP presente") for d in r.values()), r
     os.remove(os.path.join(h.home, "STOP"))
     out = h.cli(200, "watch", "plan", "--verbose")
-    assert "ESPERA codex lagu desabilitado (etapa 9)\n" in out and "  motivos: desabilitado (etapa 9); sem copia de trabalho (a2a worktree create)" in out, out
+    assert "ESPERA codex lagu sem copia de trabalho (a2a worktree create)\n" in out and \
+           "  motivos: sem copia de trabalho (a2a worktree create)" in out, out
     assert "ESPERA claude - sem projeto" in out and "plano: 1 rodaria, 4 espera" in out, out
     hw = H(wt=False); hw.msg("luiz", "claude", 0)
     assert hw.plan(200)[("claude", "lagu")]["reason"] == "sem copia de trabalho (a2a worktree create)"
@@ -2881,10 +2882,13 @@ def supervisor_fase():
     noov = dict(base, A2A_HOME=tmp, PYTHONIOENCODING="utf-8")  # sem A2A_TESTING/A2A_RUNNER_OVERRIDE
     out, rc = drive("resolve", {"agent": "claude"}, noov)
     assert rc == 0 and out != [sys.executable, fake] and "claude" in " ".join(out).lower(), out
+    out, rc = drive("resolve", {"agent": "codex"}, noov)  # etapa 9: codex tambem resolve pra valer
+    joined = " ".join(out).lower()
+    assert rc == 0 and out != [sys.executable, fake] and "codex" in joined and "workspace-write" in joined, out
     out, rc = drive("resolve", {"agent": "claude"})  # com A2A_TESTING=1 + override: nunca o claude de verdade
     assert rc == 0 and out == [sys.executable, fake], out
-    print("OK: vigia - A2A_RUNNER_OVERRIDE so com A2A_TESTING=1; sem ele, so o claude (etapa 7) resolve pra valer "
-          "(so monta o argv); hermes continua recusado")
+    print("OK: vigia - A2A_RUNNER_OVERRIDE so com A2A_TESTING=1; sem ele, claude (etapa 7) e codex (etapa 9) "
+          "resolvem pra valer (so monta o argv); hermes continua recusado")
 
     # execucao normal: env do vigia visivel ao filho, stdin = prompt, stdout em arquivo, registro com redacao
     prompt = "faca a tarefa X com cuidado e responda pelo canal"

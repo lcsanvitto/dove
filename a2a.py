@@ -3247,7 +3247,7 @@ WATCH_DEBOUNCE = 90  # s: roda so se o gatilho pendente mais velho tem pelo meno
 WATCH_QUIET = 30     # s: ...e nenhum gatilho novo para o agente chegou neste intervalo (tudo vira uma execucao)
 WATCH_BUSY = 600     # s: status renovado ha menos disto e sem run_id = sessao interativa aberta (nao acorda)
 WATCH_TRIGGER_KINDS = ("task", "question", "correction")  # report so quando responde a mensagem do proprio agente
-WATCH_PENDING = {"codex": "etapa 9"}  # habilitados na tabela, mas o vigia so os acorda a partir desta etapa
+WATCH_PENDING = {}  # agentes habilitados na tabela mas que o vigia ainda nao pode acordar (nenhum: codex liberado na etapa 9)
 def watch_stop_path(): return STOP_FILE  # STOP_FILE e RUN_DIR vem do supervisor (etapa 6), mais abaixo
 def watch_lock_path(agent): return os.path.join(RUN_DIR, agent + ".json")
 def _secs(s):
@@ -4328,7 +4328,7 @@ def watch_supervisor(a):
                       f"pid {i.get('child_pid', '-')} ha {fmt_age(i.get('ts'))} ({'trava velha' if stale else 'rodando'})")
     except DoveError as e: fail(f"erro: {e}")
 
-# ---- vigia real, so com o claude (etapa 7 da Fase 3; a2a watch --once, iniciado a mao)
+# ---- vigia real: claude (etapa 7) e codex (etapa 9) da Fase 3; a2a watch --once, iniciado a mao
 def watch_mission_for(task, missions):
     """id da missao do gatilho escolhido (task_id dele), so se ela existir; senao ''."""
     tid = (task or {}).get("task_id") or ""
@@ -4354,9 +4354,10 @@ def watch_once_line(d, r):
     if r.reason: out += f" · {r.reason}"
     return out
 def cmd_watch_once(a):
-    """a2a watch --once (sem --dry-run): roda de verdade as decisoes RODARIA do plano (hoje, so o claude). So o
-    humano (--from), nunca sob A2A_RUNNER (require_human); um vigia por maquina (WatchLock); sequencial
-    (max_parallel=1: nesta etapa so ha um agente habilitado). Por execucao: grava o consumo (watch_usage, ignorado
+    """a2a watch --once (sem --dry-run): roda de verdade as decisoes RODARIA do plano (hoje, claude e codex; hermes
+    continua recusado, etapa 12 opt-in). So o humano (--from), nunca sob A2A_RUNNER (require_human); um vigia por
+    maquina (WatchLock); sequencial (max_parallel=1: uma execucao de cada vez, mesmo com mais de um agente
+    habilitado). Por execucao: grava o consumo (watch_usage, ignorado
     se a saida nao tiver uso reconhecivel) e, so entao, a pergunta unica de orcamento (budget_alert_notify)."""
     try:
         require_human(a._from)
@@ -5025,10 +5026,10 @@ def build_parser():
     pm.add_argument("--max-tail-chars", dest="max_tail_chars", type=int, default=4000,
                     help="tamanho maximo da parte variavel (padrao 4000; 0 = sem corte)")
     pm.set_defaults(func=cmd_prompt)
-    wa = sub.add_parser("watch", help="vigia (Fase 3): pre-checagem, plano em simulacao, executor real (so claude), kill switch STOP",
+    wa = sub.add_parser("watch", help="vigia (Fase 3): pre-checagem, plano em simulacao, executor real (claude e codex), kill switch STOP",
         description="watch check: pre-checagem so de leitura (veja a2a watch check --help). watch plan (ou a2a watch --dry-run "
         "--once): o que o vigia rodaria agora, em simulacao (nada e gravado nem executado). a2a watch --once --from <humano>: "
-        "roda de verdade as decisoes RODARIA do plano (etapa 7: hoje so o claude; codex e hermes continuam recusados). Sem "
+        "roda de verdade as decisoes RODARIA do plano (etapas 7/9: claude e codex; hermes continua recusado, etapa 12 opt-in). Sem "
         "--once, o vigia continuo ainda nao existe: sai com codigo 2. Cada execucao roda com trava por agente "
         "(~/.a2a/run/<agente>.json), timeout, controle da arvore de processos (Job Object no Windows, grupo de processos no "
         "POSIX) e orcamento (recusa se o restante for 0); deixa um registro em ~/.a2a/runs/AAAA-MM/<run_id>.json (+ .out/.err), "
@@ -5056,7 +5057,7 @@ def build_parser():
         "task/question/correction (report so quando responde a uma mensagem dele), sem ack, sem as proprias e sem as ja acionadas "
         f"(trigger_ids em ~/.a2a/runs/). So conversas que nasceram do humano (ou de missao criada por ele), ate {LOOP_MAX_HOPS} "
         "saltos automaticos sem mensagem do humano. Todos os gatilhos de um agente+projeto viram uma execucao. Espera (o primeiro "
-        "motivo vale; --verbose mostra todos): STOP; agente desabilitado (hermes; codex ate a etapa 9); sem projeto; sem copia de "
+        "motivo vale; --verbose mostra todos): STOP; agente desabilitado (hermes, ate opt-in da etapa 12); sem projeto; sem copia de "
         "trabalho; copia suja (so com --check-git); sessao interativa (status renovado ha menos de "
         f"{WATCH_BUSY // 60} min sem run_id); ja rodando (~/.a2a/run/<agente>.json); achado de loop; debounce (gatilho mais velho "
         f"com {WATCH_DEBOUNCE}s e nenhum novo nos ultimos {WATCH_QUIET}s). RODARIA traz os gatilhos, a copia, o argv exato e o "
