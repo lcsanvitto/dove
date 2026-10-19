@@ -2018,10 +2018,40 @@ def global_core(agent):
     """Nucleo para os arquivos globais de instrucoes (todos os projetos): o mesmo AGENTS_MD_CORE, com o nome do agente
     no lugar da lista de nomes e <projeto> explicado (o projeto da pasta atual). Sem data: estavel entre sessoes."""
     agent = check_agent_name(agent)
-    return AGENTS_MD_CORE.replace(CORE_NAMES, f"Seu nome: `{agent}`. `<projeto>` = o projeto da pasta atual: `a2a project which` (sem projeto: pule o `--project`).", 1
-                                  ).replace("<seu-nome>", agent)
+    t = AGENTS_MD_CORE.replace(CORE_NAMES, f"Seu nome: `{agent}`. `<projeto>` = o nome que `a2a project which` imprimiu.", 1)
+    head, sep, rest = t.partition("\n\n")  # a condicao vem logo depois do titulo
+    rest = rest.replace("- Sem `a2a`? Avise o Luiz.\n", "")  # a condicao ja diz: sem a2a, ignore o bloco
+    return (head + sep + GLOBAL_CONDITION + "\n" + rest).replace("<seu-nome>", agent)
+GLOBAL_CONDITION = ("Este bloco só vale quando a pasta atual pertence a um projeto registrado no Dove: rode `a2a project which`; "
+                    "se ele falhar (exit 1) ou `a2a` não existir, ignore este bloco inteiro e trabalhe normalmente.")
+def onboard_check(path):
+    """(ok, texto): o bloco do Dove de um AGENTS.md/CLAUDE.md (global, entre marcadores, ou a secao '## Canal A2A' do
+    projeto) e igual ao nucleo atual?"""
+    exists, _, text, _ = instr_read(path)
+    if not exists: raise DoveError(f"arquivo nao encontrado: {path}")
+    norm = text.replace("\r\n", "\n"); hit = instr_find(norm, path)
+    if hit:
+        cur = norm[hit[0]:hit[1]]; m = re.search(r"Seu nome: `([a-z0-9][a-z0-9_-]*)`", cur)
+        if not m: return False, f"{path}: bloco do Dove sem 'Seu nome: `<agente>`' - reinstale (a2a instructions install)"
+        want, what = instr_block(m.group(1)), f"nucleo global de {m.group(1)}"
+    else:
+        lines = norm.split("\n"); i = next((k for k, l in enumerate(lines) if l.startswith("## Canal A2A")), None)
+        if i is None: return False, f"{path}: sem bloco do Dove (nem marcadores dove:inicio/fim nem secao '## Canal A2A')"
+        j = next((k for k in range(i + 1, len(lines)) if lines[k].startswith("## ")), len(lines))
+        cur = "\n".join(lines[i:j]).rstrip("\n") + "\n"
+        m = re.search(r"a2a whereami --agent \S+ --project (\S+?)`", cur)
+        proj = m.group(1) if m and m.group(1) != "<projeto>" else None
+        want, what = onboard_text(None, proj), "nucleo do AGENTS.md" + (f" (projeto {proj})" if proj else "")
+    if cur == want: return True, f"{path}: igual ao {what}"
+    return False, f"{path}: divergente do {what}\n" + instr_diff(path, cur, want)
 def cmd_onboard(a):
     utf8_stdout()
+    if a.check:
+        try: ok, txt = onboard_check(a.check)
+        except DoveError as e: fail(f"erro: {e}")
+        print(txt, end="" if txt.endswith("\n") else "\n")
+        if not ok: sys.exit(1)
+        return
     if a.global_core:
         if not a.agent: fail("erro: --global-core exige --agent")
         if a.project: fail("erro: --global-core vale para todos os projetos (sem --project)")
@@ -2177,15 +2207,19 @@ def cmd_instructions(a):
     utf8_stdout()
     sim = lambda b: "sim" if b else "nao"
     try:
-        if a.icmd == "status":
-            for ag in instr_agents(a.agents, INSTR_AGENTS):
+        icmd = {"uninstall": "remove", "check": "status"}.get(a.icmd, a.icmd); bad = 0
+        if icmd == "status":
+            for ag in instr_agents(a.agents, INSTR_DEFAULT if a.icmd == "check" else INSTR_AGENTS):
                 s = instr_status(ag)
                 print(f"{ag:<7} {s['path']}  existe={sim(s['exists'])} bloco={sim(s['block'])} "
                       f"atualizado={sim(s['current']) if s['block'] else '-'} backups={len(s['backups'])}")
                 for b in s["backups"]: print(f"        backup: {b}")
                 if s["note"]: print(f"        {s['note']}")
+                bad += not (s["block"] and s["current"])
+            if a.icmd == "check" and bad:
+                fail(f"{bad} arquivo(s) sem o bloco do Dove ou desatualizado(s): a2a instructions install")
             return
-        ags = instr_agents(a.agents); fn = instr_install if a.icmd == "install" else instr_remove
+        ags = instr_agents(a.agents); fn = instr_install if icmd == "install" else instr_remove
         os.makedirs(HOME, exist_ok=True)
         with FileLock(INSTR_MANIFEST):
             man = instr_manifest(); changed = False
@@ -2303,6 +2337,7 @@ def build_parser():
         "Linhas: cabecalho @agente estado ctx novas abertas aval; N = mensagem nao lida (exceto ack, mais antiga primeiro); "
         "ACK = acks nao lidos contados numa linha (nao se responde ack); T = tarefa aberta para voce ja lida; "
         "M = missao em que voce participa, nao concluida, sem o seu aprovado; ! = alertas (contexto alto, bloqueado, stale). "
+        "O contador abertas conta so as tarefas abertas que voce ja leu (linhas T); as nao lidas aparecem como N. "
         "Suas proprias mensagens nunca aparecem. Sem --mark-read nada e marcado como lido (como o inbox); "
         "com --mark-read marca como lidas so as mensagens listadas em N e ACK (cursor/<agente>.json, como o read). "
         "Renova o heartbeat como o inbox (nunca cria status para o humano); nao muda estado nem nota.", **ex(
@@ -2437,6 +2472,8 @@ def build_parser():
     o = sub.add_parser("onboard", help="imprime as instrucoes do canal para um agente ou para o AGENTS.md")
     og = o.add_mutually_exclusive_group(required=True)
     og.add_argument("--agent"); og.add_argument("--agents-md", dest="agents_md", action="store_true")
+    og.add_argument("--check", metavar="ARQUIVO", help="o bloco do Dove de um AGENTS.md/CLAUDE.md (do projeto ou global) "
+                    "esta igual ao nucleo atual? sai 0 se igual; 1 e mostra o diff se divergente")
     o.add_argument("--project")
     o.add_argument("--global-core", dest="global_core", action="store_true",
                    help="com --agent: o nucleo para os arquivos globais de instrucoes (todos os projetos; a2a instructions)")
@@ -2449,13 +2486,15 @@ def build_parser():
         "Nunca mexe fora dos marcadores; preserva fim de linha (LF/CRLF) e codificacao; antes da primeira mudanca num arquivo que "
         "ja existia grava <arquivo>.dove-bak-AAAAmmddHHMMSS. Manifesto: ~/.a2a/instructions.json.", **ex(
         "a2a instructions install", "a2a instructions install --dry-run", "a2a instructions status",
-        "a2a instructions remove --agents codex", "a2a instructions install --agents hermes"))
+        "a2a instructions check", "a2a instructions remove --agents codex", "a2a instructions install --agents hermes"))
     inss = ins.add_subparsers(dest="icmd", required=True)
-    for nm, hl in (("install", "grava ou atualiza o bloco do Dove (idempotente)"), ("remove", "tira so o bloco do Dove"),
-                   ("status", "caminho, existe, bloco, atualizado, backups (padrao: claude,codex,hermes)")):
-        x = inss.add_parser(nm, help=hl)
+    for nm, al, hl in (("install", [], "grava ou atualiza o bloco do Dove (idempotente)"),
+                       ("remove", ["uninstall"], "tira so o bloco do Dove"),
+                       ("status", [], "caminho, existe, bloco, atualizado, backups (padrao: claude,codex,hermes)"),
+                       ("check", [], "como o status, mas sai 1 se o bloco falta ou esta desatualizado (padrao: claude,codex)")):
+        x = inss.add_parser(nm, aliases=al, help=hl)
         x.add_argument("--agents", help="lista separada por virgula: claude,codex[,hermes] (padrao: claude,codex)")
-        if nm != "status": x.add_argument("--dry-run", dest="dry_run", action="store_true", help="so mostra o plano e o diff")
+        if nm not in ("status", "check"): x.add_argument("--dry-run", dest="dry_run", action="store_true", help="so mostra o plano e o diff")
     ins.set_defaults(func=cmd_instructions)
     return p
 

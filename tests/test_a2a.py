@@ -161,6 +161,8 @@ def main():
         subprocess.run([sys.executable, str(A2A), "brief", "--help"], capture_output=True, text=True,
                        env=dict(uenv, COLUMNS="80")).stdout  # descricao continua quebrada pela largura
     assert run(env, "onboard").returncode != 0
+    h = " ".join(subprocess.run([sys.executable, str(A2A), "brief", "--help"], capture_output=True, text=True, env=uenv).stdout.split())
+    assert "O contador abertas conta so as tarefas abertas que voce ja leu (linhas T); as nao lidas aparecem como N." in h, h
     print("OK: a2a onboard (--agent guia com exemplos, --agents-md nucleo curto) e --help com exemplos")
 
     # install.sh num HOME temporario
@@ -1677,7 +1679,10 @@ def instructions_fase():
     assert g == a2a("onboard", "--agent", "claude", "--global-core") and len(g.splitlines()) <= 12, g
     assert "<seu-nome>" not in g and "Seu nome: `claude`." in g and "`a2a project which`" in g and "Claude Code →" not in g, g
     for l in core.splitlines():
-        if "Seu nome:" not in l: assert l.replace("<seu-nome>", "claude") in g.splitlines(), (l, g)
+        if "Seu nome:" not in l and "Sem `a2a`" not in l: assert l.replace("<seu-nome>", "claude") in g.splitlines(), (l, g)
+    cond = ("Este bloco só vale quando a pasta atual pertence a um projeto registrado no Dove: rode `a2a project which`; "
+            "se ele falhar (exit 1) ou `a2a` não existir, ignore este bloco inteiro e trabalhe normalmente.")
+    assert g.splitlines()[2] == cond and "Avise o Luiz" not in g, g  # a condicao vem logo depois do titulo
     assert not re.search(r"\d{4}-\d{2}-\d{2}", g)
     a2a("onboard", "--global-core", code=2); a2a("onboard", "--agent", "claude", "--global-core", "--project", "x", code=1)
     # dry-run nao grava nada
@@ -1704,6 +1709,15 @@ def instructions_fase():
     assert re.search(rf"claude +{re.escape(claude)}  existe=sim bloco=sim atualizado=sim backups=0", st), st
     assert re.search(rf"codex +{re.escape(codex)}  existe=sim bloco=sim atualizado=sim backups=1", st) and "backup: " + baks[0] in st, st
     assert "hermes" in st and "existe=nao bloco=nao atualizado=- backups=0" in st, st
+    assert a2a("instructions", "check") == st.replace(st[st.index("hermes"):], "")  # check: claude,codex; sai 0 em dia
+    # onboard --check: bloco global e secao do AGENTS.md do projeto
+    assert "igual ao nucleo global de codex" in a2a("onboard", "--check", codex)
+    pmd = os.path.join(tmp, "AGENTS.md")
+    open(pmd, "w", encoding="utf-8").write("# Projeto\n\n" + a2a("onboard", "--agents-md", "--project", "lagu") + "\n## Outra\nx\n")
+    assert "igual ao nucleo do AGENTS.md (projeto lagu)" in a2a("onboard", "--check", pmd)
+    open(pmd, "w", encoding="utf-8").write("## Canal A2A — Dove\n\ntexto antigo\n")
+    out = a2a("onboard", "--check", pmd, code=1); assert "divergente" in out and "+- Aprove missão só com evidência real." in out, out
+    open(pmd, "w", encoding="utf-8").write("nada\n"); assert "sem bloco do Dove" in a2a("onboard", "--check", pmd, code=1)
     # o nucleo mudou: status mostra desatualizado; install troca o bloco no lugar, sem novo backup, resto intacto
     def inproc(*args):
         r = subprocess.run([sys.executable, "-c", INSTR_INPROC, str(ROOT), *args], capture_output=True, env=env)
@@ -1715,13 +1729,16 @@ def instructions_fase():
     new = rb(codex); assert new.startswith(orig + b"\r\n\r\n" + B.encode()) and b"- linha nova no nucleo.\r\n" + E.encode() + b"\r\ndepois do bloco\r\n" in new, new
     assert len(_glob.glob(codex + ".dove-bak-*")) == 1
     assert "atualizado=sim" in inproc("instructions", "status", "--agents", "codex") and "atualizado=nao" in a2a("instructions", "status", "--agents", "codex")
+    out = a2a("instructions", "check", "--agents", "codex", code=1); assert "desatualizado" in out, out
+    assert "divergente do nucleo global de codex" in a2a("onboard", "--check", codex, code=1)
     a2a("instructions", "install")  # volta ao nucleo atual
     # remove: so o bloco (e a linha em branco que ele pos); arquivo criado pelo Dove e vazio some (com a pasta)
     out = a2a("instructions", "remove", "--dry-run"); assert rb(codex).count(B.encode()) == 1 and os.path.exists(claude), out
-    out = a2a("instructions", "remove")
+    out = a2a("instructions", "uninstall")  # alias de remove
     assert f"claude: arquivo removido: {claude}" in out and f"codex: removido: {codex}" in out, out
     assert rb(codex) == orig + b"depois do bloco\r\n", rb(codex)
     assert not os.path.exists(claude) and not os.path.exists(os.path.dirname(claude))
+    a2a("instructions", "check", code=1)
     assert "sem bloco" in a2a("instructions", "remove", "--agents", "codex") and "nao existe" in a2a("instructions", "remove", "--agents", "claude")
     # remove devolve o original exato (o usuario nao escreveu depois do bloco); backup continua um so
     open(codex, "wb").write(orig); a2a("instructions", "install", "--agents", "codex"); a2a("instructions", "remove", "--agents", "codex")

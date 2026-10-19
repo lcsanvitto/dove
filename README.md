@@ -97,7 +97,9 @@ Com muitos repositórios, não precisa de um `AGENTS.md` por repo: `a2a instruct
 ```
 a2a instructions install [--agents claude,codex[,hermes]] [--dry-run]   # grava/atualiza o bloco (padrao: claude,codex)
 a2a instructions status  [--agents ...]                                 # caminho, existe?, bloco?, atualizado?, backups
-a2a instructions remove  [--agents ...] [--dry-run]                     # tira so o bloco
+a2a instructions check   [--agents ...]                                 # como o status; sai 1 se falta o bloco ou esta desatualizado
+a2a instructions remove  [--agents ...] [--dry-run]                     # tira so o bloco (alias: uninstall)
+a2a onboard --check ARQUIVO                                             # o bloco do Dove deste AGENTS.md/CLAUDE.md esta igual ao nucleo atual? (1 + diff se nao)
 a2a onboard --agent claude --global-core                                # o texto que vai no bloco
 a2a project which [--path P]                                            # projeto registrado da pasta atual (sai 1 se nenhum)
 ```
@@ -105,7 +107,7 @@ a2a project which [--path P]                                            # projet
 - Rodar de novo é seguro: sem mudança, diz `ja atualizado`; se o núcleo mudou (versão nova do Dove), troca o bloco no lugar.
 - Antes da primeira mudança num arquivo que já existia, grava `<arquivo>.dove-bak-AAAAmmddHHMMSS` (uma vez só). `--dry-run` mostra o diff e não grava nada.
 - `remove` tira o bloco e a linha em branco que ele pôs; um arquivo que o Dove criou e ficou vazio é apagado. O manifesto `~/.a2a/instructions.json` guarda caminho, se o Dove criou o arquivo, o hash do bloco e o backup.
-- O núcleo global é o mesmo núcleo do `AGENTS.md`, com o nome do agente já preenchido e `<projeto>` explicado como "o projeto da pasta atual: `a2a project which`" (que acha o projeto registrado cuja pasta, ou a cópia de trabalho de um agente, contém a pasta atual).
+- O núcleo global é o mesmo núcleo do `AGENTS.md`, com o nome do agente já preenchido e uma condição logo depois do título: *"Este bloco só vale quando a pasta atual pertence a um projeto registrado no Dove: rode `a2a project which`; se ele falhar (exit 1) ou `a2a` não existir, ignore este bloco inteiro e trabalhe normalmente."* `<projeto>` é o nome que o `a2a project which` imprime (o projeto registrado cuja pasta, ou a cópia de trabalho de um agente, contém a pasta atual). Assim os repositórios fora do Dove não são afetados.
 - Instaladores: `install.ps1 -Instructions` / `./install.sh --instructions` rodam `a2a instructions install` (claude e codex). Sem a opção, só lembram: `Para valer em todos os projetos: a2a instructions install`.
 
 **Global e `AGENTS.md` do projeto:** o global basta. Use o `AGENTS.md` do projeto só para regras extras daquele repo, **sem** repetir o bloco do Dove (senão o agente carrega o núcleo duas vezes por sessão). Num repo que já tem a seção `## Canal A2A — Dove` no `AGENTS.md`, apague a seção depois de instalar o global.
@@ -450,7 +452,8 @@ a2a index check     # "ok (2000 mensagens)" ou "divergente: ..." (código de sa�
 | `onboard --agent X [--project P]` | imprime o guia completo do canal para o agente X (com exemplos) |
 | `onboard --agents-md [--project P]` | imprime o núcleo curto e estável para o `AGENTS.md` |
 | `onboard --agent X --global-core` | imprime o núcleo para os arquivos globais de instruções (nome de X preenchido, sem projeto) |
-| `instructions install\|remove\|status [--agents claude,codex[,hermes]] [--dry-run]` | grava / tira / confere o núcleo do Dove no `~/.claude/CLAUDE.md` e `~/.codex/AGENTS.md` (Hermes só explícito); backup antes da 1ª mudança |
+| `instructions install\|remove\|status\|check [--agents claude,codex[,hermes]] [--dry-run]` | grava / tira (alias `uninstall`) / confere (`check` sai 1 se falta ou está desatualizado) o núcleo do Dove no `~/.claude/CLAUDE.md` e `~/.codex/AGENTS.md` (Hermes só explícito); backup antes da 1ª mudança |
+| `onboard --check ARQUIVO` | o bloco do Dove de um `AGENTS.md`/`CLAUDE.md` (do projeto ou global) está igual ao núcleo atual? sai 0, ou 1 com o diff |
 | `project which [--path P]` | nome do projeto registrado cuja pasta (ou cópia de um agente) contém P (padrão: pasta atual); sai 1 se nenhum |
 | `prompt --agent X --project P [--task ID] [--for claude\|codex\|hermes] [--prefix-hash] [--max-tail-chars N]` | imprime (não executa) o prompt em camadas para um vigia headless: núcleo + papel, pasta, fronteira, brief + tarefa; `--prefix-hash` mostra o hash do prefixo estável |
 
