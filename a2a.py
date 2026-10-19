@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """a2a (Dove) - canal de mensagens agente-a-agente, local e global."""
-import argparse, glob, hmac, json, os, re, secrets, subprocess, sys, threading, time, traceback, uuid
+import argparse, glob, hashlib, hmac, json, os, re, secrets, subprocess, sys, threading, time, traceback, uuid
 from datetime import datetime, timezone
 
 DOVE_VERSION = "0.6.0"
@@ -195,23 +195,62 @@ def cmd_agents(a):
     n = registered_agents()
     print("\n".join(n) if n else "(nenhum agente registrado)")
 def post_message(_from, to, body, kind="task", project="", task="", reply_to="", state="", result="",
-                 evidence="", pending="", next_action="", auto_status=True):
-    """Caminho unico de escrita no bus (CLI, missoes e painel)."""
+                 evidence="", pending="", next_action="", auto_status=True, files=None):
+    """Caminho unico de escrita no bus (CLI, missoes e painel). files (so do send --file) vira o campo opcional
+    `files`; sem ele o envelope tem os 14 campos de sempre."""
     ensure_dirs(); mid = uuid.uuid4().hex[:12]; ts = now_iso()
     msg = {"data": ts, "task_id": task or "", "msg_id": mid, "from": _from,
            "to": to, "project": project or "", "in_reply_to": reply_to or "",
            "kind": kind, "state": state or "", "result": result or "",
            "evidence": evidence or "", "pending": pending or "",
            "next_action": next_action or "", "body": body or ""}
+    if files: msg["files"] = files
     fn = f"{ts.replace(':','').replace('-','')}-{mid}.json"
     write_json(os.path.join(BUS, fn), msg)
     index_append(fn, msg)
     mark_seen(_from, mid)
     if auto_status: touch_status(_from, MSG_TO_AGENT.get(state or ""), project)
     return msg
+LINES_RE = re.compile(r"^\d+(-\d+)?$")
+def file_root(agent, project):
+    """Base dos caminhos de --file: a pasta de trabalho do agente no projeto registrado (copia ou projeto); senao o cwd."""
+    if project:
+        try: return whereami(agent, project) or os.getcwd()
+        except DoveError: pass
+    return os.getcwd()
+def file_ref(spec, root):
+    """'caminho[:L1-L2]' -> {"path", "sha", "lines"}: caminho relativo a root (com /), sha1 dos bytes (6 hex) e
+    linhas conferidas. Recusa caminho absoluto, '..' e o que cair fora de root (inclusive por symlink)."""
+    spec = (spec or "").strip(); path, lines = spec, ""
+    if ":" in spec:
+        head, tail = spec.rsplit(":", 1)
+        if LINES_RE.match(tail): path, lines = head, tail
+    if not path or "\0" in path: raise DoveError(f"--file invalido: '{spec}'")
+    if os.path.isabs(path) or path.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", path):
+        raise DoveError(f"--file '{path}': use um caminho relativo a {root}, nao absoluto")
+    parts = [x for x in re.split(r"[\\/]+", path) if x not in ("", ".")]
+    if ".." in parts: raise DoveError(f"--file '{path}': '..' nao e permitido")
+    if not parts: raise DoveError(f"--file invalido: '{spec}'")
+    try: full = safe_join(root, os.path.join(*parts))
+    except DoveError: raise DoveError(f"--file '{path}': fora de {root}")
+    if not os.path.isfile(full): raise DoveError(f"--file '{path}': arquivo nao encontrado em {root}")
+    try:
+        with open(full, "rb") as f: data = f.read()
+    except OSError as e: raise DoveError(f"--file '{path}': nao consegui ler ({e})")
+    if lines:
+        a, _, b = lines.partition("-"); a = int(a); b = int(b) if b else a; n = len(data.splitlines())
+        if a < 1 or b < a or b > n: raise DoveError(f"--file '{path}': linhas {lines} fora do arquivo ({n} linhas)")
+    return {"path": "/".join(parts), "sha": hashlib.sha1(data).hexdigest()[:6], "lines": lines}
+def msg_files(m):
+    f = m.get("files"); return [x for x in f if isinstance(x, dict)] if isinstance(f, list) else []
+def file_label(x): return f"{x.get('path', '')}" + (f":{x['lines']}" if x.get("lines") else "")
 def cmd_send(a):
+    files = None
+    if getattr(a, "file", None):  # confere tudo antes: arquivo faltando = erro e nenhuma mensagem gravada
+        try: root = file_root(a._from, a.project); files = [file_ref(x, root) for x in a.file]
+        except DoveError as e: fail(f"erro: {e}")
     m = post_message(a._from, a.to, a.body, a.kind, a.project, a.task, a.reply_to, a.state, a.result,
-                     a.evidence, a.pending, a.next_action, not getattr(a, "no_auto_status", False))
+                     a.evidence, a.pending, a.next_action, not getattr(a, "no_auto_status", False), files)
     print(f"enviado {m['msg_id']} ({a._from} -> {a.to})")
 def auto(a, agent):
     if not getattr(a, "no_auto_status", False): touch_status(agent)
@@ -232,6 +271,7 @@ def compact_lines(m):
     out = [head + f" {m.get('data', '')}"]
     if m.get("body"): out += str(m["body"]).splitlines() or [""]
     out += [f"{k}: {m[k]}" for k in ("result", "evidence", "pending", "next_action") if m.get(k)]
+    out += [f"file: {file_label(x)} sha={x.get('sha', '')}" for x in msg_files(m)]
     return out
 def show_message(m, compact=False):
     print("\n".join(compact_lines(m)) if compact else json.dumps(m, ensure_ascii=False, indent=2))
@@ -248,6 +288,13 @@ def cmd_read(a):
     m = find_message(a.msg_id)
     if not m: print("nao encontrada", file=sys.stderr); sys.exit(1)
     show_message(m, getattr(a, "compact", False))
+    if getattr(a, "verify_files", False):
+        root = file_root(m.get("from"), m.get("project"))
+        for x in msg_files(m):
+            try: now = file_ref(x.get("path", ""), root)["sha"]
+            except DoveError: now = None
+            st = "nao encontrado" if now is None else ("ok" if now == x.get("sha") else f"mudou desde a mensagem (agora {now})")
+            print(f"verify: {file_label(x)} sha={x.get('sha', '')} {st}")
     if a.agent: mark_seen(a.agent, a.msg_id)
 WAIT_FULL_EVERY = 30  # wait: releitura completa do bus no maximo a cada 30s (rede de seguranca para mtime grosseiro)
 def cmd_wait(a):
@@ -1308,7 +1355,8 @@ def brief_data(agent, project=None, limit=20, width=100, stale_min=30):
             "novas": len(unread), "abertas": len(tasks), "aval": len(mine),
             "new": [{"id": m["msg_id"], "from": m.get("from", ""), "kind": m.get("kind", ""),
                      "state": m.get("state", ""), "project": m.get("project", ""), "age": msg_age(m),
-                     "text": brief_text(m.get("body"), width), "evid": bool(m.get("evidence"))} for m in shown],
+                     "text": brief_text(m.get("body"), width), "evid": bool(m.get("evidence")),
+                     **({"files": len(msg_files(m))} if msg_files(m) else {})} for m in shown],
             "more": len(new) - len(shown),
             "acks": {"n": len(acks), "from": list(dict.fromkeys(m.get("from", "") for m in acks))},
             "tasks": [{"id": m["msg_id"], "from": m.get("from", ""), "project": m.get("project", ""),
@@ -1323,7 +1371,8 @@ def brief_lines(b):
            f"novas={b['novas']} abertas={b['abertas']} aval={b['aval']}"]
     for n in b["new"]:
         out.append(f"N {n['id']} {n['from']} {n['kind']}{'/' + n['state'] if n['state'] else ''} "
-                   f"{p(n['project'])}{n['age']} \"{n['text']}\"" + (" +evid" if n["evid"] else ""))
+                   f"{p(n['project'])}{n['age']} \"{n['text']}\"" + (" +evid" if n["evid"] else "")
+                   + (f" +{n['files']}arq" if n.get("files") else ""))
     if b["more"]: out.append(f"… +{b['more']} novas (a2a brief --limit 0 para todas)")
     if b["acks"]["n"]: out.append(f"ACK {b['acks']['n']} ({', '.join(b['acks']['from'])})")
     for t in b["tasks"]: out.append(f"T {t['id']} de={t['from']} {p(t['project'])}{t['age']} \"{t['text']}\"")
@@ -1851,6 +1900,7 @@ Ao começar uma sessão:
 
 Durante o trabalho:
 - Para se atualizar no meio do trabalho, use `a2a brief --agent <seu-nome> --mark-read` (não `inbox` + `read` + `mission list`).
+- Para apontar código, use `--file caminho[:linhas]` em vez de colar o conteúdo na mensagem.
 - Pedir algo a outro agente: `a2a send --from <seu-nome> --to <agente> --project <projeto> --kind task --body "..."`
 - Responder: `a2a send --from <seu-nome> --to <agente> --project <projeto> --reply-to <msg_id> --kind report --state CONCLUIDO --body "..." --evidence "<commit/arquivo>"`
 - Travou: `a2a status --agent <seu-nome> --set blocked --note "<o que destrava>"`
@@ -1910,6 +1960,9 @@ def build_parser():
     s.add_argument("--kind", choices=KINDS, default="task"); s.add_argument("--state", choices=STATES)
     s.add_argument("--result"); s.add_argument("--evidence"); s.add_argument("--pending")
     s.add_argument("--next-action", dest="next_action"); s.add_argument("--body", required=True)
+    s.add_argument("--file", action="append", metavar="CAMINHO[:L1-L2]",
+                   help="cita um arquivo (repetivel): grava caminho relativo, sha (6 hex) e linhas no campo files, sem o "
+                        "conteudo. Base: a pasta do agente no --project registrado (whereami), senao a pasta atual")
     s.add_argument("--no-auto-status", dest="no_auto_status", action="store_true",
                    help="nao atualiza o status do remetente"); s.set_defaults(func=cmd_send)
     i = sub.add_parser("inbox"); i.add_argument("--agent", required=True); i.add_argument("--project")
@@ -1917,6 +1970,8 @@ def build_parser():
     r = sub.add_parser("read"); r.add_argument("msg_id"); r.add_argument("--agent")
     r.add_argument("--compact", action="store_true",
                    help="so os campos com conteudo: 1 linha de cabecalho, o body inteiro e result/evidence/pending/next_action nao vazios")
+    r.add_argument("--verify-files", dest="verify_files", action="store_true",
+                   help="confere se os arquivos citados (--file) ainda tem o mesmo sha ('mudou desde a mensagem')")
     r.set_defaults(func=cmd_read)
     bf = sub.add_parser("brief", help="resumo do que e seu: novas (N), acks, tarefas (T), missoes (M), alertas (!)",
         description="Resumo unico para o agente se atualizar (substitui inbox + read de cada mensagem + mission list). "

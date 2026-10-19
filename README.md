@@ -116,6 +116,18 @@ M mb222288 lagu aberta 2/3 "Checkout novo pronto para produção"
 - Suas próprias mensagens nunca aparecem. Para o texto inteiro de uma mensagem: `a2a read <msg_id> --agent <você> --compact`. `--json` dá a mesma informação numa linha de JSON compacto, sem campos vazios.
 - Quando usar: no começo da sessão e para se atualizar no meio do trabalho (`a2a brief --agent <você> --mark-read`). O `inbox`, `read`, `wait` e `mission list` continuam iguais.
 
+## Arquivos por referência (`send --file`)
+Para apontar código, a mensagem cita o arquivo em vez de colar o conteúdo no `--body` (colar é caro e fica desatualizado):
+```
+a2a send --from claude --to codex --project lagu --body "revisar o arredondamento" --file src/frete.py:12-40 --file tests/test_frete.py
+```
+- `--file CAMINHO[:L1-L2]` (repetível; `:L` para uma linha só) grava no envelope o campo opcional `files: [{"path", "sha", "lines"}]`: o caminho relativo (com `/`), os 6 primeiros hex do sha1 dos bytes do arquivo e as linhas. O conteúdo nunca vai para o canal.
+- **Base dos caminhos:** com `--project` registrado, a pasta de trabalho do remetente nesse projeto (a cópia dele, se houver, ou a pasta do projeto — a mesma do `a2a whereami`); senão, a pasta atual.
+- **Recusa** caminho absoluto, `..` e qualquer coisa que caia fora da base (inclusive por symlink). Arquivo que não existe ou linhas fora do arquivo: erro e **nenhuma** mensagem gravada.
+- Sem `--file`, o envelope é o de sempre (14 campos, sem a chave `files`).
+- Na leitura: o `brief` acrescenta ` +Narq` na linha `N`; o `read --compact` mostra `file: src/frete.py:12-40 sha=9be1c0`; o `read` normal e o `/api/state` mostram o campo `files` como está. `a2a read <id> --verify-files` diz, para cada arquivo, `ok` ou `mudou desde a mensagem (agora xxxxxx)` (calculado na pasta do remetente no projeto, ou na pasta atual).
+- O painel não envia `files` (o `/api/send` ignora o campo).
+
 ## Read compacto
 O `read` imprime o envelope inteiro (14 campos, JSON indentado), mesmo quando quase todos estão vazios. Com `--compact`, só o que tem conteúdo:
 ```
@@ -128,7 +140,7 @@ evidence: e2e/report.html
 next_action: corrigir regra de frete acima de R$ 199
 ```
 - Linha 1: `msg_id de->para tipo[/ESTADO] proj=<projeto|-> [re=<in_reply_to>] [task=<task_id>] data`.
-- Depois, o `body` inteiro (várias linhas, como foi escrito) e então `campo: valor` só para `result`, `evidence`, `pending` e `next_action` que não estão vazios.
+- Depois, o `body` inteiro (várias linhas, como foi escrito), então `campo: valor` só para `result`, `evidence`, `pending` e `next_action` que não estão vazios, e uma linha `file: caminho[:linhas] sha=xxxxxx` por arquivo citado com `--file`.
 - Marca a mensagem como lida para `--agent`, como o `read` normal. Mensagem inexistente: o mesmo erro (`nao encontrada`, código 1).
 - Sem `--compact`, a saída continua o JSON indentado de sempre. `a2a wait --agent X --compact` entrega a mensagem nova no mesmo formato.
 
@@ -338,9 +350,10 @@ a2a index check     # "ok (2000 mensagens)" ou "divergente: ..." (código de sa�
 | `leave --agent X` | remove o agente X e o status dele (mensagens ficam) |
 | `agents` | lista agentes registrados |
 | `send ...` | envia uma mensagem |
+| `send ... --file CAMINHO[:L1-L2]` | cita um arquivo (caminho, sha, linhas) em vez de colar o conteúdo; repetível |
 | `inbox --agent X` | lista mensagens não lidas de X |
 | `brief --agent X [--project P] [--mark-read] [--limit N] [--width W] [--json]` | resumo do que é de X: novas (N), acks, tarefas abertas (T), missões esperando aval (M), alertas (!); só marca lidas com `--mark-read` |
-| `read <id> --agent X [--compact]` | mostra a mensagem e marca como lida (`--compact`: só os campos com conteúdo) |
+| `read <id> --agent X [--compact] [--verify-files]` | mostra a mensagem e marca como lida (`--compact`: só os campos com conteúdo; `--verify-files`: os arquivos citados mudaram?) |
 | `wait --agent X [--timeout S] [--interval I] [--compact]` | bloqueia até chegar mensagem nova para X (só relê o `bus/` quando ele muda) |
 | `ack <id> --from X` | responde um `ack` e marca como lida |
 | `status --agent X --set ESTADO [--note N] [--project P]` | publica o estado de X (working/idle/blocked/done/unknown) |
@@ -372,6 +385,8 @@ a2a index check     # "ok (2000 mensagens)" ou "divergente: ..." (código de sa�
 ## Envelope da mensagem (JSON)
 `data` (ISO 8601 UTC) · `task_id` · `msg_id` · `from` · `to` · `project` · `in_reply_to` · `kind` (task | report | question | correction | ack) · `state` (AGUARDANDO_ACEITE | ACEITO | EM_EXECUCAO | BLOQUEADO | AGUARDANDO_APROVACAO | EM_REVISAO | CONCLUIDO | CANCELADO) · `result` · `evidence` · `pending` · `next_action` · `body`
 
+Opcional, só quando o `send` usa `--file`: `files` — lista de `{"path": "src/x.py", "sha": "9be1c0", "lines": "12-16"}` (`lines` vazio = arquivo inteiro).
+
 ## Regras
 - **Anti-loop:** nunca responder a `kind=ack` nem às próprias mensagens; `msg_id` único (dedup); toda resposta leva `--reply-to`.
 - **Segurança:** o Dove é **só coordenação**. A ferramenta **nunca** executa ação irreversível (merge/deploy/gasto/exclusão) — isso é sempre autorização humana.
@@ -383,6 +398,7 @@ Você é o agente "claude" no canal A2A local Dove (comando a2a, caixa global ~/
 - Ver o que chegou:  a2a inbox --agent claude
 - Esperar:           a2a wait --agent claude --timeout 300
 - Ler mensagem:      a2a read <msg_id> --agent claude --compact
+- Apontar código:    a2a send ... --file caminho[:linhas]   (em vez de colar o conteúdo)
 - Responder:         a2a send --from claude --to hermes --project <proj> --reply-to <msg_id> --kind report --state CONCLUIDO --body "..." --evidence "..."
 - Confirmar:         a2a ack <msg_id> --from claude
 - Publicar estado:   a2a status --agent claude --set working --note "..." ao começar; --set done ao terminar; --set blocked se travar

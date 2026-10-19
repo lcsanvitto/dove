@@ -1423,6 +1423,84 @@ def index_fase():
     os.rmdir(idx)
     print("OK: index.json (2.000 msgs iguais com/sem indice, painel sem ler o bus, corrompido refeito, arquivo direto aparece, check apos send/ack/missao/archive/restore)")
 
+def files_fase():
+    """send --file (item 4): path/sha/lines certos, erro sem gravar, sem --file sem a chave, caminhos recusados,
+    +Narq no brief, file: no --compact, /api/state com as mesmas chaves e /api/send sem files."""
+    import hashlib
+    tmp = tempfile.mkdtemp(); env = dict(os.environ, A2A_HOME=os.path.join(tmp, "home"), PYTHONIOENCODING="utf-8")
+    for ag in ("claude", "codex"): run(env, "join", "--agent", ag)
+    work = os.path.join(tmp, "work"); os.makedirs(os.path.join(work, "sub"))
+    code = "".join(f"linha {i}\n" for i in range(1, 11)).encode()
+    open(os.path.join(work, "a.py"), "wb").write(code); open(os.path.join(work, "sub", "b.py"), "wb").write(b"x\ny\n")
+    outside = os.path.join(tmp, "fora.py"); open(outside, "wb").write(b"segredo\n")
+    sha = lambda b: hashlib.sha1(b).hexdigest()[:6]
+    bus = os.path.join(env["A2A_HOME"], "bus")
+    last = [""]
+    def send(*extra, cwd=work, frm="claude"):
+        r = subprocess.run([sys.executable, str(A2A), "send", "--from", frm, "--to", "codex", "--body", "veja", "--no-auto-status", *extra],
+                           capture_output=True, text=True, env=env, cwd=cwd)
+        if r.returncode == 0: last[0] = r.stdout.split()[1]
+        return r
+    def last_msg():
+        f = next(f for f in os.listdir(bus) if last[0] in f); return json.load(open(os.path.join(bus, f), encoding="utf-8"))
+    # sem projeto: base = pasta atual
+    r = send("--file", "a.py:3-5", "--file", "./sub//b.py", "--file", "a.py:7"); assert r.returncode == 0, r.stderr
+    m = last_msg()
+    assert m["files"] == [{"path": "a.py", "sha": sha(code), "lines": "3-5"}, {"path": "sub/b.py", "sha": sha(b"x\ny\n"), "lines": ""},
+                          {"path": "a.py", "sha": sha(code), "lines": "7"}], m["files"]
+    with_files = m["msg_id"]
+    # sem --file: os mesmos 14 campos, sem a chave files
+    r = send(); assert r.returncode == 0 and "files" not in last_msg() and len(last_msg()) == 14, last_msg()
+    plain = last_msg()["msg_id"]
+    # erros: nada gravado
+    n0 = len(os.listdir(bus))
+    for spec, err in (("nao_existe.py", "arquivo nao encontrado"), ("a.py:0-2", "fora do arquivo"), ("a.py:5-3", "fora do arquivo"),
+                      ("a.py:9-11", "fora do arquivo"), ("../fora.py", "'..'"), ("sub/../a.py", "'..'"), (outside, "absoluto"),
+                      ("/etc/passwd", "absoluto"), ("C:\\x\\a.py", "absoluto"), ("sub", "arquivo nao encontrado")):
+        r = send("--file", "a.py", "--file", spec)
+        assert r.returncode == 1 and err in r.stderr and len(os.listdir(bus)) == n0, (spec, r.returncode, r.stderr)
+    if hasattr(os, "symlink"):
+        os.symlink(outside, os.path.join(work, "link.py"))
+        r = send("--file", "link.py"); assert r.returncode == 1 and "fora de" in r.stderr and len(os.listdir(bus)) == n0, r.stderr
+    # projeto registrado: base = pasta do projeto (ou a copia do agente), nao a pasta atual
+    run(env, "project", "add", "lagu", work)
+    r = send("--project", "lagu", "--file", "sub/b.py:2", cwd=tmp); assert r.returncode == 0, r.stderr
+    assert last_msg()["files"] == [{"path": "sub/b.py", "sha": sha(b"x\ny\n"), "lines": "2"}]
+    wt = os.path.join(tmp, "work-claude"); os.makedirs(wt); open(os.path.join(wt, "c.py"), "wb").write(b"c\n")
+    pj = os.path.join(env["A2A_HOME"], "projects.json"); ps = json.load(open(pj))
+    ps[0]["worktrees"] = {"claude": {"path": wt, "branch": "dove/claude", "base": "main"}}; json.dump(ps, open(pj, "w"))
+    r = send("--project", "lagu", "--file", "c.py", cwd=tmp); assert r.returncode == 0 and last_msg()["files"][0]["path"] == "c.py", r.stderr
+    r = send("--project", "lagu", "--file", "a.py", cwd=work); assert r.returncode == 1 and "nao encontrado" in r.stderr, r.stderr  # a.py nao esta na copia
+    # leitores: brief +Narq, --json, compact, read JSON, verify-files
+    b = run(env, "brief", "--agent", "codex", "--limit", "0", "--no-auto-status").stdout
+    line = next(l for l in b.splitlines() if with_files in l); assert line.endswith('"veja" +3arq'), line
+    assert next(l for l in b.splitlines() if plain in l).endswith('"veja"'), b
+    j = json.loads(run(env, "brief", "--agent", "codex", "--json", "--no-auto-status").stdout)
+    assert [x.get("files") for x in j["new"][:2]] == [3, None], j["new"][:2]
+    c = run(env, "read", with_files, "--compact").stdout.splitlines()
+    assert c[-3:] == [f"file: a.py:3-5 sha={sha(code)}", f"file: sub/b.py sha={sha(b'x' + chr(10).encode() + b'y' + chr(10).encode())}",
+                      f"file: a.py:7 sha={sha(code)}"], c
+    assert json.loads(run(env, "read", with_files).stdout)["files"][0]["lines"] == "3-5"
+    open(os.path.join(work, "a.py"), "ab").write(b"mais\n")
+    v = subprocess.run([sys.executable, str(A2A), "read", with_files, "--compact", "--verify-files"], capture_output=True, text=True, env=env, cwd=work).stdout
+    assert f"verify: a.py:3-5 sha={sha(code)} mudou desde a mensagem (agora {sha(code + b'mais' + chr(10).encode())})" in v and "verify: sub/b.py" in v and " ok" in v, v
+    # painel: /api/state com as mesmas chaves e files dentro da mensagem; /api/send ignora files
+    port = free_port(); p, tok = start_panel(env, port)
+    try:
+        st, data = req(port, "GET", "/api/state")
+        assert set(data) == {"version", "agents", "registered", "human", "agent_meta", "messages", "messages_total",
+                             "messages_has_more", "messages_project", "projects", "missions", "summary", "config", "generated"}, set(data)
+        assert next(x for x in data["messages"] if x["msg_id"] == with_files)["files"][0]["path"] == "a.py"
+        assert "files" not in next(x for x in data["messages"] if x["msg_id"] == plain)
+        st, res = req(port, "POST", "/api/send", {"to": "codex", "body": "do painel", "files": [{"path": "x", "sha": "1", "lines": ""}]}, tok)
+        last[0] = res["message"]["msg_id"]
+        assert st == 200 and "files" not in res["message"] and "files" not in last_msg(), res
+    finally:
+        p.terminate(); p.wait(timeout=5)
+    t = run(env, "onboard", "--agents-md").stdout
+    assert "Para apontar código, use `--file caminho[:linhas]` em vez de colar o conteúdo na mensagem." in t, t
+    print("OK: send --file (path/sha/lines, erro sem gravar, 14 campos sem --file, ../absoluto/symlink recusados, base no projeto/copia, +Narq, compact, verify, /api/state)")
+
 if __name__ == "__main__":
     main()
     fase1()
@@ -1434,3 +1512,4 @@ if __name__ == "__main__":
     wait_fase()
     archive_fase()
     index_fase()
+    files_fase()

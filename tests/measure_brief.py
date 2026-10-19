@@ -13,6 +13,8 @@ Depois: brief --agent codex --mark-read     (e as variantes "depois + 1 read" e 
 Cada sequencia roda numa copia nova do mesmo A2A_HOME. Unidade: stdout de cada comando;
 chars = len(texto), bytes = len(texto.encode("utf-8")), tokens_est = ceil(chars / 4).
 
+Tambem mede o send --file: uma mensagem citando um trecho de 60 linhas por referencia vs colando o trecho no body.
+
 Uso: python3 tests/measure_brief.py [--show]   (--show imprime as saidas brutas)
 So stdlib.
 """
@@ -143,6 +145,29 @@ def measure(outs):
     chars = len(text)
     return {"cmds": len(outs), "chars": chars, "bytes": len(text.encode("utf-8")), "tokens": math.ceil(chars / 4)}
 
+def measure_files(root):
+    """send --file: mensagem que cita um trecho de 60 linhas vs a mesma mensagem com o trecho colado no body."""
+    home, work = os.path.join(root, "files-home"), os.path.join(root, "files-work"); os.makedirs(work)
+    lines = [f"def regra_{i}(pedido):  # regra {i} do frete" if i % 6 == 0 else
+             f"    total_{i} = pedido.subtotal * Decimal('0.{i:02d}') + pedido.frete  # ajuste {i}" for i in range(60)]
+    snippet = "\n".join(lines) + "\n"
+    with open(os.path.join(work, "frete.py"), "w", encoding="utf-8") as f: f.write(snippet)
+    intro = "Revisar o calculo do frete gratis: o arredondamento acontece antes do desconto."
+    env = dict(os.environ, A2A_HOME=home, PYTHONIOENCODING="utf-8")
+    def send(*args):
+        r = subprocess.run([sys.executable, A2A, "send", "--from", "claude", "--to", AGENT, "--no-auto-status", *args],
+                           capture_output=True, env=env, cwd=work)
+        assert r.returncode == 0, r.stderr; return r.stdout.decode().split()[1]
+    pasted = send("--body", intro + "\n" + snippet)
+    ref = send("--body", intro, "--file", "frete.py:1-60")
+    print(f"\nArquivo por referencia (trecho de 60 linhas, {len(snippet)} chars): saida do read --compact para quem recebe")
+    print(f"{'mensagem':<26} {'chars':>7} {'bytes':>7} {'tokens_est':>10} {'reducao':>8}")
+    rows = [(n, measure([("", a2a(home, "read", i, "--agent", AGENT, "--compact"))])) for n, i in
+            (("trecho colado no body", pasted), ("--file frete.py:1-60", ref))]
+    for name, r in rows:
+        red = f"{100 * (1 - r['tokens'] / rows[0][1]['tokens']):.1f}%" if r is not rows[0][1] else "-"
+        print(f"{name:<26} {r['chars']:>7} {r['bytes']:>7} {r['tokens']:>10} {red:>8}")
+
 def main():
     show = "--show" in sys.argv
     root = tempfile.mkdtemp(prefix="dove-measure-")
@@ -173,6 +198,7 @@ def main():
     print(f"  nao lidas: antes {len(ids)} ids; brief cita {sum(i in b for i in ids)} (as N + o ack contado em ACK, sem o id)")
     print(f"  tarefa aberta ja lida ({t_open}): antes {'aparece' if t_open in a_all else 'NAO aparece'}; brief {'aparece (T)' if t_open in b else 'nao aparece'}")
     print(f"  missoes: mission list mostra {antes[-1][1].count(chr(10))}; brief mostra {b.count(chr(10) + 'M ')} (so a que espera o aval de {AGENT})")
+    measure_files(root)
     if show:
         for title, outs in (("ANTES", antes), ("DEPOIS (+1 read)", depois_read), ("DEPOIS (+1 read --compact)", depois_compact[1:])):
             print(f"\n===== {title} =====")
