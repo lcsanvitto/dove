@@ -135,7 +135,10 @@ def measure(home, cold=False):
 def main():
     n = int(sys.argv[sys.argv.index("--n") + 1]) if "--n" in sys.argv else 2000
     root = tempfile.mkdtemp(prefix="dove-bus-"); home = os.path.join(root, "home"); seed_home(home, n)
-    t0 = time.perf_counter(); r = subprocess.run([sys.executable, "-c", "pass"]); py = time.perf_counter() - t0
+    ts = []
+    for _ in range(RUNS):
+        t0 = time.perf_counter(); cli(home, "--version"); ts.append(time.perf_counter() - t0)
+    py = statistics.median(ts)
     rows = []
     idx = has_cmd("index")
     if idx:
@@ -147,7 +150,7 @@ def main():
         out = cli(home, "archive", "--from", "luiz")
         rows.append(("depois do archive" + (" (indice quente)" if idx else ""), measure(home)))
         print("archive:", out.strip().splitlines()[0])
-    print(f"Bus: {n} mensagens, 3 agentes, 20 missoes. Mediana de {RUNS}. CLI inclui a partida do Python (~{py*1000:.0f} ms).")
+    print(f"Bus: {n} mensagens, 3 agentes, 20 missoes. Mediana de {RUNS}. CLI inclui a partida (a2a --version: {py*1000:.0f} ms).")
     print(f"{'fase':<34} {'bus':>5} {'brief':>8} {'summary':>8} {'inbox':>8} {'panel_state':>12} {'wait all_messages':>18}")
     for name, x in rows:
         print(f"{name:<34} {x['bus']:>5} {x['brief']*1000:>6.0f}ms {x['summary']*1000:>6.0f}ms {x['inbox']*1000:>6.0f}ms "

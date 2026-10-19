@@ -10,6 +10,7 @@ BUS, CURSOR, AGENTS, STATUS, MISSIONS = (os.path.join(HOME, d) for d in
                                          ("bus", "cursor", "agents", "status", "missions"))
 PROJECTS, CONFIG = os.path.join(HOME, "projects.json"), os.path.join(HOME, "config.json")
 ARCHIVE = os.path.join(HOME, "archive")  # archive/AAAA-MM/: fios encerrados movidos do bus (nunca apagados)
+INDEX = os.path.join(HOME, "index.json")  # cache do bus (o bus e a fonte da verdade): {"v","n","last","msgs"}
 UI_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ui", "index.html")
 STATES = ["AGUARDANDO_ACEITE","ACEITO","EM_EXECUCAO","BLOQUEADO",
           "AGUARDANDO_APROVACAO","EM_REVISAO","CONCLUIDO","CANCELADO"]
@@ -37,10 +38,10 @@ def read_json(p, default=None):
         try: return json.loads(raw.decode(enc) if enc else raw.decode())
         except (UnicodeDecodeError, ValueError): continue
     return default
-def write_json(p, obj):
+def write_json(p, obj, indent=2):
     """Grava atomico (tmp + replace) em UTF-8."""
     tmp = f"{p}.{os.getpid()}.{uuid.uuid4().hex[:6]}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f: json.dump(obj, f, ensure_ascii=False, indent=2)
+    with open(tmp, "w", encoding="utf-8") as f: json.dump(obj, f, ensure_ascii=False, indent=indent)
     delay = 0.02
     for i in range(10):  # Windows: replace falha se outro processo (ou o antivirus) esta com o arquivo aberto
         try: os.replace(tmp, p); return
@@ -48,7 +49,7 @@ def write_json(p, obj):
             if i == 9: break
             time.sleep(delay); delay = min(delay * 2, 0.5)
     try:  # ultimo recurso: grava por cima (nao atomico) em vez de derrubar a requisicao
-        with open(p, "w", encoding="utf-8") as f: json.dump(obj, f, ensure_ascii=False, indent=2)
+        with open(p, "w", encoding="utf-8") as f: json.dump(obj, f, ensure_ascii=False, indent=indent)
     except OSError as e:
         raise DoveError(f"nao consegui gravar {p} (arquivo em uso por outro programa/antivirus?): {e}")
     finally:
@@ -78,15 +79,54 @@ def load_seen(a):
     return set(v) if isinstance(v, list) else set()
 def mark_seen(a, mid):
     s = load_seen(a); s.add(mid); write_json(seen_path(a), sorted(s))
-def _chrono(f):  # ts do nome do arquivo; desempate pela ordem de escrita (mtime)
-    try: return (os.path.basename(f)[:16], os.path.getmtime(f))
-    except OSError: return (os.path.basename(f)[:16], 0)
+def _chrono(f):  # ts do nome do arquivo; desempate pela ordem de escrita (mtime) e, por ultimo, pelo nome
+    b = os.path.basename(f)
+    try: return (b[:16], os.path.getmtime(f), b)
+    except OSError: return (b[:16], 0, b)
 def bus_names(): return glob.glob(os.path.join(BUS, "*.json"))
 def bus_files(): return sorted(bus_names(), key=_chrono)
 def read_msg(f):
     m = read_json(f); return m if isinstance(m, dict) and "msg_id" in m else None
 def bus_entries(): return [(f, m) for f, m in ((f, read_msg(f)) for f in bus_files()) if m]
-def all_messages(): return [m for _, m in bus_entries()]
+# ---- indice (index.json): as mensagens do bus ja parseadas, em ordem. Vale enquanto n (arquivos no bus) e last (ultimo
+# arquivo na ordem do _chrono) batem com o bus; senao e refeito. Sem dados por agente (lidas vem do cursor/).
+def _last_name(names):
+    """Ultimo nome na ordem do _chrono, olhando a data de modificacao so dos que empatam no prefixo de data."""
+    if not names: return ""
+    top = max(n[:16] for n in names)
+    return max((n for n in names if n[:16] == top), key=lambda n: _chrono(os.path.join(BUS, n)))
+def load_index():
+    x = read_json(INDEX)
+    if not (isinstance(x, dict) and x.get("v") == 1 and isinstance(x.get("n"), int) and isinstance(x.get("last"), str)
+            and isinstance(x.get("msgs"), list)): return None
+    return x if all(isinstance(m, dict) and "msg_id" in m for m in x["msgs"]) else None
+def index_build(names=None):
+    files = sorted(bus_names() if names is None else names, key=_chrono)
+    return {"v": 1, "n": len(files), "last": os.path.basename(files[-1]) if files else "",
+            "msgs": [m for m in map(read_msg, files) if m]}
+def index_save(idx):
+    try: write_json(INDEX, idx, indent=None); return True
+    except (DoveError, OSError): return False  # sem indice tudo funciona igual (so mais devagar)
+def index_rebuild():
+    idx = index_build(); index_save(idx); return idx
+def index_append(fn, msg):
+    """Depois de gravar fn no bus: acrescenta msg ao indice se ele estava em dia e fn e o ultimo. Senao deixa como esta
+    (a proxima leitura refaz). Qualquer falha e silenciosa: o arquivo no bus e a fonte da verdade."""
+    try:
+        with FileLock(INDEX, timeout=1.0):
+            idx = load_index()
+            if not idx: return
+            names = [os.path.basename(f) for f in bus_names()]; others = [n for n in names if n != fn]
+            if fn not in names or idx["n"] != len(others) or idx["last"] != _last_name(others) or _last_name(names) != fn:
+                return
+            idx["msgs"].append(msg); idx.update(n=len(names), last=fn); index_save(idx)
+    except Exception: pass
+def all_messages():
+    names = bus_names()
+    idx = load_index()
+    if idx and idx["n"] == len(names) and idx["last"] == _last_name([os.path.basename(f) for f in names]): return idx["msgs"]
+    idx = index_build(names); index_save(idx)
+    return idx["msgs"]
 def bus_sig():
     """Assinatura barata do bus (muda quando entra ou sai arquivo)."""
     try: return (os.stat(BUS).st_mtime_ns, len(os.listdir(BUS)))
@@ -165,6 +205,7 @@ def post_message(_from, to, body, kind="task", project="", task="", reply_to="",
            "next_action": next_action or "", "body": body or ""}
     fn = f"{ts.replace(':','').replace('-','')}-{mid}.json"
     write_json(os.path.join(BUS, fn), msg)
+    index_append(fn, msg)
     mark_seen(_from, mid)
     if auto_status: touch_status(_from, MSG_TO_AGENT.get(state or ""), project)
     return msg
@@ -1377,6 +1418,7 @@ def archive_run(by, older_days=14, dry_run=False):
             if os.path.exists(to): continue  # nunca sobrescreve
             try: os.replace(f, to); moved += 1  # move (mantem mtime: a ordem volta igual no --restore)
             except OSError as e: log_err(f"aviso: nao movi {f}: {e}")
+        index_rebuild()
         if moved: bus_report("", f"{by} arquivou {moved} mensagens ({len(plan)} fios encerrados ha mais de {older_days:g} dias) "
                                  f"em archive/{month}/. Desfazer: a2a archive --from {by} --restore {month}")
     return {"plan": plan, "files": len(files), "moved": moved, "month": month}
@@ -1395,6 +1437,7 @@ def archive_restore(by, month=""):
             except OSError as e: log_err(f"aviso: nao restaurei {f}: {e}"); kept += 1
         try: os.rmdir(d)  # so remove a pasta do mes se ficou vazia
         except OSError: pass
+    index_rebuild()
     where = f"archive/{month}/" if month else "archive/"
     if moved: bus_report("", f"{by} restaurou {moved} mensagens de {where} para o bus")
     return {"moved": moved, "kept": kept, "where": where}
@@ -1414,6 +1457,31 @@ def cmd_archive(a):
                 print(f"  {t['msg_id']} ({len(fs)}): " + " ".join(read_msg(f)["msg_id"] for f in fs if read_msg(f)))
         else: print(f"arquivadas {r['moved']} mensagens ({k} fios) em {where}")
     except DoveError as e: fail(f"erro: {e}")
+
+def index_check():
+    """(ok, texto): compara o index.json com uma reconstrucao a partir do bus (sem gravar nada)."""
+    idx, ref = load_index(), index_build()
+    if idx is None:
+        return False, "divergente: index.json ausente ou ilegivel (" + ("existe" if os.path.exists(INDEX) else "nao existe") + ")"
+    if (idx["n"], idx["last"]) != (ref["n"], ref["last"]):
+        return False, (f"divergente: indice desatualizado (indice n={idx['n']} last={idx['last'] or '-'}; "
+                       f"bus n={ref['n']} last={ref['last'] or '-'})")
+    if idx["msgs"] != ref["msgs"]:
+        a, b = [m["msg_id"] for m in idx["msgs"]], [m["msg_id"] for m in ref["msgs"]]
+        diff = next((i for i, (x, y) in enumerate(zip(idx["msgs"], ref["msgs"])) if x != y), min(len(a), len(b)))
+        return False, (f"divergente: mensagens diferem (indice {len(a)}, bus {len(b)}; primeira diferenca na posicao {diff}: "
+                       f"{a[diff] if diff < len(a) else '-'} x {b[diff] if diff < len(b) else '-'})")
+    return True, f"ok ({len(ref['msgs'])} mensagens)"
+def cmd_index(a):
+    ensure_dirs()
+    if a.icmd == "rebuild":
+        idx = index_build(); ms = all_missions()
+        if not index_save(idx): fail(f"erro: nao consegui gravar {INDEX}")
+        print(f"indice reconstruido: {len(idx['msgs'])} mensagens, {len(open_tasks(idx['msgs']))} tarefas abertas, "
+              f"{len(ms)} missoes")
+    else:
+        ok, txt = index_check(); print(txt)
+        if not ok: sys.exit(1)
 
 # ---------------------------------------------------------------- painel web (app dove)
 TOKEN_GETS = ("/api/scan", "/api/doctor", "/api/fs/list", "/api/project/info", "/api/onboard", "/api/git/status", "/api/git/diff")
@@ -1943,6 +2011,14 @@ def build_parser():
     ar.add_argument("--restore", nargs="?", const="*", metavar="AAAA-MM",
                     help="devolve para o bus o que foi arquivado (tudo, ou so o mes AAAA-MM)")
     ar.set_defaults(func=cmd_archive)
+    ix = sub.add_parser("index", help="indice do bus (index.json): rebuild reconstroi, check compara com o bus",
+        description="~/.a2a/index.json guarda as mensagens do bus ja lidas, para os comandos nao relerem todos os arquivos. "
+        "E so cache: o bus/ e a fonte da verdade, e o indice e refeito sozinho quando falta, esta corrompido ou o bus mudou "
+        "por fora. check sai com codigo 1 se o indice diverge do bus.")
+    ixs = ix.add_subparsers(dest="icmd", required=True)
+    ixs.add_parser("rebuild", help="reconstroi o indice a partir do bus/")
+    ixs.add_parser("check", help="compara o indice com o bus/ (sai 1 se divergir)")
+    ix.set_defaults(func=cmd_index)
     o = sub.add_parser("onboard", help="imprime as instrucoes do canal para um agente ou para o AGENTS.md")
     og = o.add_mutually_exclusive_group(required=True)
     og.add_argument("--agent"); og.add_argument("--agents-md", dest="agents_md", action="store_true")

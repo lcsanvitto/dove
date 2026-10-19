@@ -1340,6 +1340,89 @@ def archive_fase():
     assert not [x for x in os.listdir(os.path.join(tmp, "archive"))], os.listdir(os.path.join(tmp, "archive"))
     print("OK: archive (so o humano, dry-run nao move, abertos/recentes/nao lidos/missao pendente ficam, read acha arquivada, restore volta byte a byte)")
 
+INDEX_PROBE = r"""
+import json, sys
+sys.path.insert(0, sys.argv[1]); import a2a
+reads = {"n": 0}; orig = a2a.read_msg
+def counted(f):
+    reads["n"] += 1; return orig(f)
+a2a.read_msg = counted
+st = a2a.panel_state(); st.pop("generated")
+for x in st["agents"]: x.pop("age")  # depende do relogio
+print(json.dumps({"state": st, "reads": reads["n"]}, sort_keys=True))
+"""
+
+def index_fase():
+    """index.json (item 5): mesmas saidas com e sem indice num bus de 2.000, corrompido e ignorado e refeito,
+    arquivo jogado direto no bus aparece, index check ok depois de send/ack/missao/archive/restore."""
+    sys.path.insert(0, str(ROOT / "tests")); import measure_bus
+    tmp = tempfile.mkdtemp(); env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8")
+    measure_bus.seed_home(tmp, 2000)
+    idx = os.path.join(tmp, "index.json")
+    cmds = ("summary", "brief --agent codex --no-auto-status", "brief --agent hermes --limit 0 --no-auto-status",
+            "inbox --agent codex --no-auto-status", "inbox --agent claude --no-auto-status", "log --limit 3000", "mission list")
+    def outs(): return {c: run(env, *c.split()).stdout for c in cmds}
+    def state():
+        r = subprocess.run([sys.executable, "-c", INDEX_PROBE, str(ROOT)], capture_output=True, text=True, env=env)
+        assert r.returncode == 0, r.stderr
+        return json.loads(r.stdout)
+    def drop():
+        if os.path.exists(idx): os.remove(idx)
+    drop(); cold_state = state()  # sem indice: le todos os arquivos (e grava o indice)
+    assert cold_state["reads"] >= 2000 and os.path.exists(idx), cold_state["reads"]
+    warm_state = state()
+    assert warm_state["reads"] == 0 and warm_state["state"] == cold_state["state"], "indice quente: nenhum arquivo do bus lido"
+    ref = {}
+    for c in cmds: drop(); ref[c] = run(env, *c.split()).stdout  # cada comando sem indice
+    assert outs() == ref, "com indice as saidas sao iguais"
+    assert all(ref[c] for c in cmds)
+    # indice corrompido/estranho: ignorado e refeito, sem efeito visivel
+    for junk in (b"{nao e json", b"", b'{"v": 2, "n": 1, "last": "", "msgs": []}', b'{"v":1,"n":"x","last":"","msgs":[]}',
+                 b'[1, 2]', json.dumps({"v": 1, "n": 2000, "last": "zz", "msgs": [{"x": 1}]}).encode()):
+        with open(idx, "wb") as f: f.write(junk)
+        assert run(env, "summary").stdout == ref["summary"], junk
+        assert json.load(open(idx, encoding="utf-8"))["n"] == 2000, junk
+    with open(idx, "wb") as f: f.write(b"\x00\xff garbage")
+    assert state()["state"] == cold_state["state"]
+    r = run(env, "index", "check"); assert r.returncode == 0 and r.stdout.startswith("ok (2000 mensagens)"), r.stdout
+    # arquivo jogado direto no bus (a2a antigo): aparece na chamada seguinte
+    m = {"data": "2026-10-19T00:00:00Z", "task_id": "", "msg_id": "direto000001", "from": "hermes", "to": "codex", "project": "lagu",
+         "in_reply_to": "", "kind": "question", "state": "", "result": "", "evidence": "", "pending": "", "next_action": "",
+         "body": "escrito direto no bus"}
+    with open(os.path.join(tmp, "bus", "20261019T000000Z-direto000001.json"), "w") as f: json.dump(m, f)
+    r = run(env, "index", "check"); assert r.returncode == 1 and "desatualizado" in r.stdout, r.stdout
+    assert "escrito direto no bus" in run(env, "inbox", "--agent", "codex", "--no-auto-status").stdout
+    assert run(env, "index", "check").returncode == 0
+    # send acrescenta ao indice sem precisar refazer; check ok depois de send/ack/missao/archive/restore
+    n0 = json.load(open(idx))["n"]
+    r = run(env, "send", "--from", "claude", "--to", "codex", "--project", "lagu", "--body", "novo", "--no-auto-status")
+    mid = r.stdout.split()[1]; j = json.load(open(idx))
+    assert j["n"] == n0 + 1 and j["msgs"][-1]["msg_id"] == mid and j["last"].endswith(mid + ".json"), j["last"]
+    steps = (("ack", mid, "--from", "codex", "--no-auto-status"),
+             ("mission", "new", "--project", "lagu", "--title", "idx", "--agents", "codex,hermes", "--from", "luiz"),
+             ("archive", "--from", "luiz"), ("send", "--from", "hermes", "--to", "all", "--body", "depois do archive"),
+             ("archive", "--from", "luiz", "--restore"), ("send", "--from", "codex", "--to", "luiz", "--body", "fim",
+             "--state", "CONCLUIDO", "--reply-to", mid))
+    for st in steps:
+        r = run(env, *st); assert r.returncode == 0, (st, r.stderr)
+        if st[0] == "mission" and st[1] == "new":
+            mm = re.search(r"missao (\w+) criada", r.stdout).group(1)
+            assert run(env, "mission", "approve", mm, "--agent", "codex", "--evidence", "ok").returncode == 0
+        c = run(env, "index", "check"); assert c.returncode == 0, (st, c.stdout)
+    # indice adulterado com n/last certos: so o check percebe
+    j = json.load(open(idx)); j["msgs"][5]["body"] = "adulterado"
+    with open(idx, "w") as f: json.dump(j, f)
+    c = run(env, "index", "check"); assert c.returncode == 1 and "mensagens diferem" in c.stdout, c.stdout
+    r = run(env, "index", "rebuild"); assert r.returncode == 0 and r.stdout.startswith("indice reconstruido: "), r.stdout
+    assert run(env, "index", "check").returncode == 0
+    # indice que nao da para gravar: tudo funciona igual
+    os.remove(idx); os.mkdir(idx)
+    assert run(env, "summary").stdout == run(env, "summary").stdout and run(env, "summary").returncode == 0
+    r = run(env, "send", "--from", "claude", "--to", "codex", "--body", "sem indice", "--no-auto-status")
+    assert r.returncode == 0 and "sem indice" in run(env, "inbox", "--agent", "codex", "--no-auto-status").stdout
+    os.rmdir(idx)
+    print("OK: index.json (2.000 msgs iguais com/sem indice, painel sem ler o bus, corrompido refeito, arquivo direto aparece, check apos send/ack/missao/archive/restore)")
+
 if __name__ == "__main__":
     main()
     fase1()
@@ -1350,3 +1433,4 @@ if __name__ == "__main__":
     compact_fase()
     wait_fase()
     archive_fase()
+    index_fase()

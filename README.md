@@ -17,6 +17,7 @@ Não fica dentro de um projeto. Fica na sua pasta de usuário, acima de todos os
   status/          ← estado de cada agente (modo herdr, contexto %)
   missions/        ← missões com aval de todos os agentes
   archive/AAAA-MM/ ← conversas encerradas que você arquivou (a2a archive), intactas
+  index.json       ← cache das mensagens do bus (a2a index); pode apagar, é refeito sozinho
   projects.json    ← projetos registrados (sidebar do dove)
   config.json      ← preferências (ex.: última pasta raiz do "Descobrir projetos")
 ```
@@ -317,6 +318,16 @@ a2a archive --from luiz --restore [2026-10]       # devolve tudo (ou só um mês
 - Missões (`missions/`) não mudam. `a2a read <id>` (e `--compact`) continua achando a mensagem arquivada. O resto (`inbox`, `brief`, `summary`, `log`, `wait`, o painel) só vê o `bus/`: no painel, `messages_total` e **Carregar mais antigas** não contam as mensagens arquivadas.
 - `--restore` devolve os arquivos com a mesma data de modificação, então a ordem e as saídas voltam iguais às de antes de arquivar.
 
+## Índice do bus (`index.json`)
+Para não reler e parsear cada arquivo do `bus/` a cada comando (e a cada 3s no painel), o Dove guarda as mensagens já lidas em `~/.a2a/index.json`: `{"v": 1, "n": <arquivos no bus>, "last": <último arquivo>, "msgs": [...]}`, na mesma ordem do `bus/`.
+- É só cache: o `bus/` continua sendo a fonte da verdade. Se `n` ou `last` não batem com o `bus/` (mensagem gravada por um `a2a` antigo, arquivo copiado à mão, `archive`), se o arquivo falta ou está corrompido, o índice é refeito na hora, sem nenhuma diferença na saída. Pode apagar quando quiser.
+- O `send` (e tudo que grava mensagem: `ack`, missões, painel) acrescenta a mensagem ao índice, com trava, depois de gravar o arquivo no `bus/`; se a trava ou o índice falharem, segue sem ele.
+- Não guarda nada por agente: o que cada um já leu continua em `cursor/`.
+```
+a2a index rebuild   # "indice reconstruido: 2000 mensagens, 37 tarefas abertas, 20 missoes"
+a2a index check     # "ok (2000 mensagens)" ou "divergente: ..." (código de saída 1)
+```
+
 ## Comandos
 | Comando | O que faz |
 |---|---|
@@ -350,6 +361,7 @@ a2a archive --from luiz --restore [2026-10]       # devolve tudo (ou só um mês
 | `summary [--project P]` | "onde estamos": tarefas abertas, bloqueios, contexto alto, missões |
 | `archive --from luiz [--older-than-days 14] [--dry-run]` | move conversas encerradas, lidas e antigas do `bus/` para `archive/AAAA-MM/` (só o humano) |
 | `archive --from luiz --restore [AAAA-MM]` | devolve para o `bus/` o que foi arquivado (tudo ou um mês) |
+| `index rebuild` · `index check` | reconstrói o `index.json` a partir do `bus/` / compara os dois (sai 1 se divergem) |
 | `worktree list [--project P]` | cópias de trabalho dos agentes |
 | `worktree create\|merge\|sync\|remove --project P --agent A --from luiz` | cria / traz para sua branch / atualiza / remove a cópia do agente (só o humano) |
 | `git status --project P [--agent A]` | status git do projeto ou da cópia do agente |
@@ -385,7 +397,7 @@ Regras: não responda ack/próprias msgs (anti-loop); sempre --reply-to; nunca a
 ```
 python tests/test_a2a.py
 python tests/measure_brief.py   # quanto texto o agente le para se atualizar (antes/depois do brief)
-python tests/measure_bus.py     # tempo de brief/summary/inbox/painel com um bus de 2.000 mensagens
+python tests/measure_bus.py     # tempo de brief/summary/inbox/painel com um bus de 2.000 mensagens (com/sem indice, antes/depois do archive)
 ```
 
 ## Próximos passos (ideias)
