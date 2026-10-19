@@ -7,43 +7,43 @@ Para uma sessão nova retomar sem reexplicar nada. Estado detalhado: [`docs/ROAD
 - Usuário: Luiz, no Windows (`C:\Users\Dell`); projetos em `C:\Users\Dell\Cowork\Codigo` (ex.: `lagu`).
 - Também usa uma VPS Ubuntu 24.04 e uma máquina com Omarchy (canal entre máquinas ainda não existe).
 - Agentes no canal: `claude` (Claude Code), `codex` (Codex), `hermes` (Hermes).
-- Fase atual: Fase 3 (orquestrador/vigia). Feitos 0+1, 2, 3 (75c979d), 4, 5, 6, 8 (7fca4c3), 10, 13; 7 bloqueado — aguardando decisão do Luiz; 9 e 11 dependem do 7; 12 aceito com risco (desligado por padrão). Aprovados em 2026-10-19: 14 (`assignee`, antes do 7) e 15 (`parent`, junto com o 11). Ordem: 14 → 7 → (9, 11 + 15).
+- Fase atual: Fase 3 (orquestrador/vigia). Feitos 0+1, 2, 3 (75c979d), 4, 5, 6, 7 (396cfd5), 8 (7fca4c3), 10, 13; 9 e 11 livres pra seguir (dependiam só do 7); 12 aceito com risco (desligado por padrão). Aprovados em 2026-10-19: 14 (`assignee`) e 15 (`parent`, junto com o 11). O 7 foi feito **sem** esperar o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora") — hoje acorda todos os participantes, não só o `assignee`; o 14 entra depois como emenda ao 7.
 
 ## Regras do projeto
 - Só stdlib.
 - **NÃO mexer em `ui/`**: parte visual pausada; o Claude Design cuida só da estética, quando o Luiz retomar.
 - `DOVE_VERSION` fica `"0.6.0"` enquanto a UI estiver pausada (a UI compara a versão exata e mostra a faixa "servidor desatualizado").
 - Comportamento existente não muda sem aval do Luiz.
-- Tudo que executa agentes, gasta dinheiro, muda o envelope ou o `~/.a2a` precisa de aval do Luiz. Já aprovados: etapas 0–11 da Fase 3; a 12 com risco aceito pelo Luiz em 2026-10-19 (desligada por padrão, opt-in explícito). A 7 aguarda decisão do Luiz antes de começar; a 14 (`assignee`) e a 15 (`parent`) foram aprovadas em 2026-10-19 (14 antes da 7; 15 junto com a 11).
+- Tudo que executa agentes, gasta dinheiro, muda o envelope ou o `~/.a2a` precisa de aval do Luiz. Já aprovados: etapas 0–11 da Fase 3; a 12 com risco aceito pelo Luiz em 2026-10-19 (desligada por padrão, opt-in explícito). A 7 está feita (396cfd5); a 14 (`assignee`) e a 15 (`parent`) foram aprovadas em 2026-10-19 (14 como emenda ao 7, não mais pré-requisito; 15 junto com a 11).
 - Workers trabalham em worktrees `/home/user/dove-wt/<nome>` com branch própria; rebase só dos próprios commits; rodar os testes completos (`python3 tests/test_a2a.py`); push em `main` sem force.
 - Commits terminam com as linhas `Co-Authored-By:` / `Claude-Session:` usadas no repo.
 
 ## Próximos passos
 
-**Etapa 14 — `assignee`** · aprovada (Luiz, 2026-10-19: "sim") · **pré-requisito da etapa 7** (fazer antes)
-- Campo opcional `assignee` em missões e tarefas: um único agente responsável.
-- Só o `assignee` marca `EM_EXECUCAO` ou `AGUARDANDO_APROVACAO`; os demais participantes só comentam ou revisam.
-- O vigia (etapa 7) acorda só o `assignee`, não todos os participantes (menos gasto, menos risco de loop, dono claro). A especificação da etapa 7 abaixo não muda.
-- Sem o campo, nada muda no comportamento atual.
-
-**Etapa 7 — vigia real, só Claude, `a2a watch --once` iniciado à mão** · bloqueado — aguardando decisão do Luiz
-- Usa `watch_plan()` (etapa 3) + `run_agent()`/`resolve_runner()` (etapa 6); plugar `WATCH_RUNNERS` em `real_runner_argv()`.
+**Etapa 7 — vigia real, só Claude, `a2a watch --once` iniciado à mão** · **FEITO** · 396cfd5
+- Usa `watch_plan()` (etapa 3) + `run_agent()`/`resolve_runner()` (etapa 6); `WATCH_RUNNERS["claude"]["argv"]` plugado em `real_runner_argv()`.
 - Linha de comando do claude: `-p --output-format stream-json --verbose --permission-mode dontAsk --permission-prompts none --allowedTools <tabela> --max-turns N --max-budget-usd <run_budget_cap()> --session-id <run_id>`.
 - cwd = cópia de trabalho do agente; prompt de `a2a prompt` via stdin; env `A2A_RUNNER` e `A2A_RUN_ID`.
-- Gravar `"mission"` e `"usage_file"` (Hermes) nos registros de run.
-- Chamar `parse_run_usage()` (etapa 8, já no `main`) logo depois de `run_agent()`.
-- `--max-budget-usd` vem de `run_budget_cap()`; se `budget_status()['exceeded']`, recusar o run.
-- Ajustar `loop_runs()` para **não** contar runs `refused` como "já acionados".
+- `"mission"` e `"usage_file"` (Hermes) gravados nos registros de run; `parse_run_usage()` chamado logo depois de `run_agent()`.
+- `--max-budget-usd` vem de `run_budget_cap()`; se `budget_status()['exceeded']`, o run é recusado (`outcome: "refused"`, log em `budget_alerts.json`).
+- `loop_runs()` não conta runs `refused` como "já acionados".
+- Só acorda por conversas iniciadas pelo humano (`a2a watch --once --from <human>`). Sem `--bare` (usa a assinatura).
+- Testado só com executor falso (valida a linha de comando exata); **falta o teste manual acompanhado pelo Luiz com o `claude` real** — esse é o gate real antes de automatizar o disparo.
+- **Gap conhecido**: acorda todos os participantes elegíveis, não só um responsável único — isso só muda quando a etapa 14 (`assignee`) entrar (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora").
 - Falta fazer: a pergunta única ao `luiz` quando o gasto chegar a 80%.
-- Só acorda por conversas iniciadas pelo humano. Sem `--bare` (usa a assinatura).
-- Teste: executor falso valida a linha de comando exata; teste manual acompanhado pelo Luiz.
 
-**Etapa 9 — Codex no vigia** (depende da 7)
+**Etapa 14 — `assignee`** · aprovada (Luiz, 2026-10-19: "sim") · agora é uma **emenda à etapa 7** (não mais pré-requisito; a 7 já foi feita sem ela)
+- Campo opcional `assignee` em missões e tarefas: um único agente responsável.
+- Só o `assignee` marca `EM_EXECUCAO` ou `AGUARDANDO_APROVACAO`; os demais participantes só comentam ou revisam.
+- Quando entrar, o vigia (etapa 7) passa a acordar só o `assignee`, não todos os participantes (menos gasto, menos risco de loop, dono claro).
+- Sem o campo, nada muda no comportamento atual.
+
+**Etapa 9 — Codex no vigia** (a 7 já está feita, pode seguir)
 - `codex exec --json -s workspace-write -C <cópia> --add-dir <A2A_HOME> -`.
 - Exige `[windows] sandbox` configurado (verificado pelo `watch check`).
 - O Codex não consegue commitar na cópia (gitdir read-only): entrega mudanças sem commit e reporta no canal.
 
-**Etapa 11 — orquestrador** (depende da 7)
+**Etapa 11 — orquestrador** (a 7 já está feita, pode seguir)
 - Só ferramentas de leitura + `a2a send/brief/read/status/fact`.
 - A recusa por `A2A_RUNNER` já protege as ações humanas.
 - Tique só quando o bus muda; entra nos tetos globais de `a2a loops`.
@@ -84,6 +84,7 @@ dove   # painel
 - Hermes no vigia: risco aceito pelo Luiz (2026-10-19); desligado por padrão, opt-in explícito.
 - TOON, memória vetorial/GraphRAG, SupervisorAgent e mcp-compressor não adotados.
 - `assignee` (14) e `parent` (15) aprovados pelo Luiz em 2026-10-19 ("sim"). Descartados: prioridade, tags, dependências entre tarefas e qualquer coisa que o agente já leia no texto da missão.
+- Etapa 7 comitada sem esperar a 14 (Luiz, 2026-10-19: "Comitar a 7 como está agora"): o vigia acorda todos os participantes elegíveis até a 14 entrar como emenda.
 
 ## Onde estão as coisas
 - Propostas: `docs/propostas/`.

@@ -2,7 +2,7 @@
 
 > **Sessão nova? Comece por [`docs/HANDOFF.md`](HANDOFF.md)** — contexto, regras e próximos passos para retomar sem reexplicar.
 
-Estado em 2026-10-19 · base `main` em 7fca4c3.
+Estado em 2026-10-19 · base `main` em 396cfd5.
 
 ## 1. O que é o Dove
 Canal A2A local e global: os agentes (`claude`, `codex`, `hermes`) conversam e dividem trabalho por arquivos JSON em `~/.a2a`, sem nuvem.
@@ -55,22 +55,22 @@ Todos os passos têm aval do Luiz; o 12 foi aceito com risco em 2026-10-19 (desl
 | 4 | `a2a cost` (lê os registros do Claude/Codex/Hermes, só leitura) | **FEITO** · 247ef1f |
 | 5 | `a2a watch check` | **FEITO** · 37be0d7 |
 | 6 | Supervisor: `STOP`, travas, timeout, Job Object | **FEITO** · 81a0e14 |
-| 7 | Vigia real, só com o `claude`, iniciado à mão | **bloqueado — aguardando decisão do Luiz** |
+| 7 | Vigia real, só com o `claude`, iniciado à mão | **FEITO** · 396cfd5 (falta o filtro por `assignee` quando o passo 14 entrar) |
 | 8 | Orçamento: `parse_run_usage`, `run_budget_cap`, `budget_status`, `budget_alerts`, `a2a mission budget`, `a2a cost budget`/`--budget`, `budgets.json`, `a2a watch usage` | **FEITO** · 7fca4c3 |
-| 9 | Codex no vigia (sandbox do Windows; sem commit) | próximo (aprovado) · depende do 7 |
+| 9 | Codex no vigia (sandbox do Windows; sem commit) | próximo (aprovado) · 7 feito |
 | 10 | `a2a models` (roteamento de modelo) | **FEITO** · 97ce044 |
-| 11 | Orquestrador (só leitura + mensagens) | próximo (aprovado) · depende do 7 |
+| 11 | Orquestrador (só leitura + mensagens) | próximo (aprovado) · 7 feito, depende também do 15 |
 | 12 | Hermes no vigia | **APROVADO COM RISCO** (Luiz, 2026-10-19: "quero arriscar"): desligado por padrão, só com opt-in explícito |
 | 13 | Política de subagentes | **FEITO** · 898c637 (+ c65d148 teste determinístico) |
 | 14 | `assignee` (responsável único) em missões e tarefas | **APROVADO** (Luiz, 2026-10-19: "sim") · **pré-requisito do passo 7** (entra antes dele) |
 | 15 | `parent` (missão-mãe) em missões | **APROVADO** (Luiz, 2026-10-19: "sim") · entra junto com o 11, depois do 7 |
 
-Ordem de dependência: **14 → 7 → (9, 11 + 15)**.
+Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"). Hoje o vigia acorda **todos** os participantes elegíveis, não só o `assignee`. Quando o 14 entrar, vira uma emenda no 7 (filtro por `assignee`), não mais um pré-requisito. Os passos 9 e 11 seguem livres para usar a 7 atual.
 
-**Passo 14 — `assignee`** (pré-requisito do 7; a especificação do passo 7 continua como está):
+**Passo 14 — `assignee`** (agora uma emenda ao 7, não mais pré-requisito dele):
 - Campo opcional `assignee` em missões e tarefas: um único agente responsável.
 - Regra: só o `assignee` marca `EM_EXECUCAO` ou `AGUARDANDO_APROVACAO`; os demais participantes só comentam ou revisam.
-- O vigia (passo 7) acorda só o `assignee`, não todos os participantes: menos gasto, menos risco de loop, dono claro.
+- Quando entrar, o vigia (passo 7) passa a acordar só o `assignee`, não todos os participantes: menos gasto, menos risco de loop, dono claro.
 - Sem o campo, tudo se comporta exatamente como hoje (nenhuma mudança de comportamento).
 
 **Passo 15 — `parent`** (junto com o 11, depois do 7):
@@ -79,12 +79,13 @@ Ordem de dependência: **14 → 7 → (9, 11 + 15)**.
 - A mãe só fecha quando todas as filhas estiverem `CONCLUIDO` ou `CANCELADO`; fechar continua só humano (`require_human`).
 - **Sem** automação de propagação de estado e **sem** UI de árvore.
 
-**Nota para quem implementar o passo 7** (o orçamento do passo 8 já existe, falta ligar no executor):
-- Gravar `"mission"` e `"usage_file"` (Hermes) nos registros de run.
-- Chamar `parse_run_usage()` logo depois de `run_agent()`.
-- Usar `run_budget_cap()` em `--max-budget-usd` e `budget_status()['exceeded']` para recusar o run.
-- `loop_runs()` não pode contar runs recusados.
-- Falta fazer: a pergunta única ao `luiz` quando o gasto chegar a 80%.
+**Nota do passo 7 (implementado em 396cfd5)**:
+- `"mission"` e `"usage_file"` (Hermes) gravados nos registros de run.
+- `parse_run_usage()` chamado logo depois de `run_agent()`.
+- `run_budget_cap()` em `--max-budget-usd` e `budget_status()['exceeded']` recusam o run (`budget_alerts.json`).
+- `loop_runs()` não conta runs `refused`.
+- Ainda falta: filtro por `assignee` (passo 14, ver acima) e a pergunta única ao `luiz` quando o gasto chegar a 80%.
+- Testado só com executor falso (`claude` fake); o teste manual acompanhado pelo Luiz com o `claude` real continua pendente.
 
 ## 5. Decisões
 **Tomadas**
@@ -101,7 +102,8 @@ Ordem de dependência: **14 → 7 → (9, 11 + 15)**.
 - **Descartados** explicitamente: prioridade, tags, dependências entre tarefas e qualquer coisa que o agente já leia no texto da missão.
 
 **Pendentes**
-- Executor real do vigia (passo 7) — decisão do Luiz; os passos 9 e 11 dependem dele. O passo 14 (`assignee`) entra antes do 7.
+- Teste manual do vigia (passo 7) com o `claude` real, acompanhado pelo Luiz (os testes automáticos usam executor falso).
+- Passo 14 (`assignee`): quando entrar, emenda o passo 7 para acordar só o `assignee`.
 
 ## 6. Depois da Fase 3
 - Canal entre máquinas: VPS Ubuntu 24.04 + Omarchy + Windows.
