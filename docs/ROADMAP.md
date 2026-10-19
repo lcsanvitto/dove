@@ -2,7 +2,7 @@
 
 > **Sessão nova? Comece por [`docs/HANDOFF.md`](HANDOFF.md)** — contexto, regras e próximos passos para retomar sem reexplicar.
 
-Estado em 2026-10-19 · base `main` em 96e904c.
+Estado em 2026-10-19 · base `main` em f95a7b0.
 
 ## 1. O que é o Dove
 Canal A2A local e global: os agentes (`claude`, `codex`, `hermes`) conversam e dividem trabalho por arquivos JSON em `~/.a2a`, sem nuvem.
@@ -45,7 +45,7 @@ Só a stdlib do Python; funciona no Windows, no Linux e no macOS.
 
 ## 4. Em andamento — Fase 3 (orquestrador)
 Proposta: `docs/propostas/2026-10-19-fase3-orquestrador.md` no branch `proposta/fase3-orquestrador`.
-Todos os passos têm aval do Luiz; o 12 foi aceito com risco em 2026-10-19 (desligado por padrão).
+Todos os passos têm aval do Luiz; o 12 foi aceito com risco em 2026-10-19 (desligado por padrão, opt-in explícito).
 
 | Passo | Item | Estado |
 |---|---|---|
@@ -60,12 +60,12 @@ Todos os passos têm aval do Luiz; o 12 foi aceito com risco em 2026-10-19 (desl
 | 9 | Codex no vigia (sandbox do Windows; sem commit) | **FEITO** · 96e904c |
 | 10 | `a2a models` (roteamento de modelo) | **FEITO** · 97ce044 |
 | 11 | Orquestrador (só leitura + mensagens) | próximo (aprovado) · 7 feito, depende também do 15 |
-| 12 | Hermes no vigia | **APROVADO COM RISCO** (Luiz, 2026-10-19: "quero arriscar"): desligado por padrão, só com opt-in explícito |
+| 12 | Hermes no vigia (opt-in) | **FEITO** · f95a7b0 (risco aceito pelo Luiz, 2026-10-19: "quero arriscar"; desligado por padrão) |
 | 13 | Política de subagentes | **FEITO** · 898c637 (+ c65d148 teste determinístico) |
 | 14 | `assignee` (responsável único) em missões e tarefas | **FEITO** · 38d8b13 (emenda ao passo 7) |
 | 15 | `parent` (missão-mãe) em missões | **APROVADO** (Luiz, 2026-10-19: "sim") · entra junto com o 11, depois do 7 |
 
-Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"). O passo 14 entrou depois (38d8b13) como **emenda** ao 7, não como pré-requisito: hoje o vigia acorda **só o `assignee`** quando ele está definido numa missão ou tarefa; sem o campo, continua acordando todo participante elegível, como antes. O passo 9 (96e904c) já usou a 7 atual para liberar o codex. O passo 11 segue livre para usar a 7 atual (depende também do 15).
+Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"). O passo 14 entrou depois (38d8b13) como **emenda** ao 7, não como pré-requisito: hoje o vigia acorda **só o `assignee`** quando ele está definido numa missão ou tarefa; sem o campo, continua acordando todo participante elegível, como antes. O passo 9 (96e904c) já usou a 7 atual para liberar o codex. O passo 12 (f95a7b0) acrescentou o opt-in do hermes, independente dos demais. O passo 11 segue livre para usar a 7 atual (depende também do 15).
 
 **Passo 9 — Codex no vigia** (**FEITO**, 96e904c):
 - `codex exec --json -s workspace-write -C <cópia> --add-dir <A2A_HOME> -` (já estava na tabela desde a etapa 7; só faltava liberar o gatilho).
@@ -77,6 +77,12 @@ Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** 
 - Campo opcional `assignee` em missões (`a2a mission new --assignee`) e tarefas avulsas (`a2a send --kind task --assignee`): um único agente responsável, precisa ser participante registrado (nunca o humano, nunca reservado).
 - Só o `assignee` marca `EM_EXECUCAO` ou `AGUARDANDO_APROVACAO` (por `--task` ou por `--reply-to`); os demais participantes seguem comentando/revisando — outros estados e `mission approve`/`reject` continuam livres. O humano está sempre isento da restrição.
 - O vigia (passo 7) já acorda só o `assignee` quando definido (`watch_plan`, e portanto também `watch --once`); sem o campo, tudo se comporta exatamente como antes (nenhuma mudança de comportamento).
+
+**Passo 12 — Hermes no vigia (opt-in)** (**FEITO**, f95a7b0):
+- `hermes_enabled()`/`hermes_opt_in()`/`agent_enabled()`: chave `hermes_enabled` em `~/.a2a/config.json`; liga/desliga só com `a2a watch hermes --enable|--disable --from <humano>` (`require_human`: nunca sob `A2A_RUNNER`, nenhum agente se auto-habilita).
+- `watch_disabled()` e `_watch_exe()` usam `agent_enabled()` só para o hermes; os demais agentes (claude, codex) não mudam.
+- Desligado por padrão: sem sandbox de SO (`approvals.mode` do hermes só reduz o risco), risco aceito pelo Luiz em 2026-10-19 ("quero arriscar"), por isso opt-in explícito em vez de automático.
+- `a2a watch check` mostra se está ligado por opt-in ou desabilitado (com o comando para habilitar).
 
 **Passo 15 — `parent`** (junto com o 11, depois do 7):
 - Campo opcional `parent` em missões: id da missão-mãe.
@@ -101,7 +107,7 @@ Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** 
 - Hermes não recebe instruções globais por padrão (o `SOUL.md` dele é persona).
 - Parte visual pausada. O backend já está pronto para: aba Git, cópias de trabalho, memória e custo.
 
-- Hermes no vigia (passo 12): o Luiz aceitou o risco em 2026-10-19 ("quero arriscar"); desligado por padrão, exige opt-in explícito.
+- Hermes no vigia (passo 12, **FEITO**, f95a7b0): o Luiz aceitou o risco em 2026-10-19 ("quero arriscar"); desligado por padrão, liga só com `a2a watch hermes --enable --from <humano>`.
 
 - `assignee` (passo 14) e `parent` (passo 15): aprovados pelo Luiz em 2026-10-19 ("sim"), nos termos acima.
 - **Descartados** explicitamente: prioridade, tags, dependências entre tarefas e qualquer coisa que o agente já leia no texto da missão.
