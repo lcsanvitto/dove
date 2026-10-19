@@ -7,40 +7,43 @@ Para uma sessão nova retomar sem reexplicar nada. Estado detalhado: [`docs/ROAD
 - Usuário: Luiz, no Windows (`C:\Users\Dell`); projetos em `C:\Users\Dell\Cowork\Codigo` (ex.: `lagu`).
 - Também usa uma VPS Ubuntu 24.04 e uma máquina com Omarchy (canal entre máquinas ainda não existe).
 - Agentes no canal: `claude` (Claude Code), `codex` (Codex), `hermes` (Hermes).
-- Fase atual: Fase 3 (orquestrador/vigia). Feitos 0+1, 2, 4, 5, 6, 10, 13; em andamento 3 e 8; próximos 7, 9, 11; 12 pendente.
+- Fase atual: Fase 3 (orquestrador/vigia). Feitos 0+1, 2, 3 (75c979d), 4, 5, 6, 8 (7fca4c3), 10, 13; 7 bloqueado — aguardando decisão do Luiz; 9 e 11 dependem do 7; 12 aceito com risco (desligado por padrão).
 
 ## Regras do projeto
 - Só stdlib.
 - **NÃO mexer em `ui/`**: parte visual pausada; o Claude Design cuida só da estética, quando o Luiz retomar.
 - `DOVE_VERSION` fica `"0.6.0"` enquanto a UI estiver pausada (a UI compara a versão exata e mostra a faixa "servidor desatualizado").
 - Comportamento existente não muda sem aval do Luiz.
-- Tudo que executa agentes, gasta dinheiro, muda o envelope ou o `~/.a2a` precisa de aval do Luiz. Já aprovados: etapas 0–11 da Fase 3 (a 12 não).
+- Tudo que executa agentes, gasta dinheiro, muda o envelope ou o `~/.a2a` precisa de aval do Luiz. Já aprovados: etapas 0–11 da Fase 3; a 12 com risco aceito pelo Luiz em 2026-10-19 (desligada por padrão, opt-in explícito). A 7 aguarda decisão do Luiz antes de começar.
 - Workers trabalham em worktrees `/home/user/dove-wt/<nome>` com branch própria; rebase só dos próprios commits; rodar os testes completos (`python3 tests/test_a2a.py`); push em `main` sem force.
 - Commits terminam com as linhas `Co-Authored-By:` / `Claude-Session:` usadas no repo.
 
 ## Próximos passos
 
-**Etapa 7 — vigia real, só Claude, `a2a watch --once` iniciado à mão**
+**Etapa 7 — vigia real, só Claude, `a2a watch --once` iniciado à mão** · bloqueado — aguardando decisão do Luiz
 - Usa `watch_plan()` (etapa 3) + `run_agent()`/`resolve_runner()` (etapa 6); plugar `WATCH_RUNNERS` em `real_runner_argv()`.
 - Linha de comando do claude: `-p --output-format stream-json --verbose --permission-mode dontAsk --permission-prompts none --allowedTools <tabela> --max-turns N --max-budget-usd <run_budget_cap()> --session-id <run_id>`.
 - cwd = cópia de trabalho do agente; prompt de `a2a prompt` via stdin; env `A2A_RUNNER` e `A2A_RUN_ID`.
-- Depois de rodar, `parse_run_usage()` (etapa 8) grava o usage no registro do run.
+- Gravar `"mission"` e `"usage_file"` (Hermes) nos registros de run.
+- Chamar `parse_run_usage()` (etapa 8, já no `main`) logo depois de `run_agent()`.
+- `--max-budget-usd` vem de `run_budget_cap()`; se `budget_status()['exceeded']`, recusar o run.
 - Ajustar `loop_runs()` para **não** contar runs `refused` como "já acionados".
+- Falta fazer: a pergunta única ao `luiz` quando o gasto chegar a 80%.
 - Só acorda por conversas iniciadas pelo humano. Sem `--bare` (usa a assinatura).
 - Teste: executor falso valida a linha de comando exata; teste manual acompanhado pelo Luiz.
 
-**Etapa 9 — Codex no vigia**
+**Etapa 9 — Codex no vigia** (depende da 7)
 - `codex exec --json -s workspace-write -C <cópia> --add-dir <A2A_HOME> -`.
 - Exige `[windows] sandbox` configurado (verificado pelo `watch check`).
 - O Codex não consegue commitar na cópia (gitdir read-only): entrega mudanças sem commit e reporta no canal.
 
-**Etapa 11 — orquestrador**
+**Etapa 11 — orquestrador** (depende da 7)
 - Só ferramentas de leitura + `a2a send/brief/read/status/fact`.
 - A recusa por `A2A_RUNNER` já protege as ações humanas.
 - Tique só quando o bus muda; entra nos tetos globais de `a2a loops`.
 - Usa `a2a fact` para o estado do projeto; modelo barato na rotina (`a2a models suggest`).
 
-**Etapa 12 — Hermes**: aguardando o Luiz definir a contenção (sem sandbox de SO; `approvals.mode`).
+**Etapa 12 — Hermes**: o Luiz aceitou o risco em 2026-10-19 ("quero arriscar"). Sem sandbox de SO (`approvals.mode`), então fica **desligado por padrão** e só liga com opt-in explícito.
 
 **Depois**: atualizar o ROADMAP; roteiro de ativação para o Luiz no Windows; canal entre máquinas (VPS/Omarchy); retomada visual com o Claude Design; qLink.
 
@@ -66,6 +69,7 @@ dove   # painel
 - `a2a map` adiado até medir com `a2a cost`.
 - Instruções globais (`a2a instructions`) em vez de AGENTS.md por repositório (PR lagu #38 fechado).
 - Hermes sem instruções globais por padrão.
+- Hermes no vigia: risco aceito pelo Luiz (2026-10-19); desligado por padrão, opt-in explícito.
 - TOON, memória vetorial/GraphRAG, SupervisorAgent e mcp-compressor não adotados.
 
 ## Onde estão as coisas

@@ -2,7 +2,7 @@
 
 > **Sessão nova? Comece por [`docs/HANDOFF.md`](HANDOFF.md)** — contexto, regras e próximos passos para retomar sem reexplicar.
 
-Estado em 2026-10-19 · base `main` em 97ce044.
+Estado em 2026-10-19 · base `main` em 7fca4c3.
 
 ## 1. O que é o Dove
 Canal A2A local e global: os agentes (`claude`, `codex`, `hermes`) conversam e dividem trabalho por arquivos JSON em `~/.a2a`, sem nuvem.
@@ -45,25 +45,30 @@ Só a stdlib do Python; funciona no Windows, no Linux e no macOS.
 
 ## 4. Em andamento — Fase 3 (orquestrador)
 Proposta: `docs/propostas/2026-10-19-fase3-orquestrador.md` no branch `proposta/fase3-orquestrador`.
-Todos os passos têm aval do Luiz, **exceto o 12**.
+Todos os passos têm aval do Luiz; o 12 foi aceito com risco em 2026-10-19 (desligado por padrão).
 
 | Passo | Item | Estado |
 |---|---|---|
 | 0+1 | Segurança: `mission done` só humano, `--from` obrigatório, `vigia` reservado, `A2A_RUNNER` nunca age como humano | **FEITO** · 67d2d37 |
 | 2 | `a2a loops` (prevenção de loop entre agentes automáticos) | **FEITO** · 2a8485d |
-| 3 | `a2a watch plan` / `--dry-run` (+ `git add`/`git commit` na allowlist do Claude só na própria cópia; proíbe rebase/reset/checkout/switch/`branch -D`/clean) | **EM ANDAMENTO** · branch `fase3/plan` |
+| 3 | `a2a watch plan` / `--dry-run` (+ `git add`/`git commit` na allowlist do Claude só na própria cópia; proíbe rebase/reset/checkout/switch/`branch -D`/clean) | **FEITO** · 75c979d |
 | 4 | `a2a cost` (lê os registros do Claude/Codex/Hermes, só leitura) | **FEITO** · 247ef1f |
 | 5 | `a2a watch check` | **FEITO** · 37be0d7 |
 | 6 | Supervisor: `STOP`, travas, timeout, Job Object | **FEITO** · 81a0e14 |
-| 7 | Vigia real, só com o `claude`, iniciado à mão | próximo (aprovado) |
-| 8 | Orçamento por missão + `parse_run_usage` | **EM ANDAMENTO** · branch `fase3/budget` |
-| 9 | Codex no vigia (sandbox do Windows; sem commit) | próximo (aprovado) |
+| 7 | Vigia real, só com o `claude`, iniciado à mão | **bloqueado — aguardando decisão do Luiz** |
+| 8 | Orçamento: `parse_run_usage`, `run_budget_cap`, `budget_status`, `budget_alerts`, `a2a mission budget`, `a2a cost budget`/`--budget`, `budgets.json`, `a2a watch usage` | **FEITO** · 7fca4c3 |
+| 9 | Codex no vigia (sandbox do Windows; sem commit) | próximo (aprovado) · depende do 7 |
 | 10 | `a2a models` (roteamento de modelo) | **FEITO** · 97ce044 |
-| 11 | Orquestrador (só leitura + mensagens) | próximo (aprovado) |
-| 12 | Hermes no vigia | **PENDENTE**: aguarda o Luiz definir a contenção |
+| 11 | Orquestrador (só leitura + mensagens) | próximo (aprovado) · depende do 7 |
+| 12 | Hermes no vigia | **APROVADO COM RISCO** (Luiz, 2026-10-19: "quero arriscar"): desligado por padrão, só com opt-in explícito |
 | 13 | Política de subagentes | **FEITO** · 898c637 (+ c65d148 teste determinístico) |
 
-Os passos 3 e 8 estão em branches locais de outros workers e podem chegar ao `main` a qualquer momento; confira com `git log --oneline origin/main`.
+**Nota para quem implementar o passo 7** (o orçamento do passo 8 já existe, falta ligar no executor):
+- Gravar `"mission"` e `"usage_file"` (Hermes) nos registros de run.
+- Chamar `parse_run_usage()` logo depois de `run_agent()`.
+- Usar `run_budget_cap()` em `--max-budget-usd` e `budget_status()['exceeded']` para recusar o run.
+- `loop_runs()` não pode contar runs recusados.
+- Falta fazer: a pergunta única ao `luiz` quando o gasto chegar a 80%.
 
 ## 5. Decisões
 **Tomadas**
@@ -74,8 +79,10 @@ Os passos 3 e 8 estão em branches locais de outros workers e podem chegar ao `m
 - Hermes não recebe instruções globais por padrão (o `SOUL.md` dele é persona).
 - Parte visual pausada. O backend já está pronto para: aba Git, cópias de trabalho, memória e custo.
 
+- Hermes no vigia (passo 12): o Luiz aceitou o risco em 2026-10-19 ("quero arriscar"); desligado por padrão, exige opt-in explícito.
+
 **Pendentes**
-- Contenção do Hermes no vigia (passo 12) — decisão do Luiz.
+- Executor real do vigia (passo 7) — decisão do Luiz; os passos 9 e 11 dependem dele.
 
 ## 6. Depois da Fase 3
 - Canal entre máquinas: VPS Ubuntu 24.04 + Omarchy + Windows.
