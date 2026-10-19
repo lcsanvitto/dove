@@ -1,4 +1,4 @@
-import http.client, json, os, re, socket, subprocess, sys, tempfile, time, pathlib, urllib.request
+import hashlib, http.client, json, os, re, signal, socket, subprocess, sys, tempfile, time, pathlib, urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 for _k in ("A2A_RUNNER", "A2A_RUN_ID"): os.environ.pop(_k, None)  # os testes comecam como o humano (fora de execucao automatica)
@@ -2516,6 +2516,313 @@ def cost_fase():
           "projeto/copia/'-', --by agente|projeto|modelo|dia|sessao, --since por mtime e data, --mission aproximado, "
           "linha corrompida, n/d, --json, so leitura)")
 
+WATCH_FAKE = r"""
+import os, signal, subprocess, sys, time
+mode = os.environ.get("FAKE_MODE", "ok")
+def gchild(ignore_int=True):
+    code = ("import signal, time\n" + ("signal.signal(signal.SIGINT, signal.SIG_IGN)\n" if ignore_int else "") + "time.sleep(60)")
+    kw = {} if os.name != "nt" else {"creationflags": 0}
+    p = subprocess.Popen([sys.executable, "-c", code], **kw)
+    with open(os.environ["FAKE_PIDFILE"], "w") as f: f.write(str(p.pid))
+    return p
+if mode == "ok":
+    data = sys.stdin.read()
+    print("A2A_RUNNER=" + os.environ.get("A2A_RUNNER", "")); print("A2A_RUN_ID=" + os.environ.get("A2A_RUN_ID", ""))
+    print("EXTRA=" + os.environ.get("FAKE_EXTRA", "")); print("CWD=" + os.getcwd()); print("STDIN=" + data)
+    sys.stdout.flush()
+    sys.stderr.write("x" * 3000 + "\nfalhou com api_key=abcd1234efgh5678 e token: ghp_abcdefghijklmnopqrstuvwxyz0123\n"
+                     "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLXRlc3Q\n"
+                     "chave sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA fim\n")
+elif mode == "fail": sys.stderr.write("deu ruim\n"); sys.exit(3)
+elif mode == "sleep":
+    print("dormindo", flush=True); time.sleep(60)
+elif mode == "stubborn":
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if hasattr(signal, "SIGBREAK"): signal.signal(signal.SIGBREAK, signal.SIG_IGN)
+    print("teimoso", flush=True); time.sleep(60)
+elif mode == "grandchild":
+    gchild(); time.sleep(60)
+elif mode == "orphan":
+    gchild(); sys.exit(0)
+elif mode == "span":
+    t0 = time.time(); time.sleep(float(os.environ.get("FAKE_SLEEP", "0.6")))
+    with open(os.environ["FAKE_LOG"], "a") as f: f.write(f"{os.environ.get('FAKE_TAG', '')} {t0} {time.time()}\n")
+"""
+WATCH_DRIVER = r"""
+import json, os, sys, time
+sys.path.insert(0, sys.argv[1]); import a2a
+mode, arg = sys.argv[2], json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}
+def rec(r): return r.record if isinstance(r, a2a.RunResult) else {"exception": str(r)}
+try:
+    if mode == "resolve": print(json.dumps(a2a.resolve_runner(arg["agent"])))
+    elif mode == "run":
+        argv = arg.pop("argv", None) or a2a.resolve_runner(arg["agent"])
+        print(json.dumps(rec(a2a.run_agent(argv=argv, **arg))))
+    elif mode == "jobs":
+        argv = a2a.resolve_runner("x")
+        jobs = [dict(j, argv=argv) for j in arg["jobs"]]
+        print(json.dumps([rec(r) for r in a2a.run_jobs(jobs, max_parallel=arg["max_parallel"])]))
+    elif mode == "hold":
+        with a2a.WatchLock():
+            print("held", flush=True); time.sleep(arg.get("secs", 30))
+    elif mode == "watchlock":
+        with a2a.WatchLock() as w: print(json.dumps({"ok": True, "info": w.info}))
+except a2a.DoveError as e:
+    print(json.dumps({"error": str(e)})); sys.exit(1)
+"""
+def supervisor_fase():
+    """Etapa 6 da Fase 3 (vigia: supervisor) com executor FALSO: env A2A_RUNNER/A2A_RUN_ID, stdout em arquivo,
+    registro com redacao, timeout, arvore de processos (neto morre), STOP antes/durante, watch.lock (vivo, velho, pid
+    reusado), trava por agente, --max-parallel, watch stop/resume so do humano, override so com A2A_TESTING.
+    Nunca chama claude/codex/hermes."""
+    tmp = tempfile.mkdtemp(); work = tempfile.mkdtemp()
+    fake = os.path.join(work, "fake_runner.py"); open(fake, "w").write(WATCH_FAKE)
+    drv = os.path.join(work, "driver.py"); open(drv, "w").write(WATCH_DRIVER)
+    base = {k: v for k, v in os.environ.items() if k not in ("A2A_TESTING", "A2A_RUNNER_OVERRIDE", "A2A_RUNNER", "A2A_RUN_ID")}
+    env = dict(base, A2A_HOME=tmp, PYTHONIOENCODING="utf-8", A2A_TESTING="1", A2A_RUNNER_OVERRIDE=fake)
+    posix = os.name != "nt"
+    def drive(mode, arg=None, e=None, bg=False):
+        cmd = [sys.executable, drv, str(ROOT), mode] + ([json.dumps(arg)] if arg is not None else [])
+        if bg: return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=e or env)
+        r = subprocess.run(cmd, capture_output=True, text=True, env=e or env)
+        assert r.stdout.strip(), (mode, arg, r.returncode, r.stderr)
+        return json.loads(r.stdout.strip().splitlines()[-1]), r.returncode
+    def job(agent="claude", fm="ok", **kw):
+        d = {"agent": agent, "project": "lagu", "cwd": work, "stdin_text": kw.pop("stdin_text", "faca a tarefa X"),
+             "timeout": kw.pop("timeout", 30), "env_extra": dict({"FAKE_MODE": fm}, **kw.pop("env", {}))}
+        d.update(kw); return d
+    def gone(pid, t=3.0):
+        end = time.time() + t
+        while time.time() < end:
+            try:
+                os.kill(pid, 0)
+                st = open(f"/proc/{pid}/stat").read() if os.path.exists(f"/proc/{pid}/stat") else ""
+                if st and st[st.rindex(")") + 2] == "Z": return True
+            except ProcessLookupError: return True
+            except OSError: return True
+            time.sleep(0.05)
+        return False
+    def wait_file(p, t=10):
+        end = time.time() + t
+        while time.time() < end:
+            if os.path.exists(p): return True
+            time.sleep(0.05)
+        return False
+    a2a = lambda *a, e=None: run(e or env, *a)
+
+    # executor: override so com A2A_TESTING=1; sem ele, recusa (nunca cai num executor real)
+    for e in (dict(base, A2A_HOME=tmp, A2A_RUNNER_OVERRIDE=fake), dict(base, A2A_HOME=tmp, A2A_TESTING="1"),
+              dict(base, A2A_HOME=tmp, A2A_RUNNER_OVERRIDE=fake, A2A_TESTING="0")):
+        out, rc = drive("resolve", {"agent": "claude"}, e)
+        assert rc == 1 and "executor real ainda nao habilitado" in out["error"], out
+    out, rc = drive("resolve", {"agent": "claude"})
+    assert rc == 0 and out == [sys.executable, fake], out
+    print("OK: vigia - A2A_RUNNER_OVERRIDE so com A2A_TESTING=1; sem ele 'executor real ainda nao habilitado'")
+
+    # execucao normal: env do vigia visivel ao filho, stdin = prompt, stdout em arquivo, registro com redacao
+    prompt = "faca a tarefa X com cuidado e responda pelo canal"
+    r, rc = drive("run", job(stdin_text=prompt, env={"FAKE_EXTRA": "valor-extra", "A2A_RUNNER": "tentei-trocar"},
+                             trigger_ids=["3f9a1c2b7d10"]))
+    assert rc == 0 and r["outcome"] == "ok" and r["exit_code"] == 0 and r["reason"] == "", r
+    assert re.match(r"^\d{8}T\d{6}Z-[0-9a-f]{6}$", r["run_id"]), r
+    month = r["run_id"][:4] + "-" + r["run_id"][4:6]
+    rdir = os.path.join(tmp, "runs", month)
+    saved = json.load(open(os.path.join(rdir, r["run_id"] + ".json"), encoding="utf-8"))
+    assert saved == r, (saved, r)
+    out = open(os.path.join(rdir, r["run_id"] + ".out"), encoding="utf-8").read()
+    assert "A2A_RUNNER=watch\n" in out and f"A2A_RUN_ID={r['run_id']}\n" in out, out
+    assert "EXTRA=valor-extra" in out and "STDIN=" + prompt in out and os.path.realpath(work) in out, out
+    err = open(os.path.join(rdir, r["run_id"] + ".err"), encoding="utf-8").read()
+    assert "ghp_abcdefghijklmnopqrstuvwxyz0123" in err  # o arquivo .err tem tudo; o registro, so o fim mascarado
+    for k in ("agent", "project", "cwd", "argv", "trigger_ids", "started", "ended", "exit_code", "outcome", "stderr_tail", "usage"):
+        assert k in r, (k, r)
+    assert r["agent"] == "claude" and r["project"] == "lagu" and r["cwd"] == work and r["trigger_ids"] == ["3f9a1c2b7d10"]
+    assert r["usage"] is None and r["stdin"] == {"sha256": hashlib.sha256(prompt.encode()).hexdigest()[:12], "len": len(prompt)}
+    tail = r["stderr_tail"]
+    assert 0 < len(tail) <= 2049 and tail.startswith("…") and "chave [REDACTED] fim" in tail, tail
+    for s in ("abcd1234efgh5678", "ghp_abcdef", "eyJhbGci", "sk-ant-api03"): assert s not in tail, (s, tail)
+    assert "api_key=[REDACTED]" in tail and "Authorization: [REDACTED]" in tail, tail
+    assert prompt not in json.dumps(r) and r["env_extra"] == ["A2A_RUNNER", "FAKE_EXTRA", "FAKE_MODE"], r
+    assert not os.listdir(os.path.join(tmp, "run")), "trava do agente tem que sumir no fim"
+    # prompt no argv vira sha/tamanho; segredo no argv e mascarado
+    r, rc = drive("run", job(stdin_text=prompt, argv=[sys.executable, fake, "--prompt", prompt, "--key=sk-proj-ABCDEFGHIJKLMNOPQRST"]))
+    assert r["outcome"] == "ok" and r["argv"][2:] == ["--prompt", f"<prompt sha256={r['stdin']['sha256']} len={len(prompt)}>",
+                                                     "--key=[REDACTED]"], r["argv"]
+    assert prompt not in json.dumps(r) and "ABCDEFGHIJKLMNOPQRST" not in json.dumps(r), r
+    r, rc = drive("run", job(fm="fail"))
+    assert r["outcome"] == "error" and r["exit_code"] == 3 and "codigo 3" in r["reason"] and "deu ruim" in r["stderr_tail"], r
+    r, rc = drive("run", job(cwd=os.path.join(work, "nao-existe")))
+    assert r["outcome"] == "error" and "pasta de trabalho nao existe" in r["reason"], r
+    print("OK: vigia - execucao ok (A2A_RUNNER=watch, A2A_RUN_ID, stdin, .out/.err), registro JSON com prompt em sha/len "
+          "e segredos mascarados no fim do stderr; erro e pasta inexistente registrados")
+
+    # timeout: pedido educado e, passado o grace, a arvore inteira morre
+    r, rc = drive("run", job(fm="sleep", timeout=1, grace=2))
+    assert r["outcome"] == "timeout" and r["duration_s"] < 1 + 2 + 1, r
+    r, rc = drive("run", job(fm="stubborn", timeout=1, grace=1))  # ignora SIGINT: so o SIGKILL do grupo resolve
+    assert r["outcome"] == "timeout" and 2 - 0.2 <= r["duration_s"] < 1 + 1 + 1, r
+    if posix: assert r["exit_code"] == -9, r
+    pidfile = os.path.join(work, "neto.pid")
+    r, rc = drive("run", job(fm="grandchild", timeout=1.5, grace=1, env={"FAKE_PIDFILE": pidfile}))
+    assert r["outcome"] == "timeout", r
+    if posix:
+        gp = int(open(pidfile).read()); assert gone(gp), f"neto {gp} sobreviveu ao stop"
+    os.remove(pidfile)
+    r, rc = drive("run", job(fm="orphan", env={"FAKE_PIDFILE": pidfile}))  # filho sai 0 e deixa um neto: neto morre no fim
+    assert r["outcome"] == "ok", r
+    if posix:
+        gp = int(open(pidfile).read()); assert gone(gp), f"neto {gp} sobreviveu ao fim da execucao"
+    print("OK: vigia - timeout para dentro de grace+1s (SIGINT, depois SIGKILL no grupo); neto de 60s morre no stop e no fim normal"
+          + ("" if posix else " (checagem de pid do neto so no POSIX)"))
+
+    # STOP: antes = recusa (com registro); durante = para em ate 1s + grace
+    r = a2a("watch", "stop", "--from", "claude")
+    assert r.returncode == 1 and "so o humano" in r.stderr and not os.path.exists(os.path.join(tmp, "STOP")), r.stderr
+    r = a2a("watch", "stop", "--from", "luiz")
+    assert r.returncode == 0 and "STOP criado" in r.stdout and os.path.exists(os.path.join(tmp, "STOP")), r
+    assert "STOP: sim" in a2a("watch", "status").stdout
+    r, rc = drive("run", job())
+    assert r["outcome"] == "refused" and "STOP existe" in r["reason"] and r["pid"] is None and r["exit_code"] is None, r
+    assert os.path.exists(os.path.join(rdir, r["run_id"] + ".json"))
+    r = a2a("watch", "resume", "--from", "codex")
+    assert r.returncode == 1 and "so o humano" in r.stderr and os.path.exists(os.path.join(tmp, "STOP")), r.stderr
+    r = a2a("watch", "resume", "--from", "luiz")
+    assert r.returncode == 0 and "STOP removido" in r.stdout and not os.path.exists(os.path.join(tmp, "STOP")), r
+    assert "STOP nao existia" in a2a("watch", "resume", "--from", "luiz").stdout
+    renv = dict(env, A2A_RUNNER="watch", A2A_RUN_ID="r-x")  # dentro de uma execucao do vigia: nem com --from luiz
+    for args in (("stop", "--from", "luiz"), ("stop", "--from", "luiz", "--kill"), ("resume", "--from", "luiz")):
+        r = a2a("watch", *args, e=renv)
+        assert r.returncode == 2 and "A2A_RUNNER" in r.stderr and not os.path.exists(os.path.join(tmp, "STOP")), (args, r.stderr)
+    open(os.path.join(tmp, "STOP"), "w").close()
+    r = a2a("watch", "resume", "--from", "luiz", e=renv)
+    assert r.returncode == 2 and os.path.exists(os.path.join(tmp, "STOP")), r.stderr
+    os.remove(os.path.join(tmp, "STOP"))
+    p = drive("run", job(fm="sleep", timeout=60, grace=2), bg=True)
+    assert wait_file(os.path.join(tmp, "run", "claude.json")); time.sleep(0.3)
+    t0 = time.time(); assert a2a("watch", "stop", "--from", "luiz").returncode == 0
+    so, se = p.communicate(timeout=20); r = json.loads(so.strip().splitlines()[-1])
+    assert r["outcome"] == "stopped" and "STOP apareceu" in r["reason"] and time.time() - t0 < 1 + 2 + 1.5, (r, time.time() - t0)
+    a2a("watch", "resume", "--from", "luiz")
+    print("OK: vigia - STOP presente recusa (registro refused); STOP criado no meio para a execucao; stop/resume so do humano "
+          "e recusados (codigo 2) sob A2A_RUNNER")
+
+    # trava por agente: segunda execucao do mesmo agente recusada; outro agente roda; watch stop --kill derruba ja
+    p = drive("run", job(fm="stubborn", timeout=60, grace=30), bg=True)
+    lockf = os.path.join(tmp, "run", "claude.json"); assert wait_file(lockf)
+    end = time.time() + 5
+    while time.time() < end and "child_pid" not in (json.load(open(lockf)) if os.path.getsize(lockf) else {}): time.sleep(0.05)
+    r, rc = drive("run", job())
+    assert r["outcome"] == "refused" and "claude ja tem uma execucao em curso" in r["reason"], r
+    r, rc = drive("run", job("codex"))
+    assert r["outcome"] == "ok", r
+    st = a2a("watch", "status").stdout
+    assert "claude" in st and "rodando" in st and "STOP: nao" in st and "vigia: nenhum" in st, st
+    t0 = time.time(); k = a2a("watch", "stop", "--from", "luiz", "--kill")
+    assert k.returncode == 0 and "claude run" in k.stdout and "encerrada" in k.stdout, k.stdout + k.stderr
+    so, se = p.communicate(timeout=15); r = json.loads(so.strip().splitlines()[-1])
+    assert r["outcome"] == "stopped" and time.time() - t0 < 5, (r, time.time() - t0)  # sem esperar o grace de 30s
+    assert not os.path.exists(lockf)
+    a2a("watch", "resume", "--from", "luiz")
+    print("OK: vigia - trava por agente (2a execucao do mesmo agente recusada, outro agente roda); watch stop --kill encerra ja")
+
+    # watch.lock: um vigia so; trava velha (pid morto) e pid reusado (instante de criacao diferente) sao recuperadas
+    h = drive("hold", {"secs": 60}, bg=True); assert h.stdout.readline().strip() == "held"
+    out, rc = drive("watchlock")
+    assert rc == 1 and "ja ha um vigia rodando" in out["error"] and str(h.pid) in out["error"], out
+    assert "vigia: pid %d" % h.pid in a2a("watch", "status").stdout
+    h.kill(); h.wait()  # morreu sem soltar a trava
+    wl = os.path.join(tmp, "run", "watch.lock"); assert os.path.exists(wl)
+    assert "trava velha" in a2a("watch", "status").stdout
+    out, rc = drive("watchlock"); assert rc == 0 and out["ok"], out
+    assert not os.path.exists(wl), "trava solta no fim"
+    me = os.getpid(); tok = (open(f"/proc/{me}/stat").read().rsplit(")", 1)[1].split()[19]
+                             if os.path.exists(f"/proc/{me}/stat") else None)
+    host = socket.gethostname()
+    if tok:
+        json.dump({"pid": me, "pid_start": str(int(tok) + 12345), "host": host, "started": "x", "nonce": "n"}, open(wl, "w"))
+        out, rc = drive("watchlock"); assert rc == 0, ("pid reusado deveria liberar a trava", out)
+    json.dump({"pid": me, "pid_start": tok, "host": host, "started": "x", "nonce": "n"}, open(wl, "w"))
+    out, rc = drive("watchlock"); assert rc == 1 and "ja ha um vigia" in out["error"], out
+    os.remove(wl)
+    print("OK: vigia - watch.lock: segundo vigia recusado; trava de dono morto recuperada"
+          + ("; pid reusado (instante de criacao diferente) recuperado" if tok else ""))
+
+    # --max-parallel: nunca mais que N juntos; mesmo agente nunca em paralelo
+    def spans(max_parallel, agents, sleep=0.6):
+        log = os.path.join(work, f"span-{max_parallel}-{len(agents)}-{time.time()}.log")
+        jobs = [job(a, "span", env={"FAKE_LOG": log, "FAKE_TAG": f"{a}{i}", "FAKE_SLEEP": str(sleep)}) for i, a in enumerate(agents)]
+        res, rc = drive("jobs", {"jobs": jobs, "max_parallel": max_parallel})
+        assert rc == 0 and [x["outcome"] for x in res] == ["ok"] * len(agents), res
+        iv = [tuple(map(float, l.split()[1:])) for l in open(log)]
+        return max(sum(1 for s2, e2 in iv if s2 < e and e2 > s) for s, e in iv)
+    assert spans(1, ["a", "b", "c"]) == 1
+    assert spans(2, ["a", "b", "c", "d"], 1.0) == 2
+    assert spans(3, ["a", "a", "a"]) == 1  # mesmo agente: um de cada vez, sem recusa
+    out, rc = drive("jobs", {"jobs": [], "max_parallel": 0})
+    assert rc == 1 and "--max-parallel" in out["error"], out
+    print("OK: vigia - run_jobs respeita --max-parallel (1 e 2) e nao junta execucoes do mesmo agente")
+
+    # watch runs (so leitura)
+    r = a2a("watch", "runs")
+    assert r.returncode == 0 and len(r.stdout.splitlines()) == 20 and "timeout" in r.stdout and "refused" in r.stdout, r.stdout
+    js = json.loads(a2a("watch", "runs", "--last", "0", "--json").stdout)
+    assert len(js) > 20 and all(x["outcome"] in ("ok", "error", "timeout", "stopped", "refused") for x in js), js
+    assert [x["run_id"] for x in js] == sorted((x["run_id"] for x in js), reverse=True)
+    one = json.loads(a2a("watch", "runs", "--agent", "codex", "--last", "1", "--json").stdout)
+    assert len(one) == 1 and one[0]["agent"] == "codex", one
+    print("OK: vigia - watch runs (--last, --agent, --json)")
+
+    # Windows: wrapper ctypes do Job Object com kernel32/ntdll falsos (roda em qualquer SO); o caminho real so no Windows
+    sys.path.insert(0, str(ROOT)); import a2a as mod, ctypes
+    class K32:
+        def __init__(self, fail=None): self.calls, self.fail = [], fail
+        def __getattr__(self, name):
+            def fn(*args):
+                self.calls.append((name,) + args)
+                if name == self.fail: return 0
+                return 0x77 if name in ("CreateJobObjectW", "OpenJobObjectW") else 1
+            return fn
+    k = K32(); job_ = mod.WinJob("Local\\dove-run-teste", kernel32=k)
+    assert k.calls[0] == ("CreateJobObjectW", None, "Local\\dove-run-teste"), k.calls
+    nm, h, cls, _, size = k.calls[1]
+    assert (nm, h, cls, size) == ("SetInformationJobObject", 0x77, 9, ctypes.sizeof(mod.job_limit_struct())), k.calls
+    assert job_.limits.BasicLimitInformation.LimitFlags & 0x2000, "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE"
+    assert ctypes.sizeof(mod.job_limit_struct()) == (144 if ctypes.sizeof(ctypes.c_void_p) == 8 else 112)
+    class FakeProc:
+        pid, _handle, returncode = 4242, 0x99, None
+        def poll(self): return self.returncode
+        def wait(self, timeout=None): self.returncode = 1; return 1
+        def kill(self): self.returncode = 1
+    class Nt:
+        def __init__(self): self.calls = []
+        def NtResumeProcess(self, h): self.calls.append(h); return 0
+    sent, nt = [], Nt()
+    k = K32(); tree = mod.WinTree("r1", kernel32=k, ntdll=nt, kill=lambda pid, s: sent.append((pid, s)))
+    assert tree.popen_kw["creationflags"] == 0x200 | 0x4  # CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED
+    fp = FakeProc(); tree.attach(fp); tree.resume()
+    assert ("AssignProcessToJobObject", 0x77, 0x99) in k.calls and nt.calls == [0x99] and tree.info() == {"job": "Local\\dove-run-r1"}
+    t0 = time.time(); mod.stop_tree(tree, fp, grace=0.3)
+    assert sent == [(4242, getattr(signal, "CTRL_BREAK_EVENT", 1))] and time.time() - t0 >= 0.3, sent
+    names = [c[0] for c in k.calls]
+    assert names.index("TerminateJobObject") > names.index("AssignProcessToJobObject"), names
+    tree.cleanup(); tree.cleanup()
+    assert names.count("CloseHandle") == 0 and [c[0] for c in k.calls].count("CloseHandle") == 1, k.calls
+    k = K32(); assert mod.win_kill_job("Local\\dove-run-r2", kernel32=k)
+    assert [c[0] for c in k.calls] == ["OpenJobObjectW", "TerminateJobObject", "CloseHandle"] and k.calls[0][1:] == (0x8, False, "Local\\dove-run-r2")
+    k = K32(fail="SetInformationJobObject")
+    try: mod.WinJob("x", kernel32=k); assert False, "SetInformationJobObject falhou e passou"
+    except OSError: assert k.calls[-1][0] == "CloseHandle"
+    k = K32(fail="AssignProcessToJobObject"); fp = FakeProc(); tree = mod.WinTree("r3", kernel32=k, ntdll=nt)
+    try: tree.attach(fp); assert False
+    except OSError: assert fp.returncode == 1 and k.calls[-1][0] == "CloseHandle"
+    if os.name == "nt":  # caminho real (nao roda no Linux): neto dentro do Job Object morre com o TerminateJobObject
+        r, rc = drive("run", job(fm="grandchild", timeout=1.5, grace=1, env={"FAKE_PIDFILE": pidfile}))
+        gp = int(open(pidfile).read()); time.sleep(0.5)
+        assert r["outcome"] == "timeout" and not mod.pid_alive(gp), (r, gp)
+    print("OK: vigia - Job Object (ctypes) com kernel32 falso: KILL_ON_JOB_CLOSE, assign, CTRL_BREAK -> grace -> "
+          "TerminateJobObject, close, kill por nome" + (" + caminho real no Windows" if os.name == "nt" else
+          " (caminho real so roda no Windows)"))
+
 if __name__ == "__main__":
     main()
     fase1()
@@ -2535,3 +2842,4 @@ if __name__ == "__main__":
     watch_fase()
     seguranca_fase()
     cost_fase()
+    supervisor_fase()

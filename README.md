@@ -297,6 +297,23 @@ fontes: claude ~/.claude/projects · codex ~/.codex/sessions, ~/.codex/archived_
 
 Limites: só entra o que a CLI gravou na máquina (sessões apagadas pelo `cleanupPeriodDays` do Claude Code, por exemplo, somem). O custo do `cost-state` do Claude cobre a sessão inteira, inclusive subagentes, e vai para o `cwd` da sessão principal. Um rollout do Codex criado por fork pode repetir eventos `token_count` do original (os `token_usage_record` têm dedup).
 
+## Vigia: supervisor de processos (`a2a watch`)
+Base do vigia da Fase 3 (proposta `docs/propostas/2026-10-19-fase3-orquestrador.md`, item 1). Esta etapa traz só o **supervisor**: como uma execução de agente começa, é vigiada, para e fica registrada. **Nenhum executor real é habilitado ainda** (`claude`, `codex` e `hermes` não rodam); os testes usam um executor falso.
+```
+a2a watch stop --from luiz [--kill]   # kill switch: cria ~/.a2a/STOP (--kill: mata já as execuções em curso)
+a2a watch resume --from luiz          # apaga ~/.a2a/STOP
+a2a watch status                      # STOP, vigia rodando (watch.lock), execuções em curso
+a2a watch runs [--last 20] [--agent X] [--json]   # registros das execuções (só leitura, mais nova primeiro)
+```
+- **Execução** (`run_agent` no `a2a.py`): o processo recebe `A2A_RUNNER=watch` e `A2A_RUN_ID=<run_id>` no ambiente e o prompt pelo stdin; stdout e stderr vão direto para `~/.a2a/runs/AAAA-MM/<run_id>.out` e `.err` (sem passar pela memória).
+- **Árvore de processos:** no Windows o filho nasce suspenso, num grupo de console próprio, entra num Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) e só então roda; parar = `CTRL_BREAK_EVENT`, 5 s de espera, `TerminateJobObject`. No Linux/macOS o filho abre uma sessão nova; parar = `SIGINT` ao grupo, 5 s, `SIGKILL` ao grupo. Netos morrem junto, e o que sobrar quando o filho sai também é encerrado.
+- **Travas:** `~/.a2a/run/watch.lock` (um vigia só) e `~/.a2a/run/<agente>.json` (uma execução por agente), criadas com `O_EXCL`, com pid, instante de criação do processo e máquina. Trava de dono morto (ou de pid reusado, com outro instante de criação) é recuperada; sempre soltas no fim.
+- **STOP:** com `~/.a2a/STOP`, nenhuma execução nova começa (registro `refused`) e as em curso são conferidas a cada 1 s e param (registro `stopped`). `stop` e `resume` são só do humano e recusados (código 2) dentro de uma execução automática (`A2A_RUNNER`).
+- **Timeout:** para como acima e registra `timeout`.
+- **Registro** `~/.a2a/runs/AAAA-MM/<run_id>.json`: `run_id`, `agent`, `project`, `cwd`, `argv` (o prompt, se aparecer, vira `<prompt sha256=… len=…>`), `stdin` (sha/tamanho), `trigger_ids`, `started`/`ended`, `exit_code`, `outcome` (`ok`, `error`, `timeout`, `stopped`, `refused`), `reason`, `stderr_tail` (últimos 2 KB, com tokens/chaves/senhas mascarados) e `usage` (preenchido numa etapa futura).
+- **Paralelo:** o agendador (`run_jobs`) roda no máximo `--max-parallel` execuções juntas (padrão 1) e nunca duas do mesmo agente.
+- **Executor:** `resolve_runner(agent)`. Por enquanto só aceita o gancho de teste `A2A_RUNNER_OVERRIDE=<script>`, e só com `A2A_TESTING=1`; sem isso, `executor real ainda nao habilitado`.
+
 ## Modo herdr (estado dos agentes)
 Cada agente publica o próprio estado — `working`, `idle`, `blocked`, `done` ou `unknown` — em `~/.a2a/status/<agente>.json`. Assim você (ou outro agente) vê num quadro quem está trabalhando, quem travou e quem terminou.
 
@@ -573,6 +590,8 @@ a2a loops [--project P] [--agent X] [--since H] [--json] [--strict]
 | `loops [--project P] [--agent X] [--since H] [--json] [--strict]` | detector de loop entre agentes, só leitura: rodadas sem o humano, repetição, ping-pong, conversa sem origem humana, tetos por hora; sai 0 (com `--strict`, 1 se houver achados) |
 | `watch check [--project P] [--agent X] [--json] [--show-command]` | pré-checagem do vigia, só leitura: CLIs, versões, login, sandbox, cópias limpas, `STOP`; `--show-command` imprime o comando exato do vigia sem rodar |
 | `cost [--since 7d\|24h\|AAAA-MM-DD] [--project P] [--agent claude\|codex\|hermes] [--by agente\|projeto\|modelo\|dia\|sessao] [--mission ID] [--json]` | tokens (entrada, saída, cache lido/escrito, cache%) e custo estimado quando a fonte grava, lidos (só leitura) dos registros do Claude Code, Codex e Hermes; `n/d` sem custo na fonte |
+| `watch stop --from luiz [--kill]` · `watch resume --from luiz` | kill switch do vigia: cria / apaga `~/.a2a/STOP` (nada novo começa; `--kill` mata já as execuções em curso); só o humano |
+| `watch status` · `watch runs [--last N] [--agent X] [--json]` | STOP, vigia e execuções em curso / registros das execuções (`runs/AAAA-MM/`) |
 
 ## Envelope da mensagem (JSON)
 `data` (ISO 8601 UTC) · `task_id` · `msg_id` · `from` · `to` · `project` · `in_reply_to` · `kind` (task | report | question | correction | ack) · `state` (AGUARDANDO_ACEITE | ACEITO | EM_EXECUCAO | BLOQUEADO | AGUARDANDO_APROVACAO | EM_REVISAO | CONCLUIDO | CANCELADO) · `result` · `evidence` · `pending` · `next_action` · `body`

@@ -2963,7 +2963,7 @@ def watch_commands(project=None, agent=None):
     return res
 def cmd_watch(a):
     utf8_stdout()
-    if a.wcmd != "check": fail("erro: so existe a2a watch check por enquanto")
+    if a.wcmd != "check": return watch_supervisor(a)
     if a.show_command:
         cmds = watch_commands(a.project, a.agent)
         if a.json: print(json.dumps({"commands": cmds}, ensure_ascii=False)); return
@@ -3351,6 +3351,489 @@ def cmd_cost(a):
     if a.json: print(json.dumps(d, ensure_ascii=False, indent=2)); return
     print("\n".join(cost_lines(d)))
 
+# ---------------------------------------------------------------- vigia: supervisor (etapa 6 da Fase 3)
+# Roda UM processo de agente com trava por agente, kill switch (~/.a2a/STOP), timeout e controle da arvore de processos
+# (Job Object no Windows, grupo de processos no POSIX), e grava um registro por execucao em runs/AAAA-MM/.
+# Nesta etapa so roda executor FALSO de teste (A2A_TESTING=1 + A2A_RUNNER_OVERRIDE): nunca claude, codex nem hermes.
+import signal, socket
+RUN_DIR = os.path.join(HOME, "run")     # run/watch.lock (um vigia so) e run/<agente>.json (uma execucao por agente)
+RUNS_DIR = RUNS                          # runs/AAAA-MM/<run_id>.json (registro) .out .err (saida do processo)
+STOP_FILE = os.path.join(HOME, "STOP")  # kill switch: existe = nenhuma execucao nova e as em curso param
+WATCH_LOCK = os.path.join(RUN_DIR, "watch.lock")
+RUN_GRACE = 5.0        # s entre o pedido educado (SIGINT / CTRL_BREAK) e o golpe final (SIGKILL / TerminateJobObject)
+RUN_TAIL = 2048        # bytes do fim do stderr que vao para o registro (com segredos mascarados)
+RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{6}$")
+HOST = socket.gethostname()
+
+def new_run_id(t=None):
+    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(t or time.time())) + "-" + secrets.token_hex(3)
+
+# ---- segredos: o registro guarda o fim do stderr e o argv; nada que pareca token/chave/senha passa
+SECRET_RES = [
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.S), "[REDACTED PRIVATE KEY]"),
+    (re.compile(r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,}"), "[REDACTED]"),
+    (re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"), "[REDACTED]"),
+    (re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"), "[REDACTED]"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED]"),
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}"), "[REDACTED]"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"), "[REDACTED JWT]"),
+    (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 [REDACTED]"),
+    (re.compile(r"(?i)\b([A-Z0-9_.-]*(?:api[_-]?key|token|secret|passwd|password|pwd|auth)[A-Z0-9_.-]*)(\s*[:=]\s*)"
+                r"(\"[^\"]*\"|'[^']*'|[^\s\"',;]+)"), r"\1\2[REDACTED]"),
+    (re.compile(r"://([^/\s:@]+):([^/\s@]+)@"), r"://\1:[REDACTED]@"),
+]
+def redact_secrets(text):
+    for rx, rep in SECRET_RES: text = rx.sub(rep, text)
+    return text
+def file_tail(path, n=RUN_TAIL):
+    """Ultimos n caracteres do arquivo, com segredos mascarados. Le um pouco a mais antes de mascarar, para um segredo
+    cortado no comeco da janela tambem ser reconhecido."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2); size = f.tell(); f.seek(max(0, size - n - 512)); raw = f.read()
+    except OSError: return ""
+    t = redact_secrets(raw.decode("utf-8", "replace"))
+    return t if size <= n and len(t) <= n else "…" + t[-n:]
+def redact_argv(argv, prompt=""):
+    """argv para o registro: o prompt (se aparecer no argv) vira sha/tamanho; segredos mascarados."""
+    mark = f"<prompt sha256={prompt_hash(prompt)} len={len(prompt)}>" if prompt else ""
+    out = []
+    for x in argv:
+        s = str(x)
+        if prompt and (s == prompt or (len(prompt) >= 16 and prompt in s)): s = s.replace(prompt, mark)
+        out.append(redact_secrets(s))
+    return out
+
+# ---- processos: vivo? e quem e (pid + instante de criacao, porque pids sao reusados; no Windows, rapido)
+_K32 = None
+def _win_k32():
+    """kernel32 via ctypes, com restype/argtypes de handle de 64 bits (so Windows)."""
+    global _K32
+    if _K32 is None:
+        import ctypes
+        from ctypes import c_void_p, c_int, c_uint32, c_wchar_p, c_size_t
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        sig = {"OpenProcess": (c_void_p, [c_uint32, c_int, c_uint32]), "CloseHandle": (c_int, [c_void_p]),
+               "GetExitCodeProcess": (c_int, [c_void_p, c_void_p]),
+               "GetProcessTimes": (c_int, [c_void_p, c_void_p, c_void_p, c_void_p, c_void_p]),
+               "CreateJobObjectW": (c_void_p, [c_void_p, c_wchar_p]), "OpenJobObjectW": (c_void_p, [c_uint32, c_int, c_wchar_p]),
+               "SetInformationJobObject": (c_int, [c_void_p, c_int, c_void_p, c_uint32]),
+               "AssignProcessToJobObject": (c_int, [c_void_p, c_void_p]), "TerminateJobObject": (c_int, [c_void_p, c_uint32])}
+        for name, (res, args) in sig.items():
+            fn = getattr(k, name); fn.restype, fn.argtypes = res, args
+        _K32 = k
+    return _K32
+def _proc_stat(pid):
+    """Campos de /proc/<pid>/stat depois do nome (o 1o e o estado). None sem /proc (macOS) ou processo sumido."""
+    try:
+        with open(f"/proc/{int(pid)}/stat", "rb") as f: data = f.read().decode("ascii", "replace")
+        return data[data.rindex(")") + 2:].split()
+    except (OSError, ValueError): return None
+def proc_token(pid):
+    """Instante de criacao do processo (string opaca) ou None se nao der para saber nesta plataforma."""
+    try: pid = int(pid)
+    except (TypeError, ValueError): return None
+    if pid <= 0: return None
+    if os.name == "nt":
+        import ctypes
+        k = _win_k32(); h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h: return None
+        try:
+            c, e, kt, u = (ctypes.c_ulonglong() for _ in range(4))
+            ok = k.GetProcessTimes(h, ctypes.byref(c), ctypes.byref(e), ctypes.byref(kt), ctypes.byref(u))
+            return str(c.value) if ok else None
+        finally: k.CloseHandle(h)
+    st = _proc_stat(pid)
+    return st[19] if st and len(st) > 19 else None  # campo 22: starttime (ticks desde o boot)
+def pid_alive(pid):
+    try: pid = int(pid)
+    except (TypeError, ValueError): return False
+    if pid <= 0: return False
+    if os.name == "nt":
+        import ctypes
+        k = _win_k32(); h = k.OpenProcess(0x1000, False, pid)
+        if not h: return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: existe (de outro usuario)
+        try:
+            code = ctypes.c_ulong()
+            return bool(k.GetExitCodeProcess(h, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+        finally: k.CloseHandle(h)
+    try: os.kill(pid, 0)
+    except ProcessLookupError: return False
+    except PermissionError: return True
+    except OSError: return False
+    st = _proc_stat(pid)
+    return not (st and st[0] == "Z")  # zumbi ja morreu, so falta alguem recolher
+def proc_is(pid, token):
+    """O pid ainda e o mesmo processo? Vivo e, se ha token gravado e da para ler o atual, com o mesmo instante de criacao."""
+    if not pid_alive(pid): return False
+    if not token: return True
+    cur = proc_token(pid)
+    return cur is None or cur == token
+
+# ---- travas com dono (O_EXCL): run/watch.lock e run/<agente>.json; trava velha = dono morto (pid + instante)
+def lock_info(**kw):
+    me = os.getpid()
+    return {"pid": me, "pid_start": proc_token(me), "host": HOST, "started": now_iso(), "ts": time.time(),
+            "nonce": secrets.token_hex(4), **kw}
+def lock_stale(info):
+    """Dono morto = trava velha. Em outra maquina nao da para conferir: vale como viva. Na trava de agente, o filho
+    ainda vivo (vigia morto, agente rodando) tambem segura a trava: nunca duas execucoes do mesmo agente."""
+    if not isinstance(info, dict): return True
+    if info.get("host") and info["host"] != HOST: return False
+    if proc_is(info.get("pid"), info.get("pid_start")): return False
+    if info.get("child_pid") and proc_is(info["child_pid"], info.get("child_start")): return False
+    return True
+def lock_acquire(path, info):
+    """(True, info) se pegou; (False, dono_atual) se ocupada. Trava velha e removida (sob FileLock, para dois
+    processos nao quebrarem a mesma trava e acharem que ambos pegaram) e a tentativa se repete."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    data = json.dumps(info, ensure_ascii=False, indent=2).encode("utf-8")
+    for _ in range(3):
+        try: fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            with FileLock(path):
+                cur = read_json(path)
+                if cur is None:  # sendo escrita agora ou lixo: so quebra com mais de 10s
+                    try:
+                        if time.time() - os.path.getmtime(path) < 10: return False, {}
+                    except OSError: continue
+                elif not lock_stale(cur): return False, cur
+                try: os.remove(path)
+                except FileNotFoundError: pass
+            continue
+        with os.fdopen(fd, "wb") as f: f.write(data)
+        return True, info
+    return False, read_json(path) or {}
+def lock_release(path, info):
+    """Apaga a trava so se ainda for nossa (mesmo pid e nonce)."""
+    cur = read_json(path)
+    if isinstance(cur, dict) and (cur.get("pid"), cur.get("nonce")) == (info.get("pid"), info.get("nonce")):
+        try: os.remove(path)
+        except OSError: pass
+def lock_holder(info):
+    return f"pid {info.get('pid', '?')} em {info.get('host', '?')} desde {info.get('started', '?')}"
+class WatchLock:
+    """Um vigia por maquina: run/watch.lock (pid, instante de criacao, host). Solta no __exit__."""
+    def __enter__(self):
+        self.info = lock_info(kind="watch")
+        ok, cur = lock_acquire(WATCH_LOCK, self.info)
+        if not ok: raise DoveError(f"ja ha um vigia rodando ({lock_holder(cur)}): {WATCH_LOCK}")
+        return self
+    def __exit__(self, *x): lock_release(WATCH_LOCK, self.info)
+
+# ---- arvore de processos: o agente e tudo o que ele abrir morre junto
+class PosixTree:
+    """POSIX: o filho abre uma sessao nova (start_new_session), entao ele e os netos ficam no grupo pgid = pid do filho."""
+    popen_kw = {"start_new_session": True}
+    def __init__(self, run_id): self.proc = self.pgid = None
+    def attach(self, proc): self.proc, self.pgid = proc, proc.pid
+    def resume(self): pass
+    def info(self): return {"pgid": self.pgid}
+    def _sig(self, s):
+        if self.pgid is None: return
+        try: os.killpg(self.pgid, s)
+        except (ProcessLookupError, PermissionError): pass  # grupo vazio (macOS da EPERM com lider zumbi)
+    def interrupt(self): self._sig(signal.SIGINT)
+    def kill(self): self._sig(signal.SIGKILL)
+    def alive(self):
+        if self.proc.poll() is None: return True
+        try: os.killpg(self.pgid, 0); return True  # algum neto ainda no grupo
+        except OSError: return False
+    def cleanup(self): self.kill()  # nada sobrevive a execucao (o pgid nao e reusado enquanto o grupo existir)
+
+JOB_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+JOB_OBJECT_TERMINATE = 0x0008
+CREATE_SUSPENDED, CREATE_NEW_PROCESS_GROUP = 0x00000004, 0x00000200
+_JOB_STRUCT = None
+def job_limit_struct():
+    """JOBOBJECT_EXTENDED_LIMIT_INFORMATION (ctypes; tipos genericos, entao a classe tambem existe fora do Windows)."""
+    global _JOB_STRUCT
+    if _JOB_STRUCT is None:
+        import ctypes
+        from ctypes import c_int64, c_uint32, c_size_t, c_uint64
+        class Basic(ctypes.Structure):
+            _fields_ = [("PerProcessUserTimeLimit", c_int64), ("PerJobUserTimeLimit", c_int64), ("LimitFlags", c_uint32),
+                        ("MinimumWorkingSetSize", c_size_t), ("MaximumWorkingSetSize", c_size_t),
+                        ("ActiveProcessLimit", c_uint32), ("Affinity", c_size_t), ("PriorityClass", c_uint32),
+                        ("SchedulingClass", c_uint32)]
+        class Io(ctypes.Structure):
+            _fields_ = [(n, c_uint64) for n in ("ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                                                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+        class Ext(ctypes.Structure):
+            _fields_ = [("BasicLimitInformation", Basic), ("IoInfo", Io), ("ProcessMemoryLimit", c_size_t),
+                        ("JobMemoryLimit", c_size_t), ("PeakProcessMemoryUsed", c_size_t), ("PeakJobMemoryUsed", c_size_t)]
+        _JOB_STRUCT = Ext
+    return _JOB_STRUCT
+class WinJob:
+    """Job Object com nome (Local\\dove-run-<run_id>): TerminateJobObject derruba filho e netos; KILL_ON_JOB_CLOSE
+    garante que nada sobra se o vigia morrer ou fechar o handle. kernel32 injetavel para teste fora do Windows."""
+    def __init__(self, name, kernel32=None):
+        import ctypes
+        self.k, self.name = kernel32 or _win_k32(), name
+        self.h = self.k.CreateJobObjectW(None, name)
+        if not self.h: raise OSError(f"CreateJobObjectW falhou ({ctypes.get_last_error()})")
+        self.limits = job_limit_struct()()
+        self.limits.BasicLimitInformation.LimitFlags = JOB_LIMIT_KILL_ON_JOB_CLOSE
+        if not self.k.SetInformationJobObject(self.h, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(self.limits),
+                                              ctypes.sizeof(self.limits)):
+            self.close(); raise OSError("SetInformationJobObject falhou")
+    def assign(self, proc_handle):
+        if not self.k.AssignProcessToJobObject(self.h, proc_handle): raise OSError("AssignProcessToJobObject falhou")
+    def terminate(self, code=1):
+        if self.h: self.k.TerminateJobObject(self.h, code)
+    def close(self):
+        if self.h: self.k.CloseHandle(self.h); self.h = None
+def win_kill_job(name, kernel32=None):
+    """watch stop --kill no Windows, de outro processo: abre o job pelo nome e derruba a arvore inteira."""
+    k = kernel32 or _win_k32()
+    h = k.OpenJobObjectW(JOB_OBJECT_TERMINATE, False, name)
+    if not h: return False
+    try: return bool(k.TerminateJobObject(h, 1))
+    finally: k.CloseHandle(h)
+class WinTree:
+    """Windows: o filho nasce suspenso e num grupo de console proprio, entra no Job Object e so entao roda (nenhum neto
+    escapa do job). Parar = CTRL_BREAK_EVENT, espera, TerminateJobObject."""
+    popen_kw = {"creationflags": CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED}
+    def __init__(self, run_id, kernel32=None, ntdll=None, kill=None):
+        self.job = WinJob(f"Local\\dove-run-{run_id}", kernel32)
+        self.ntdll, self._kill, self.proc = ntdll, kill or os.kill, None
+    def attach(self, proc):
+        self.proc = proc
+        try: self.job.assign(int(proc._handle))
+        except Exception: proc.kill(); self.job.close(); raise
+    def resume(self):
+        nt = self.ntdll
+        if nt is None:
+            import ctypes
+            nt = ctypes.WinDLL("ntdll"); nt.NtResumeProcess.argtypes = [ctypes.c_void_p]
+        if nt.NtResumeProcess(int(self.proc._handle)) != 0:
+            self.job.terminate(1); raise OSError("NtResumeProcess falhou")
+    def info(self): return {"job": self.job.name}
+    def interrupt(self):
+        try: self._kill(self.proc.pid, getattr(signal, "CTRL_BREAK_EVENT", 1))
+        except OSError: pass
+    def kill(self): self.job.terminate(1)
+    def alive(self): return self.proc.poll() is None
+    def cleanup(self): self.job.close()  # KILL_ON_JOB_CLOSE: o que sobrou no job morre aqui
+def make_tree(run_id): return WinTree(run_id) if os.name == "nt" else PosixTree(run_id)
+def stop_tree(tree, proc, grace=RUN_GRACE):
+    """Pede para parar (SIGINT ao grupo / CTRL_BREAK), espera ate grace segundos a arvore sair e entao mata tudo."""
+    tree.interrupt(); end = time.time() + grace
+    while time.time() < end and tree.alive(): time.sleep(0.05)
+    tree.kill()
+    try: proc.wait(timeout=5)
+    except subprocess.TimeoutExpired: pass
+
+# ---- executor: qual programa roda para o agente
+def real_runner_argv(agent):
+    """Etapa 7 liga aqui a tabela revisada WATCH_RUNNERS (watch_argv, so os enabled). Ate la, nenhum executor real roda."""
+    raise DoveError(f"executor real ainda nao habilitado para {agent} (o vigia so roda o executor de teste nesta etapa)")
+def resolve_runner(agent):
+    """argv do executor do agente. Nesta etapa so o gancho de teste: A2A_RUNNER_OVERRIDE (caminho de um script),
+    lido SO com A2A_TESTING=1; senao recusa."""
+    over = os.environ.get("A2A_RUNNER_OVERRIDE", "")
+    if over and os.environ.get("A2A_TESTING") == "1":
+        path = os.path.abspath(os.path.expanduser(over))
+        if not os.path.isfile(path): raise DoveError(f"A2A_RUNNER_OVERRIDE nao e um arquivo: {path}")
+        return [sys.executable, path] if path.lower().endswith(".py") else [path]
+    return real_runner_argv(agent)
+
+# ---- uma execucao
+class RunResult:
+    """Resultado de run_agent: outcome ok|error|timeout|stopped|refused, exit_code, reason, record (o dict gravado) e
+    os caminhos record_path/out_path/err_path."""
+    def __init__(self, record, record_path, out_path, err_path):
+        self.record, self.record_path, self.out_path, self.err_path = record, record_path, out_path, err_path
+        self.run_id, self.agent, self.outcome = record["run_id"], record["agent"], record["outcome"]
+        self.exit_code, self.reason = record["exit_code"], record["reason"]
+    def __repr__(self): return f"RunResult({self.run_id} {self.agent} {self.outcome} code={self.exit_code})"
+def run_agent(agent, project, argv, cwd, stdin_text="", timeout=900, env_extra=None, trigger_ids=(), grace=RUN_GRACE):
+    """Roda argv em cwd como execucao do vigia para `agent`: env A2A_RUNNER=watch e A2A_RUN_ID, o prompt pelo stdin,
+    stdout/stderr direto em runs/AAAA-MM/<run_id>.out|.err (sem guardar em memoria). Recusa com STOP ou com outra
+    execucao do mesmo agente (run/<agente>.json); para com timeout ou se STOP aparecer (conferido a cada 1s).
+    Sempre grava runs/AAAA-MM/<run_id>.json e solta a trava no finally."""
+    check_agent_name(agent)
+    t0 = time.time(); run_id = new_run_id(t0)
+    d = os.path.join(RUNS_DIR, time.strftime("%Y-%m", time.gmtime(t0))); os.makedirs(d, exist_ok=True)
+    base = os.path.join(d, run_id); rec_p, out_p, err_p = base + ".json", base + ".out", base + ".err"
+    prompt = stdin_text or ""
+    rec = {"v": 1, "run_id": run_id, "agent": agent, "project": project or "", "cwd": cwd,
+           "argv": redact_argv(argv, prompt), "stdin": {"sha256": prompt_hash(prompt), "len": len(prompt)},
+           "env_extra": sorted(env_extra or {}), "trigger_ids": list(trigger_ids or []), "host": HOST,
+           "started": epoch_iso(t0), "ended": None, "duration_s": None, "timeout_s": timeout, "pid": None,
+           "exit_code": None, "outcome": "running", "reason": "",
+           "stdout": os.path.relpath(out_p, HOME), "stderr": os.path.relpath(err_p, HOME), "stderr_tail": "", "usage": None}
+    def finish(outcome, reason="", code=None):
+        t1 = time.time()
+        rec.update(ended=epoch_iso(t1), duration_s=round(t1 - t0, 3), exit_code=code, outcome=outcome, reason=reason,
+                   stderr_tail=file_tail(err_p))
+        write_json(rec_p, rec)
+        return RunResult(rec, rec_p, out_p, err_p)
+    if os.path.exists(STOP_FILE):
+        return finish("refused", f"{STOP_FILE} existe: nenhuma execucao nova (a2a watch resume --from {human_name()})")
+    lock_p = os.path.join(RUN_DIR, agent + ".json")
+    linfo = lock_info(kind="run", agent=agent, run_id=run_id, project=project or "")
+    ok, cur = lock_acquire(lock_p, linfo)
+    if not ok: return finish("refused", f"{agent} ja tem uma execucao em curso (run {cur.get('run_id', '?')}, {lock_holder(cur)})")
+    proc = tree = feeder = None
+    try:
+        if not os.path.isdir(cwd or ""): return finish("error", f"pasta de trabalho nao existe: {cwd}")
+        env = dict(os.environ); env.update({str(k): str(v) for k, v in (env_extra or {}).items()})
+        env.update(A2A_RUNNER="watch", A2A_RUN_ID=run_id)  # depois do env_extra: nao da para sobrescrever
+        tree = make_tree(run_id)
+        try:
+            with open(out_p, "wb") as fo, open(err_p, "wb") as fe:
+                proc = subprocess.Popen([str(x) for x in argv], cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=fo,
+                                        stderr=fe, **tree.popen_kw)
+        except OSError as e: return finish("error", f"nao consegui iniciar {argv[0] if argv else '?'}: {e}")
+        tree.attach(proc); tree.resume()
+        rec["pid"] = proc.pid
+        linfo.update(child_pid=proc.pid, child_start=proc_token(proc.pid), **tree.info()); write_json(lock_p, linfo)
+        write_json(rec_p, rec)  # registro "running" enquanto roda (watch runs mostra)
+        def feed():
+            try: proc.stdin.write(prompt.encode("utf-8"))
+            except (OSError, ValueError): pass
+            finally:
+                try: proc.stdin.close()
+                except (OSError, ValueError): pass
+        feeder = threading.Thread(target=feed, daemon=True); feeder.start()
+        outcome = reason = ""; next_stop = 0.0
+        while proc.poll() is None:
+            now = time.time()
+            if timeout and now - t0 >= timeout: outcome, reason = "timeout", f"passou de {timeout:g}s"; break
+            if now >= next_stop:
+                next_stop = now + 1.0
+                if os.path.exists(STOP_FILE): outcome, reason = "stopped", "STOP apareceu durante a execucao"; break
+            time.sleep(0.1)
+        if outcome: stop_tree(tree, proc, grace)
+        code = proc.returncode
+        if not outcome:
+            if code == 0: outcome = "ok"
+            elif os.path.exists(STOP_FILE): outcome, reason = "stopped", f"encerrada com STOP (watch stop --kill); codigo {code}"
+            else: outcome, reason = "error", f"saiu com codigo {code}"
+        return finish(outcome, reason, code)
+    except BaseException as e:
+        if proc is not None and proc.poll() is None: stop_tree(tree, proc, grace)
+        code = proc.returncode if proc is not None else None
+        if isinstance(e, (KeyboardInterrupt, SystemExit)): finish("stopped", "vigia interrompido", code)
+        else: finish("error", f"erro no supervisor: {e}", code)
+        raise
+    finally:
+        if tree is not None: tree.cleanup()
+        if feeder is not None: feeder.join(1)
+        lock_release(lock_p, linfo)
+
+def run_jobs(jobs, max_parallel=1, runner=None):
+    """Agenda execucoes: jobs = dicts com os argumentos de run_agent. No maximo max_parallel ao mesmo tempo (padrao 1)
+    e nunca duas do mesmo agente juntas (pega o primeiro da fila FIFO cujo agente esta livre). Devolve, na ordem dos
+    jobs, o RunResult de cada um (ou a excecao, se o runner levantou)."""
+    try: max_parallel = int(max_parallel)
+    except (TypeError, ValueError): max_parallel = 0
+    if max_parallel < 1: raise DoveError("--max-parallel precisa ser um inteiro >= 1")
+    runner = runner or run_agent
+    pending, results, busy, cv = list(enumerate(jobs)), [None] * len(jobs), set(), threading.Condition()
+    state = {"running": 0}
+    def work(i, job):
+        try: results[i] = runner(**job)
+        except Exception as e: results[i] = e
+        finally:
+            with cv: busy.discard(job["agent"]); state["running"] -= 1; cv.notify_all()
+    with cv:
+        while pending or state["running"]:
+            pick = None
+            if state["running"] < max_parallel: pick = next((x for x in pending if x[1]["agent"] not in busy), None)
+            if pick is None: cv.wait(); continue
+            pending.remove(pick); busy.add(pick[1]["agent"]); state["running"] += 1
+            threading.Thread(target=work, args=pick, daemon=True).start()
+    return results
+
+# ---- kill switch, travas e registros (CLI a2a watch stop|resume|runs|status)
+def active_runs():
+    """[(caminho, info, velha?)] das travas run/<agente>.json."""
+    out = []
+    for f in sorted(glob.glob(os.path.join(RUN_DIR, "*.json"))):
+        info = read_json(f)
+        if isinstance(info, dict): out.append((f, info, lock_stale(info)))
+    return out
+def kill_run(info):
+    """Derruba agora a arvore de uma execucao em curso, de outro processo (watch stop --kill). So atinge o processo se o
+    pid ainda e o mesmo (instante de criacao): pid reusado nunca e morto."""
+    if info.get("host") and info["host"] != HOST: return "outra maquina: nao mexi"
+    pid, tok = info.get("child_pid"), info.get("child_start")
+    if not pid or not proc_is(pid, tok): return "ja tinha terminado"
+    if os.name == "nt":
+        return "encerrada (TerminateJobObject)" if info.get("job") and win_kill_job(info["job"]) else "job nao encontrado"
+    pgid = info.get("pgid") or pid
+    try:
+        if os.getpgid(pid) != pgid: return "grupo de processos mudou: nao mexi"
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError: return "ja tinha terminado"
+    except PermissionError as e: return f"sem permissao: {e}"
+    return "encerrada (SIGKILL no grupo)"
+def watch_stop(by, kill=False):
+    require_human(by)
+    os.makedirs(HOME, exist_ok=True)
+    write_json(STOP_FILE, {"by": by, "at": now_iso(), "kill": bool(kill)})
+    return [(info, kill_run(info)) for _, info, stale in active_runs() if not stale] if kill else []
+def watch_resume(by):
+    require_human(by)
+    try: os.remove(STOP_FILE); return True
+    except FileNotFoundError: return False
+def run_records(last=20, agent=None):
+    """Registros de execucao (mais novo primeiro). last=0: todos."""
+    files = [f for f in glob.glob(os.path.join(RUNS_DIR, "*", "*.json"))
+             if RUN_ID_RE.match(os.path.basename(f)[:-5]) and MONTH_RE.match(os.path.basename(os.path.dirname(f)))]
+    files.sort(key=lambda f: os.path.basename(f), reverse=True)
+    out = []
+    for f in files:
+        r = read_json(f)
+        if not isinstance(r, dict) or (agent and r.get("agent") != agent): continue
+        out.append(r)
+        if last and len(out) >= last: break
+    return out
+def watch_supervisor(a):
+    """a2a watch stop|resume|runs|status (o check fica no cmd_watch)."""
+    try:
+        if a.wcmd == "stop":
+            killed = watch_stop(a._from, a.kill)
+            print(f"STOP criado ({STOP_FILE}): nenhuma execucao nova; as em curso param em ate 1s + {RUN_GRACE:g}s"
+                  + ("" if a.kill else " (use --kill para encerrar ja)"))
+            for info, res in killed: print(f"  {info.get('agent', '?')} run {info.get('run_id', '?')}: {res}")
+            if a.kill and not killed: print("  nenhuma execucao em curso")
+        elif a.wcmd == "resume":
+            print(f"STOP removido: execucoes liberadas" if watch_resume(a._from) else "STOP nao existia: nada a fazer")
+        elif a.wcmd == "runs":
+            if a.last < 0: fail("erro: --last precisa ser >= 0")
+            recs = run_records(a.last, a.agent)
+            if a.json: print(json.dumps(recs, ensure_ascii=False)); return
+            if not recs: print("(nenhuma execucao registrada)"); return
+            live = {i.get("run_id") for _, i, stale in active_runs() if not stale}
+            for r in recs:
+                out = r.get("outcome", "?")
+                if out == "running" and r.get("run_id") not in live: out = "interrompida"
+                dur = f"{r['duration_s']:.1f}s" if isinstance(r.get("duration_s"), (int, float)) else "-"
+                code = "-" if r.get("exit_code") is None else r["exit_code"]
+                print(f"{r.get('started', '?')} {r.get('run_id', '?')} {r.get('agent', '?'):<10} {r.get('project') or '-':<12} "
+                      f"{out:<12} codigo {code:<4} {dur:>8}" + (f"  {short(r['reason'], 80)}" if r.get("reason") else ""))
+        else:  # status
+            st = read_json(STOP_FILE)
+            if os.path.exists(STOP_FILE):
+                st = st if isinstance(st, dict) else {}
+                print(f"STOP: sim, desde {st.get('at', '?')} por {st.get('by', '?')} (nenhuma execucao nova)")
+            else: print("STOP: nao (execucoes liberadas)")
+            w = read_json(WATCH_LOCK)
+            if os.path.exists(WATCH_LOCK):
+                w = w if isinstance(w, dict) else {}
+                print(f"vigia: {lock_holder(w)} ({'trava velha: o dono morreu' if lock_stale(w) else 'rodando'})")
+            else: print("vigia: nenhum rodando")
+            runs = active_runs()
+            if not runs: print("execucoes em curso: nenhuma")
+            for _, i, stale in runs:
+                print(f"  {i.get('agent', '?'):<10} run {i.get('run_id', '?')} projeto {i.get('project') or '-'} "
+                      f"pid {i.get('child_pid', '-')} ha {fmt_age(i.get('ts'))} ({'trava velha' if stale else 'rodando'})")
+    except DoveError as e: fail(f"erro: {e}")
+
 class ExemplosFormatter(argparse.RawDescriptionHelpFormatter):
     """Como o RawDescriptionHelpFormatter, mas so para texto com quebra de linha (os exemplos do epilog);
     descricoes de uma linha continuam quebradas pela largura do terminal como antes."""
@@ -3556,7 +4039,14 @@ def build_parser():
     pm.add_argument("--max-tail-chars", dest="max_tail_chars", type=int, default=4000,
                     help="tamanho maximo da parte variavel (padrao 4000; 0 = sem corte)")
     pm.set_defaults(func=cmd_prompt)
-    wa = sub.add_parser("watch", help="vigia (Fase 3): por enquanto so a pre-checagem (watch check, so leitura)")
+    wa = sub.add_parser("watch", help="vigia (Fase 3): pre-checagem, kill switch STOP, travas e registros das execucoes",
+        description="watch check: pre-checagem so de leitura (veja a2a watch check --help). Supervisor do vigia: cada execucao de agente roda com trava por agente (~/.a2a/run/<agente>.json), "
+        "timeout e controle da arvore de processos (Job Object no Windows, grupo de processos no POSIX), e deixa um registro "
+        "em ~/.a2a/runs/AAAA-MM/<run_id>.json (+ .out/.err). ~/.a2a/STOP e o kill switch: com ele nenhuma execucao nova "
+        "comeca e as em curso param em ate 1s (pedido educado, 5s de espera, depois a arvore inteira e morta). "
+        "O supervisor ainda nao roda executor real (claude/codex/hermes): so o executor de teste.", **ex(
+        "a2a watch check --project lagu", "a2a watch stop --from luiz", "a2a watch stop --from luiz --kill", "a2a watch resume --from luiz",
+        "a2a watch status", "a2a watch runs --last 5", "a2a watch runs --agent codex --json"))
     was = wa.add_subparsers(dest="wcmd", required=True)
     x = was.add_parser("check", help="pre-checagem do vigia: CLIs, versoes, login, sandbox, copias limpas, STOP (so leitura)",
         description="Confere se o vigia poderia rodar cada agente, sem chamar nenhum modelo: so roda `--version`, `--help` e "
@@ -3572,6 +4062,15 @@ def build_parser():
     x.add_argument("--json", action="store_true", help="resultado em uma linha de JSON")
     x.add_argument("--show-command", dest="show_command", action="store_true",
                    help="imprime o argv exato que o vigia usaria (com a allowlist), sem rodar nada")
+    x = was.add_parser("stop", help="cria ~/.a2a/STOP: nada novo comeca e as execucoes em curso param (so o humano)")
+    x.add_argument("--from", dest="_from", required=True, help="o humano (acao so do humano)")
+    x.add_argument("--kill", action="store_true", help="tambem mata ja a arvore de processos das execucoes em curso")
+    x = was.add_parser("resume", help="apaga ~/.a2a/STOP (so o humano)")
+    x.add_argument("--from", dest="_from", required=True, help="o humano (acao so do humano)")
+    x = was.add_parser("runs", help="lista os registros de execucao (so leitura; mais novo primeiro)")
+    x.add_argument("--last", type=int, default=20, help="quantos (padrao 20; 0 = todos)"); x.add_argument("--agent")
+    x.add_argument("--json", action="store_true", help="os registros em uma linha de JSON")
+    was.add_parser("status", help="STOP, vigia rodando (watch.lock) e execucoes em curso (travas por agente)")
     wa.set_defaults(func=cmd_watch)
     o = sub.add_parser("onboard", help="imprime as instrucoes do canal para um agente ou para o AGENTS.md")
     og = o.add_mutually_exclusive_group(required=True)
