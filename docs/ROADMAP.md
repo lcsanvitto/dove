@@ -64,8 +64,9 @@ Todos os passos têm aval do Luiz; o 12 foi aceito com risco em 2026-10-19 (desl
 | 13 | Política de subagentes | **FEITO** · 898c637 (+ c65d148 teste determinístico) |
 | 14 | `assignee` (responsável único) em missões e tarefas | **APROVADO** (Luiz, 2026-10-19: "sim") · **pré-requisito do passo 7** (entra antes dele) |
 | 15 | `parent` (missão-mãe) em missões | **APROVADO** (Luiz, 2026-10-19: "sim") · entra junto com o 11, depois do 7 |
+| 16 | Controle remoto pelo celular (`tailscale serve`, papel `remote`) | **APROVADO** (Luiz, 2026-10-19: "Sim", MUITO IMPORTANTE) · só depois de 14, 7, 9, 12, 11 e 15 |
 
-Ordem de dependência: **14 → 7 → (9, 11 + 15)**.
+Ordem de dependência: **14 → 7 → (9, 11 + 15) → 12 → 16**.
 
 **Passo 14 — `assignee`** (pré-requisito do 7; a especificação do passo 7 continua como está):
 - Campo opcional `assignee` em missões e tarefas: um único agente responsável.
@@ -78,6 +79,28 @@ Ordem de dependência: **14 → 7 → (9, 11 + 15)**.
 - Escopo mínimo: o campo + somar o gasto das filhas no orçamento da mãe e no `a2a cost`.
 - A mãe só fecha quando todas as filhas estiverem `CONCLUIDO` ou `CANCELADO`; fechar continua só humano (`require_human`).
 - **Sem** automação de propagação de estado e **sem** UI de árvore.
+
+**Passo 16 — Controle remoto pelo celular** (aprovado pelo Luiz em 2026-10-19: "Sim", prioridade **MUITO IMPORTANTE**)
+Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas/2026-10-19-orca-controle-remoto-mobile.md) (pesquisa do Orca + design).
+- **Direção:** o painel continua em `127.0.0.1` e é publicado com `tailscale serve` (HTTPS só dentro da tailnet). **NUNCA** Funnel, Cloudflare Tunnel, ngrok nem `0.0.0.0`. Sem relay, sem WebSocket, sem serviço de terceiros, só stdlib. O Orca (stablyai/orca, MIT, TypeScript) é só fonte de ideias.
+- **Papel restrito "remote":** só para Hosts de uma lista explícita `remote_hosts` (vazia = remoto desligado); tabela de rotas fail-closed; código de pareamento de uso único, válido por 5 min; token por dispositivo, revogável, guardado com hash em `~/.a2a/devices.json` (0600).
+- **O celular pode:** ler o status, **STOP** (sempre permitido), concluir missão e enviar mensagem (estes dois são permissões por dispositivo, desligadas por padrão).
+- **Só no desktop:** git push/merge/commit, remover cópias de trabalho/projetos/agentes, retomar depois do STOP, orçamento, configuração, gestão de dispositivos.
+- **Lacuna conhecida, corrigir PRIMEIRO:** hoje `GET /` entrega o token do processo a qualquer requisição que passe na checagem de Host, e `/api/state` e `/api/messages` não pedem token; a checagem de Origin só aceita `http://`. Só é seguro porque o painel é loopback. Precisa ser corrigido antes de expor qualquer coisa.
+- **Sub-passos em ordem** (detalhes na proposta, seção 7):
+  - 0: teste manual do `tailscale serve`, sem código.
+  - 1: `remote_hosts`.
+  - 2: papel + tabela de rotas fail-closed + testes.
+  - 3: `a2a remote pair/list/revoke` + arquivo de dispositivos. **Precisa de aval explícito do Luiz.**
+  - 4: estado reduzido, só leitura.
+  - 5: página móvel `ui/remote.html` (precisa do Claude Design; `ui/` está pausada).
+  - 6: STOP remoto + log de auditoria.
+  - 7: permissões de missão/mensagem. **Precisa de aval explícito do Luiz.**
+  - 8: revisão de segurança.
+  - 9: notificação por polling.
+  - 10: ntfy opcional, só texto genérico. **Precisa de aval explícito do Luiz.**
+  - 11: QR em texto, opcional.
+- **Dependência:** começa só **depois** dos passos 14, 7, 9, 12, 11 e 15, porque mexe no `a2a.py` (evita conflitos).
 
 **Nota para quem implementar o passo 7** (o orçamento do passo 8 já existe, falta ligar no executor):
 - Gravar `"mission"` e `"usage_file"` (Hermes) nos registros de run.
@@ -98,6 +121,7 @@ Ordem de dependência: **14 → 7 → (9, 11 + 15)**.
 - Hermes no vigia (passo 12): o Luiz aceitou o risco em 2026-10-19 ("quero arriscar"); desligado por padrão, exige opt-in explícito.
 
 - `assignee` (passo 14) e `parent` (passo 15): aprovados pelo Luiz em 2026-10-19 ("sim"), nos termos acima.
+- Controle remoto pelo celular (passo 16): aprovado pelo Luiz em 2026-10-19 ("Sim", MUITO IMPORTANTE), nos termos acima; `tailscale serve`, nunca Funnel/túnel público.
 - **Descartados** explicitamente: prioridade, tags, dependências entre tarefas e qualquer coisa que o agente já leia no texto da missão.
 
 **Pendentes**
@@ -111,6 +135,6 @@ Ordem de dependência: **14 → 7 → (9, 11 + 15)**.
 ## 7. Como retomar numa sessão nova
 1. Leia este arquivo e rode `git log --oneline | head -30`.
 2. Rode os testes: `python3 tests/test_a2a.py`.
-3. Propostas: `docs/propostas/` no `main` e os branches `proposta/*` (`fase3-orquestrador`, `interface-agentes`).
+3. Propostas: `docs/propostas/` no `main` (inclui `2026-10-19-orca-controle-remoto-mobile.md`) e os branches `proposta/*` (`fase3-orquestrador`, `interface-agentes`).
 4. Regras: só a stdlib; não mexer em `ui/` sem o Luiz; `DOVE_VERSION` estável enquanto a UI estiver pausada.
 5. Sensível (execução de agentes, gasto, `~/.a2a`, envelope, merge/deploy) só com aval do Luiz.
