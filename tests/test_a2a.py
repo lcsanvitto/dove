@@ -3384,6 +3384,118 @@ def assignee_fase():
           "ou --reply-to), humano sempre pode, demais participantes seguem comentando/revisando (outros estados e aval "
           "de missao livres), --assignee do send so com kind=task e precisa casar com --to (ou --to all), sem o campo "
           "nada muda")
+def parent_fase():
+    """`parent` em missoes (etapa 15): id opcional da missao-mae; precisa existir, estar aberta (sem conclusao) e ser
+    do mesmo projeto da filha; soma (uma unica vez, sem contar duas vezes, e sem a filha ver o gasto da mae) o gasto
+    das filhas diretas no orcamento/teto da mae (budget_status/run_budget_cap) e no a2a cost (cost_data); a mae so
+    fecha quando todas as filhas estiverem concluidas (reprovada nao conta como fechada); sem --parent, nada muda."""
+    import glob
+    from datetime import datetime, timezone
+    tmp = tempfile.mkdtemp(); work = tempfile.mkdtemp()
+    claude, codex, hermes = (os.path.join(tmp, x) for x in ("claude", "codex", "hermes"))
+    env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8", CLAUDE_CONFIG_DIR=claude,
+               CODEX_HOME=codex, HERMES_HOME=hermes)
+    drv = os.path.join(work, "parent_driver.py"); open(drv, "w").write(BUDGET_DRIVER)
+    def a2a(*args, code=0):
+        r = run(env, *args)
+        assert r.returncode == code, (args, r.returncode, r.stdout, r.stderr)
+        return r.stdout + r.stderr
+    def drive(mode, arg):
+        r = subprocess.run([sys.executable, drv, str(ROOT), mode, json.dumps(arg)],
+                           capture_output=True, text=True, encoding="utf-8", env=env)
+        assert r.returncode == 0 and r.stdout.strip(), (mode, arg, r.returncode, r.stdout, r.stderr)
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    a2a("init"); a2a("join", "--agent", "claude"); a2a("join", "--agent", "codex")
+
+    # --parent: mae precisa existir; invalido nao pode deixar rastro
+    r = run(env, "mission", "new", "--project", "lagu", "--title", "filha", "--agents", "claude",
+            "--parent", "mnaoexiste", "--from", "luiz")
+    assert r.returncode == 1 and "nao encontrada" in r.stderr, r.stderr
+    assert not glob.glob(os.path.join(tmp, "missions", "*.json")) and not glob.glob(os.path.join(tmp, "bus", "*.json")), \
+        "parent invalido nao pode deixar rastro"
+
+    pid = a2a("mission", "new", "--project", "lagu", "--title", "mae", "--agents", "claude,codex", "--from", "luiz").split()[1]
+
+    # --parent: a filha precisa ser do mesmo projeto da mae
+    r = run(env, "mission", "new", "--project", "outro", "--title", "filha", "--agents", "claude",
+            "--parent", pid, "--from", "luiz")
+    assert r.returncode == 1 and "mesmo projeto" in r.stderr, r.stderr
+
+    # ok: filha valida -> aparece na criacao e no mostrar dos dois lados
+    out = a2a("mission", "new", "--project", "lagu", "--title", "filha", "--agents", "claude", "--parent", pid, "--from", "luiz")
+    assert f"mae: {pid}" in out, out
+    cid = out.split()[1]
+    assert f"mae: {pid}" in a2a("mission", "show", cid)
+    assert f"filhas: {cid} (aberta)" in a2a("mission", "show", pid)
+
+    # mae ja concluida -> nao aceita filha nova
+    pid2 = a2a("mission", "new", "--project", "lagu", "--title", "mae2", "--agents", "claude", "--from", "luiz").split()[1]
+    a2a("mission", "approve", pid2, "--agent", "claude", "--evidence", "ok")
+    a2a("mission", "done", pid2, "--from", "luiz")
+    r = run(env, "mission", "new", "--project", "lagu", "--title", "tarde", "--agents", "claude",
+            "--parent", pid2, "--from", "luiz")
+    assert r.returncode == 1 and "ja foi concluida" in r.stderr, r.stderr
+
+    # sem --parent: nada muda (compat)
+    out = a2a("mission", "new", "--project", "lagu", "--title", "solo", "--agents", "claude", "--from", "luiz")
+    assert "mae:" not in out, out
+    solo = out.split()[1]
+    assert "mae:" not in a2a("mission", "show", solo) and "filhas:" not in a2a("mission", "show", solo)
+
+    # gate: a mae so fecha quando as filhas estiverem concluidas (reprovada nao conta como fechada)
+    a2a("mission", "approve", pid, "--agent", "claude", "--evidence", "ok")
+    a2a("mission", "approve", pid, "--agent", "codex", "--evidence", "ok")
+    assert "aval_completo" in a2a("mission", "list")
+    r = run(env, "mission", "done", pid, "--from", "luiz")
+    assert r.returncode == 1 and "filha" in r.stderr and cid in r.stderr, r.stderr
+    a2a("mission", "reject", cid, "--agent", "claude", "--reason", "falta algo")
+    r = run(env, "mission", "done", pid, "--from", "luiz")
+    assert r.returncode == 1 and "filha" in r.stderr and cid in r.stderr, r.stderr  # reprovada != concluida
+    a2a("mission", "approve", cid, "--agent", "claude", "--evidence", "ok, de novo")
+    a2a("mission", "done", cid, "--from", "luiz")
+    assert "concluida" in a2a("mission", "show", cid)
+    a2a("mission", "done", pid, "--from", "luiz")
+    assert "concluida" in a2a("mission", "show", pid)
+
+    # ---- orcamento: o gasto da filha soma no da mae uma unica vez (nao duas, nao zero); a filha nao ve o da mae
+    pid3 = a2a("mission", "new", "--project", "lagu", "--title", "mae3", "--agents", "claude", "--from", "luiz").split()[1]
+    cid3 = a2a("mission", "new", "--project", "lagu", "--title", "filha3", "--agents", "claude",
+               "--parent", pid3, "--from", "luiz").split()[1]
+    a2a("mission", "budget", pid3, "--usd", "0.35", "--from", "luiz")  # menor que o teto padrao (0,50): testa o restante
+    a2a("mission", "budget", cid3, "--usd", "1", "--from", "luiz")
+
+    T = time.time(); n = [0]
+    iso = lambda t: datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    def mkrun(mission_id, cost, tokens):
+        n[0] += 1
+        rid = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(T)) + "-%06x" % (0xc00000 + n[0])
+        d = os.path.join(tmp, "runs", time.strftime("%Y-%m", time.gmtime(T))); os.makedirs(d, exist_ok=True)
+        rec = {"v": 1, "run_id": rid, "agent": "claude", "project": "lagu", "cwd": work, "argv": ["claude"],
+               "started": iso(T), "ended": iso(T), "duration_s": 1.0, "exit_code": 0, "outcome": "ok", "reason": "",
+               "stdout": "", "stderr": "", "stderr_tail": "", "mission": mission_id,
+               "usage": {"total": tokens, "cost_usd_est": cost, "session_id": "sess-" + rid, "parsed": True}}
+        json.dump(rec, open(os.path.join(d, rid + ".json"), "w")); return rid
+    mkrun(pid3, 0.10, 100)  # execucao da propria mae
+    mkrun(cid3, 0.20, 200)  # execucao da filha: precisa somar no orcamento da mae, uma unica vez
+
+    stp = drive("status", {"mission": pid3})
+    assert abs(stp["spent"]["usd"] - 0.30) < 1e-9 and stp["spent"]["runs"] == 2 and stp["spent"]["tokens"] == 300, stp
+    stc = drive("status", {"mission": cid3})
+    assert abs(stc["spent"]["usd"] - 0.20) < 1e-9 and stc["spent"]["runs"] == 1 and stc["spent"]["tokens"] == 200, stc
+    # teto: o menor entre o padrao (0,50) e o que resta do orcamento da mae (0,35 - 0,30 = 0,05, ja com o gasto da filha)
+    assert abs(drive("cap", {"mission": pid3}) - 0.05) < 1e-6
+
+    # a2a cost --mission: ids/agentes da familia e contagem de filhas (via --json e no cabecalho)
+    r = run(env, "cost", "--mission", pid3, "--json"); assert r.returncode == 0, r.stderr
+    cj = json.loads(r.stdout)
+    assert cj["mission"]["children"] == [cid3] and cj["mission"]["ids"] == sorted([pid3, cid3]) and \
+        cj["mission"]["agents"] == ["claude"], cj["mission"]
+    assert "+ 1 filha(s)" in a2a("cost", "--mission", pid3)
+
+    print("OK: parent (etapa 15) - id opcional da missao-mae (precisa existir, estar aberta, mesmo projeto da filha; "
+          "sem ele nada muda), budget_status/run_budget_cap/a2a cost somam o gasto das filhas no da mae numa unica "
+          "passada (sem contar duas vezes, e sem a filha ver o gasto da mae), mission done so fecha a mae com todas "
+          "as filhas concluidas (reprovada nao conta)")
 def budget_fase():
     """Etapa 8 da Fase 3: consumo por execucao (claude json/stream-json/parado, codex exec --json cumulativo, hermes
     --usage-file), watch usage grava no registro, orcamento de missao e de projeto/dia so do humano, budget_status com
@@ -3700,3 +3812,4 @@ if __name__ == "__main__":
     budget_fase()
     assignee_fase()
     endurecimento_fase()
+    parent_fase()

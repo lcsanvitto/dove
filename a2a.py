@@ -1258,6 +1258,13 @@ def mission_assignees():
         m = read_json(f)
         if isinstance(m, dict) and m.get("id") and m.get("assignee"): out[m["id"]] = m["assignee"]
     return out
+def mission_children(mid):
+    """So leitura, sem ensure_dirs (etapa 15): [missao] cujo parent e mid (filhas diretas, nao recursivo)."""
+    out = []
+    for f in glob.glob(os.path.join(MISSIONS, "*.json")):
+        m = read_json(f)
+        if isinstance(m, dict) and m.get("id") and m.get("parent") == mid: out.append(m)
+    return sorted(out, key=lambda m: m.get("created", ""))
 def mission_status(m):
     ap = m.get("approvals") or {}
     v = [(ap.get(a) or {}).get("verdict") for a in m.get("agents", [])]
@@ -1269,7 +1276,7 @@ def mission_view(m):
     return dict(m, status=mission_status(m),
                 approved=sum(1 for a in m.get("agents", []) if (ap.get(a) or {}).get("verdict") == "approve"),
                 total=len(m.get("agents", [])))
-def mission_new(project, title, desc="", agents=None, created_by=None, assignee=""):
+def mission_new(project, title, desc="", agents=None, created_by=None, assignee="", parent=""):
     project, title = (project or "").strip(), (title or "").strip()
     if not project: raise DoveError("missao exige --project")
     if not title: raise DoveError("missao exige --title")
@@ -1281,12 +1288,18 @@ def mission_new(project, title, desc="", agents=None, created_by=None, assignee=
         if assignee == human_name(): raise DoveError("assignee precisa ser um agente participante, nao o humano")
         if assignee in RESERVED_AGENTS: raise DoveError(f"assignee '{assignee}' e reservado")
         if assignee not in ags: raise DoveError(f"assignee '{assignee}' precisa estar entre os participantes ({', '.join(ags)})")
+    parent = (parent or "").strip()
+    if parent:  # etapa 15: missao-mae precisa existir, estar aberta e ser do mesmo projeto
+        pm = load_mission(parent)
+        if pm.get("human"): raise DoveError(f"parent '{parent}' ja foi concluida: nao pode receber filha nova")
+        if pm.get("project") != project:
+            raise DoveError(f"parent '{parent}' e do projeto '{pm.get('project')}': a filha precisa ser do mesmo projeto")
     created_by = (created_by or "").strip() or human_name()
     refuse_if_runner_as_human(created_by)
     mid = "m" + uuid.uuid4().hex[:7]; ensure_dirs()
     m = {"id": mid, "project": project, "title": title, "description": desc or "", "agents": ags,
          "created_by": created_by, "created": now_iso(), "approvals": {}, "history": [], "human": None,
-         "assignee": assignee}
+         "assignee": assignee, "parent": parent}
     write_json(mission_path(mid), m)
     human = created_by == human_name()
     for ag in ags:
@@ -1327,6 +1340,9 @@ def mission_done(mid, by):
         if st == "concluida": raise DoveError(f"missao {mid} ja estava concluida")
         if st != "aval_completo":
             raise DoveError(f"missao {mid} esta '{st}': a conclusao so vale com o aval de todos os agentes")
+        abertas = [c["id"] for c in mission_children(mid) if mission_status(c) != "concluida"]  # etapa 15
+        if abertas:
+            raise DoveError(f"missao {mid} tem filha(s) nao concluida(s): {', '.join(abertas)}")
         m["human"] = {"by": by, "ts": now_iso()}; write_json(mission_path(mid), m)
     return m
 def mission_line(m):
@@ -1336,9 +1352,10 @@ def cmd_mission(a):
     try:
         if a.mcmd == "new":
             ags = [x for x in (a.agents or "").split(",") if x.strip()]
-            m = mission_new(a.project, a.title, a.desc, ags, a._from, a.assignee)
+            m = mission_new(a.project, a.title, a.desc, ags, a._from, a.assignee, a.parent)
             print(f"missao {m['id']} criada ({', '.join(m['agents'])}): {m['title']}"
-                  + (f" · responsavel: {m['assignee']}" if m.get("assignee") else ""))
+                  + (f" · responsavel: {m['assignee']}" if m.get("assignee") else "")
+                  + (f" · mae: {m['parent']}" if m.get("parent") else ""))
         elif a.mcmd == "approve":
             m = mission_verdict(a.id, a.agent, "approve", a.evidence)
             print(f"aval de '{a.agent}' registrado na missao {a.id} -> {mission_status(m)}")
@@ -1361,6 +1378,9 @@ def cmd_mission(a):
                   f"avais: {v['approved']}/{v['total']}  criada por {v['created_by']} em {v['created']}")
             if v.get("description"): print(f"descricao: {v['description']}")
             if v.get("assignee"): print(f"responsavel: {v['assignee']}")
+            if v.get("parent"): print(f"mae: {v['parent']}")
+            kids = mission_children(v["id"])
+            if kids: print("filhas: " + ", ".join(f"{c['id']} ({mission_status(c)})" for c in kids))
             for ag in v["agents"]:
                 x = (v.get("approvals") or {}).get(ag)
                 if not x: print(f"  {ag:<12} pendente")
@@ -3829,8 +3849,13 @@ def cost_data(since=None, until=None, project=None, agent=None, by="agente", mis
     mission = None
     if mission_id:
         m = load_mission(mission_id)
-        start = iso_epoch(m.get("created")); end = iso_epoch((m.get("human") or {}).get("ts")) or now
-        mission = {"id": m["id"], "project": m.get("project"), "agents": list(m.get("agents") or []),
+        kids = mission_children(m["id"])  # etapa 15: soma o gasto das filhas diretas
+        fam = [m] + kids
+        start = min(iso_epoch(x.get("created")) or 0.0 for x in fam)
+        end = max(iso_epoch((x.get("human") or {}).get("ts")) or now for x in fam)
+        mission = {"id": m["id"], "ids": sorted({x["id"] for x in fam}), "project": m.get("project"),
+                   "agents": sorted({a for x in fam for a in (x.get("agents") or [])}),
+                   "children": [c["id"] for c in kids],
                    "from": epoch_iso(start) if start else None, "to": epoch_iso(end), "approx": True}
         since, until = start, end
     elif since is None: since = parse_since("7d", now)
@@ -3868,7 +3893,8 @@ def cost_lines(d):
     scope = d["project"] or "todos os projetos"
     if d["mission"]:
         mm = d["mission"]
-        head = (f"custo · missao {mm['id']} ({mm['project']}; {', '.join(mm['agents'])}) · {mm['from'] or '?'} a {mm['to']} "
+        kids_txt = f" + {len(mm['children'])} filha(s)" if mm.get("children") else ""
+        head = (f"custo · missao {mm['id']} ({mm['project']}; {', '.join(mm['agents'])}){kids_txt} · {mm['from'] or '?'} a {mm['to']} "
                 f"· por {by} · aproximado")
     else: head = f"custo · {scope}" + (f" · {d['agent']}" if d["agent"] else "") + f" · desde {d['since']} · por {by}"
     cols = ("sessoes", "entrada", "saida", "cache_lido", "cache_escrito", "total", "cache%", "custo estimado")
@@ -4727,7 +4753,7 @@ def _run_in_scope(rec, since, until, project=None, mission=None):
     t = iso_epoch(rec.get("started"))
     if t is None or t < since or t > until: return False
     if mission:
-        if "mission" in rec: return rec.get("mission") == mission["id"]  # o vigia grava a missao: vale exata
+        if "mission" in rec: return rec.get("mission") in mission["ids"]  # o vigia grava a missao: vale exata (etapa 15: inclui filhas)
         return rec.get("project") == mission["project"] and rec.get("agent") in mission["agents"]
     return not project or rec.get("project") == project
 def budget_spent(since, until, project=None, mission=None):
@@ -4766,7 +4792,7 @@ def budget_status(project=None, mission=None, now=None):
         lim = m.get("budget") if isinstance(m.get("budget"), dict) else {}
         since = iso_epoch(m.get("created")) or 0.0
         until = iso_epoch((m.get("human") or {}).get("ts")) or now
-        mm = {"id": m["id"], "project": m.get("project"), "agents": list(m.get("agents") or [])}
+        mm = {"id": m["id"], "ids": {m["id"]}, "project": m.get("project"), "agents": list(m.get("agents") or [])}
         st = {"scope": "missao", "id": m["id"], "project": m.get("project") or ""}
         limit = {"usd": _usd(lim.get("usd")), "tokens": _num(lim.get("tokens")) or None}
     elif project:
@@ -4779,6 +4805,14 @@ def budget_status(project=None, mission=None, now=None):
                "pct": None, "warn": False, "exceeded": False, "label": "estimado"})
     st["has_budget"] = limit["usd"] is not None or limit["tokens"] is not None
     if not st["has_budget"]: return st
+    if mm:  # etapa 15: so busca as filhas quando ha orcamento para checar (depois do early-return acima)
+        kids = mission_children(mm["id"])
+        if kids:
+            mm["ids"] |= {c["id"] for c in kids}
+            mm["agents"] = sorted(set(mm["agents"]) | {a for c in kids for a in (c.get("agents") or [])})
+            since = min([since] + [iso_epoch(c.get("created")) or 0.0 for c in kids])
+            until = max([until] + [iso_epoch((c.get("human") or {}).get("ts")) or now for c in kids])
+            st["from"], st["to"] = epoch_iso(since), epoch_iso(until)
     sp = budget_spent(since, until, None if mm else project, mm)
     rem = {"usd": None if limit["usd"] is None else round(max(limit["usd"] - sp["usd"], 0.0), 6),
            "tokens": None if limit["tokens"] is None else max(limit["tokens"] - sp["tokens"], 0)}
@@ -5038,6 +5072,8 @@ def build_parser():
     x.add_argument("--desc", default=""); x.add_argument("--agents", help="a,b,c (padrao: todos os registrados)")
     x.add_argument("--assignee", help="responsavel unico (etapa 14): precisa estar em --agents; so ele marca "
                    "EM_EXECUCAO/AGUARDANDO_APROVACAO; os demais participantes so comentam ou revisam (aval continua livre)")
+    x.add_argument("--parent", default="", help="id da missao-mae (etapa 15): soma o gasto desta no orcamento/custo da "
+                   "mae; a mae precisa estar aberta e ser do mesmo projeto; a mae so fecha com todas as filhas concluidas")
     x.add_argument("--from", dest="_from", required=True, help="quem cria (o humano ou um agente)")
     x = ms.add_parser("approve", **ex('a2a mission approve m3f9a2c1 --agent claude --evidence "rodei os testes de contrato: 48 ok"')); x.add_argument("id"); x.add_argument("--agent", required=True)
     x.add_argument("--evidence", required=True)
