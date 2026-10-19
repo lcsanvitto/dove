@@ -539,7 +539,188 @@ def robustez():
     assert "Traceback" in err and "RuntimeError: falha de teste" in err, err
     print("OK: painel robusto (400 com mensagem em add/remove/scan, aspas, JSON invalido, 500 JSON + traceback, segue no ar)")
 
+def start_panel(env, port):
+    p = subprocess.Popen([sys.executable, str(A2A), "panel", "--port", str(port)], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert wait_ping(port, p), "painel nao respondeu"
+    tok = re.search(r'name="dove-token" content="([^"]+)"', req(port, "GET", "/")[1]).group(1)
+    return p, {"X-Dove-Token": tok}
+
+def fase2():
+    """Versao/doctor, navegador de pastas, abrir pasta, agentes com metadados, paginacao de mensagens."""
+    tmp = tempfile.mkdtemp()
+    env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8", DOVE_NO_BROWSER="1", DOVE_FAKE_OPEN="1")
+    sys.path.insert(0, str(ROOT)); os.environ["A2A_HOME"] = tmp
+    import importlib; a2a = importlib.import_module("a2a")
+    for k, v in (("HOME", tmp), ("BUS", os.path.join(tmp, "bus")), ("CURSOR", os.path.join(tmp, "cursor")),
+                 ("AGENTS", os.path.join(tmp, "agents")), ("STATUS", os.path.join(tmp, "status")),
+                 ("MISSIONS", os.path.join(tmp, "missions")), ("PROJECTS", os.path.join(tmp, "projects.json")),
+                 ("CONFIG", os.path.join(tmp, "config.json"))):
+        setattr(a2a, k, v)  # o modulo pode ter sido importado por outro teste com outro A2A_HOME
+
+    # ---- --version e doctor
+    r = run(env, "--version"); assert r.returncode == 0 and r.stdout.strip() == "dove " + a2a.DOVE_VERSION, r.stdout
+    run(env, "init"); run(env, "join", "--agent", "claude")
+    r = run(env, "doctor", "--port", str(free_port()))
+    assert r.returncode == 0, r.stderr
+    out = r.stdout
+    assert "OK    versao: dove " + a2a.DOVE_VERSION in out and "OK    A2A_HOME:" in out and "gravavel" in out, out
+    assert re.search(r"^OK    porta: porta \d+ livre", out, re.M) and "agents: 1 arquivo" in out, out
+    assert "OK    pagina:" in out, out  # ui/index.html com UI_VERSION igual ao DOVE_VERSION
+    assert not re.search(r"^ERRO", out, re.M), out
+    print("OK: --version e doctor (linhas OK, porta livre, pagina na mesma versao)")
+
+    # ---- agentes com metadados (CLI)
+    r = run(env, "join", "--agent", "codex", "--type", "codex", "--model", "gpt-5"); assert r.returncode == 0, r.stderr
+    meta = json.load(open(os.path.join(tmp, "agents", "codex"), encoding="utf-8"))
+    assert meta["type"] == "codex" and meta["model"] == "gpt-5" and meta["added"], meta
+    run(env, "join", "--agent", "codex")  # re-join sem flags nao apaga metadados
+    assert json.load(open(os.path.join(tmp, "agents", "codex"), encoding="utf-8"))["model"] == "gpt-5"
+    assert os.path.getsize(os.path.join(tmp, "agents", "claude")) == 0  # legado: arquivo vazio
+    assert a2a.agent_meta("claude") == {} and a2a.agent_meta("codex")["type"] == "codex"
+    assert run(env, "join", "--agent", "Mal Nome").returncode == 1
+    assert run(env, "join", "--agent", "../x").returncode == 1
+    assert run(env, "join", "--agent", "x", "--type", "robo").returncode == 2
+    assert "claude" in run(env, "agents").stdout.split() and "codex" in run(env, "agents").stdout.split()
+    run(env, "send", "--from", "codex", "--to", "claude", "--body", "msg do codex")
+    assert os.path.exists(os.path.join(tmp, "status", "codex.json"))
+    r = run(env, "leave", "--agent", "codex"); assert r.returncode == 0, r.stderr
+    assert not os.path.exists(os.path.join(tmp, "agents", "codex")) and not os.path.exists(os.path.join(tmp, "status", "codex.json"))
+    assert "msg do codex" in run(env, "log").stdout  # historico fica
+    assert run(env, "leave", "--agent", "codex").returncode == 1
+    print("OK: join --type/--model (JSON em agents/<nome>), legado vazio, validacao de nome, leave mantem mensagens")
+
+    # ---- arvore de pastas para o navegador
+    root = tempfile.mkdtemp()
+    mkrepo(os.path.join(root, "lagu"), branch="dev", url="https://github.com/u/lagu.git")
+    open(os.path.join(root, "lagu", "AGENTS.md"), "w").write("# x")
+    mkrepo(os.path.join(root, "qlink"))
+    os.makedirs(os.path.join(root, "docs", "sub")); os.makedirs(os.path.join(root, ".oculta")); os.makedirs(os.path.join(root, "$Recycle"))
+    open(os.path.join(root, "arquivo.txt"), "w").write("x")
+    os.makedirs(os.path.join(root, "trancada"))
+    os.makedirs(os.path.join(root, "loop")); os.symlink(os.path.join(root, "loop"), os.path.join(root, "loop", "eu"))
+    os.symlink(os.path.join(root, "nada"), os.path.join(root, "quebrado"))
+    os.symlink(os.path.join(root, "zz1"), os.path.join(root, "zz2")); os.symlink(os.path.join(root, "zz2"), os.path.join(root, "zz1"))
+    l = a2a.fs_list(root)
+    names = [e["name"] for e in l["entries"]]
+    assert names == ["docs", "lagu", "loop", "qlink", "trancada"], names  # so pastas, ordenadas, sem ocultas/$/arquivos/links quebrados
+    lg = next(e for e in l["entries"] if e["name"] == "lagu")
+    assert lg["is_repo"] and lg["branch"] == "dev" and lg["has_agents_md"] and lg["path"] == os.path.join(root, "lagu"), lg
+    assert not next(e for e in l["entries"] if e["name"] == "docs")["is_repo"]
+    assert l["path"] == root and l["parent"] == os.path.dirname(root), l
+    eu = a2a.fs_list(os.path.join(root, "loop"))["entries"]  # link para a propria pasta: lista uma camada, sem recursao
+    assert [(e["name"], e["link"]) for e in eu] == [("eu", True)], eu
+    real_scandir = os.scandir
+    def fake_scandir(p="."):
+        if os.path.basename(str(p)) == "trancada": raise PermissionError(13, "Acesso negado", str(p))
+        return real_scandir(p)
+    try:
+        a2a.os.scandir = fake_scandir
+        try: a2a.fs_list(os.path.join(root, "trancada")); assert False
+        except a2a.DoveError as e: assert "sem permissao" in str(e), e
+    finally:
+        a2a.os.scandir = real_scandir
+    try: a2a.fs_list(os.path.join(root, "nada")); assert False
+    except a2a.DoveError as e: assert "nao encontrada" in str(e)
+    try: a2a.fs_list(os.path.join(root, "arquivo.txt")); assert False
+    except a2a.DoveError as e: assert "nao e uma pasta" in str(e)
+    real_max = a2a.FS_MAX
+    try:
+        a2a.FS_MAX = 2; t = a2a.fs_list(root); assert len(t["entries"]) == 2 and t["truncated"], t
+    finally:
+        a2a.FS_MAX = real_max
+    print("OK: fs_list (so pastas, ordenado, ocultas/$ fora, repo+branch+AGENTS.md, link em loop/quebrado, sem permissao, limite)")
+
+    # ---- API: fs/list, project/open, project/info, agentes, paginacao, doctor
+    for i in range(25):
+        run(env, "send", "--from", "claude", "--to", "luiz", "--project", "pg" if i % 2 else "outro", "--body", f"pagina {i:02d}", "--no-auto-status")
+    port = free_port()
+    p, T = start_panel(env, port)
+    try:
+        code, j = req(port, "GET", "/api/ping"); assert j == {"dove": True, "version": a2a.DOVE_VERSION}, j
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=5); c.request("GET", "/"); r = c.getresponse()
+        html = r.read().decode("utf-8"); c.close()
+        assert r.getheader("Cache-Control") == "no-store" and a2a.DOVE_VERSION in html and "__DOVE_SERVER_VERSION__" not in html
+        # rotas novas exigem token (e Host)
+        q = urllib.request.quote
+        for path in ("/api/doctor", f"/api/fs/list?path={q(root)}", "/api/fs/list", "/api/project/info?name=x", "/api/onboard?agent=claude"):
+            assert req(port, "GET", path)[0] == 403, path
+            assert req(port, "GET", path, None, {"X-Dove-Token": "errado"})[0] == 403, path
+            assert req(port, "GET", path, None, T, host="evil.example")[0] == 403, path
+        for path, body in (("/api/project/open", {"name": "x"}), ("/api/agent/add", {"name": "x"}), ("/api/agent/remove", {"name": "claude"})):
+            assert req(port, "POST", path, body)[0] == 403, path
+            assert req(port, "POST", path, body, dict(T, Origin="http://evil.example"))[0] == 403, path
+        code, j = req(port, "GET", "/api/doctor", None, T)
+        assert code == 200 and "OK    versao: dove" in j["text"] and any(x["check"] == "porta" and "este painel" in x["detail"] for x in j["checks"]), j
+        code, j = req(port, "GET", f"/api/fs/list?path={q(root)}", None, T)
+        assert code == 200 and [e["name"] for e in j["entries"]] == ["docs", "lagu", "loop", "qlink", "trancada"], j
+        code, j = req(port, "GET", "/api/fs/list", None, T)
+        assert code == 200 and j["path"] == "" and j["entries"] == [] and any(x["kind"] == "home" for x in j["places"]), j
+        assert any(x["kind"] == "recent" and x["path"] == root for x in j["places"]), j["places"]  # ultima pasta lembrada
+        code, j = req(port, "GET", f"/api/fs/list?path={q(os.path.join(root, 'nada'))}", None, T)
+        assert code == 400 and "nao encontrada" in j["error"], j
+        # adicionar pelo navegador: a pasta vira "ja adicionado"
+        code, j = req(port, "POST", "/api/project/add", {"name": "lagu", "path": os.path.join(root, "lagu")}, T); assert code == 200, j
+        code, j = req(port, "GET", f"/api/fs/list?path={q(root)}", None, T)
+        assert next(e for e in j["entries"] if e["name"] == "lagu")["project"] == "lagu", j
+        req(port, "GET", f"/api/fs/list?path={q(os.path.join(root, 'docs'))}", None, T)  # ultima pasta passa a ser outra
+        code, j = req(port, "GET", "/api/fs/list", None, T)
+        assert any(x["kind"] == "projects" and x["path"] == root for x in j["places"]), j["places"]  # pai dos projetos
+        code, j = req(port, "GET", "/api/project/info?name=lagu", None, T)
+        i = j["info"]
+        assert code == 200 and i["branch"] == "dev" and i["host"] == "github.com" and i["has_agents_md"] and i["exists"], j
+        assert req(port, "GET", "/api/project/info?name=fantasma", None, T)[0] == 400
+        # abrir pasta: so projeto registrado; DOVE_FAKE_OPEN devolve o caminho sem abrir nada
+        code, j = req(port, "POST", "/api/project/open", {"name": "lagu"}, T)
+        assert code == 200 and j["path"] == os.path.join(root, "lagu"), j
+        for bad in ({"name": "fantasma"}, {"name": ""}, {"path": root}, {"name": root}):
+            code, j = req(port, "POST", "/api/project/open", bad, T); assert code == 400 and "nao encontrado" in j["error"], (bad, j)
+        sumiu = os.path.join(root, "sumiu"); os.makedirs(sumiu)
+        req(port, "POST", "/api/project/add", {"name": "sumiu", "path": sumiu}, T); os.rmdir(sumiu)
+        code, j = req(port, "POST", "/api/project/open", {"name": "sumiu"}, T); assert code == 400 and "nao existe" in j["error"], j
+        # agentes pelo painel
+        code, j = req(port, "POST", "/api/agent/add", {"name": "hermes", "type": "hermes", "model": "h-1", "note": "infra", "project": "lagu"}, T)
+        assert code == 200 and j["agent"]["name"] == "hermes" and "`hermes`" in j["onboard"] and "--project lagu" in j["onboard"], j
+        meta = json.load(open(os.path.join(tmp, "agents", "hermes"), encoding="utf-8"))
+        assert meta["type"] == "hermes" and meta["model"] == "h-1" and meta["note"] == "infra", meta
+        code, j = req(port, "POST", "/api/agent/add", {"name": "hermes"}, T); assert code == 400 and "ja existe" in j["error"], j
+        for bad in ("Hermes", "-x", "a" * 33, "a b", "../etc", "", "luiz"):
+            code, j = req(port, "POST", "/api/agent/add", {"name": bad}, T); assert code == 400, (bad, j)
+        code, j = req(port, "POST", "/api/agent/add", {"name": "novo", "type": "robo"}, T); assert code == 400 and "tipo" in j["error"], j
+        code, j = req(port, "POST", "/api/agent/add", {"name": "simples"}, T); assert code == 200 and "<projeto>" in j["onboard"], j
+        st = req(port, "GET", "/api/state")[1]
+        assert "hermes" in st["registered"] and st["agent_meta"]["hermes"]["model"] == "h-1" and st["agent_meta"]["claude"] == {}, st["agent_meta"]
+        assert st["version"] == a2a.DOVE_VERSION
+        code, j = req(port, "GET", "/api/onboard?agent=hermes&project=lagu", None, T); assert code == 200 and "`hermes`" in j["text"], j
+        code, j = req(port, "GET", "/api/onboard", None, T); assert code == 200 and "<seu-nome>" in j["text"], j
+        run(env, "status", "--agent", "hermes", "--set", "working")
+        run(env, "send", "--from", "hermes", "--to", "luiz", "--body", "historico do hermes", "--no-auto-status")
+        code, j = req(port, "POST", "/api/agent/remove", {"name": "hermes"}, T); assert code == 200, j
+        assert not os.path.exists(os.path.join(tmp, "agents", "hermes")) and not os.path.exists(os.path.join(tmp, "status", "hermes.json"))
+        st = req(port, "GET", "/api/state")[1]
+        assert "hermes" not in st["registered"] and not any(a["agent"] == "hermes" for a in st["agents"])
+        assert any(m["body"] == "historico do hermes" for m in st["messages"])
+        assert req(port, "POST", "/api/agent/remove", {"name": "hermes"}, T)[0] == 400
+        # paginacao
+        st = req(port, "GET", "/api/state?project=pg&limit=5")[1]
+        assert [m["body"] for m in st["messages"]] == [f"pagina {i:02d}" for i in (15, 17, 19, 21, 23)], st["messages"]
+        assert st["messages_total"] == 12 and st["messages_has_more"] and st["messages_project"] == "pg", st
+        code, j = req(port, "GET", f"/api/messages?project=pg&limit=5&before={st['messages'][0]['msg_id']}")
+        assert code == 200 and [m["body"] for m in j["messages"]] == [f"pagina {i:02d}" for i in (5, 7, 9, 11, 13)] and j["has_more"], j
+        code, j = req(port, "GET", f"/api/messages?project=pg&limit=5&before={j['messages'][0]['msg_id']}")
+        assert [m["body"] for m in j["messages"]] == ["pagina 01", "pagina 03"] and not j["has_more"], j
+        code, j = req(port, "GET", "/api/messages?limit=3")
+        assert len(j["messages"]) == 3 and j["has_more"] and j["messages"][-1]["body"] == "historico do hermes", j
+        assert req(port, "GET", "/api/messages?before=naoexiste")[0] == 400
+        assert len(req(port, "GET", "/api/state")[1]["messages"]) <= 300
+        code, j = req(port, "POST", "/api/rota/inventada", {}, T); assert code == 404 and "rota nao encontrada" in j["error"], j
+    finally:
+        p.terminate(); _, err = p.communicate(timeout=5)
+    assert "400 em POST /api/project/open" in err, err  # erros do usuario aparecem na janela do dove
+    print("OK: API nova (ping/versao, no-store, token+Host+Origin nas rotas novas, fs/list, project/open+info, agent add/remove, paginacao)")
+
 if __name__ == "__main__":
     main()
     fase1()
     robustez()
+    fase2()

@@ -7,7 +7,7 @@
 <title>Dove</title>
 <link rel="icon" href="data:,">
 <style>
-/* Layout: herdr-style workspace. Sidebar (projetos em cima, agentes embaixo) | conversa | "onde estamos" + missoes.
+/* Layout: herdr-style workspace. Sidebar (projetos em cima, agentes embaixo) | conversa em tabela | "onde estamos" + missoes.
    Dark-first, terminal feel: mono for labels/data, system sans for running text. */
 :root{
   --bg:#0e1115; --panel:#13171c; --raised:#1a1f26; --sunk:#0b0d10; --line:#252c35; --line2:#323b46;
@@ -16,20 +16,22 @@
   --working:#46c25d; --idle:#8b96a4; --blocked:#e6a23c; --done:#5fb0e8; --unknown:#6b7581;
   --good:#46c25d; --warn:#e6a23c; --crit:#f2645f; --neutral:#7f8fa6;
   --good-bg:rgba(70,194,93,.13); --warn-bg:rgba(230,162,60,.14); --crit-bg:rgba(242,100,95,.14);
-  --human-bg:rgba(163,182,255,.07);
+  --human-bg:rgba(163,182,255,.06); --flash:rgba(230,162,60,.28); --repo:#d9a75b;
+  --shadow:0 8px 28px rgba(0,0,0,.45);
   --ui:system-ui,-apple-system,"Segoe UI",Roboto,Ubuntu,"Noto Sans",sans-serif;
   --mono:ui-monospace,"Cascadia Mono","JetBrains Mono","SF Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace;
   --r:6px;
   color-scheme:dark;
 }
 @media (prefers-color-scheme:light){:root{
-  --bg:#f4f5f7; --panel:#ffffff; --raised:#f4f6f8; --sunk:#e6e9ed; --line:#dde1e6; --line2:#c9cfd6;
+  --bg:#f4f5f7; --panel:#ffffff; --raised:#f4f6f8; --sunk:#eceef1; --line:#dde1e6; --line2:#c9cfd6;
   --fg:#1a1f26; --mut:#56606c; --faint:#7d8793;
   --accent:#3550c4; --accent-bg:rgba(53,80,196,.09); --accent-ink:#ffffff;
   --working:#1b7f37; --idle:#5f6975; --blocked:#9a5b00; --done:#0b69c7; --unknown:#7d8793;
   --good:#1b7f37; --warn:#a86300; --crit:#c8232c; --neutral:#5e6f88;
   --good-bg:rgba(27,127,55,.10); --warn-bg:rgba(168,99,0,.11); --crit-bg:rgba(200,35,44,.09);
-  --human-bg:rgba(53,80,196,.045);
+  --human-bg:rgba(53,80,196,.045); --flash:rgba(168,99,0,.20); --repo:#9a6200;
+  --shadow:0 8px 28px rgba(20,30,50,.18);
   color-scheme:light;
 }}
 *{box-sizing:border-box}
@@ -44,7 +46,7 @@ button{cursor:pointer}
 .num{font-variant-numeric:tabular-nums}
 
 /* top bar */
-.top{height:42px;display:flex;align-items:center;gap:14px;padding:0 14px;border-bottom:1px solid var(--line);background:var(--panel)}
+.top{height:42px;display:flex;align-items:center;gap:14px;padding:0 10px 0 14px;border-bottom:1px solid var(--line);background:var(--panel)}
 .brand{display:flex;align-items:center;gap:8px;font:600 14px var(--mono);letter-spacing:.02em}
 .brand svg{display:block}
 .crumb{font:12px var(--mono);color:var(--mut);display:flex;gap:6px;align-items:center;min-width:0}
@@ -53,53 +55,73 @@ button{cursor:pointer}
 .live i{width:7px;height:7px;border-radius:50%;background:var(--good);display:inline-block}
 .live.off i{background:var(--crit)}
 .live.off{color:var(--crit)}
+.ver{font:11px var(--mono);color:var(--faint);border:1px solid var(--line);border-radius:4px;padding:0 5px;line-height:17px;white-space:nowrap}
+.ver.bad{color:var(--warn);border-color:var(--warn)}
+.ibtn{border:1px solid transparent;background:none;color:var(--mut);border-radius:var(--r);padding:2px 7px;font:600 13px/1.2 var(--mono)}
+.ibtn:hover,.ibtn[aria-expanded=true]{background:var(--raised);border-color:var(--line2);color:var(--fg)}
 
 /* workspace grid */
-.app{height:calc(100% - 42px);display:grid;grid-template-columns:268px minmax(0,1fr) clamp(356px,24vw,440px)}
+.app{height:calc(100% - 42px);display:grid;grid-template-columns:268px minmax(0,1fr) clamp(320px,22vw,420px)}
 .col{min-height:0;min-width:0;display:flex;flex-direction:column;border-right:1px solid var(--line)}
 .col:last-child{border-right:0}
 .side{background:var(--panel)}
 .right{background:var(--panel);overflow:auto}
 .sec-h{display:flex;align-items:center;gap:8px;padding:10px 12px 6px;font:600 11px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--mut)}
-.sec-h .cnt{color:var(--faint);font-weight:400}
+.sec-h .cnt{color:var(--faint);font-weight:400;white-space:nowrap}
 .sec-h .act{margin-left:auto}
-.btn{border:1px solid var(--line2);background:var(--raised);border-radius:var(--r);padding:4px 10px;font-size:12.5px;line-height:1.3}
+.btn{border:1px solid var(--line2);background:var(--raised);border-radius:var(--r);padding:4px 10px;font-size:12.5px;line-height:1.3;white-space:nowrap}
 .btn:hover{border-color:var(--accent)}
 .btn.pri{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
 .btn.pri:hover{filter:brightness(1.08)}
 .btn.sm{padding:2px 8px;font:500 11.5px var(--mono);letter-spacing:0;text-transform:none}
+.btn.danger{background:var(--crit);border-color:var(--crit);color:#fff;font-weight:600}
 .btn:disabled{opacity:.5;cursor:not-allowed}
 .link{background:none;border:0;padding:0;color:var(--accent);font-size:12px;justify-self:start}
 .link:hover{text-decoration:underline}
 input[type=text],input[type=search],select,textarea{background:var(--sunk);border:1px solid var(--line);border-radius:var(--r);padding:5px 8px;min-width:0}
 input:focus,select:focus,textarea:focus{border-color:var(--accent);outline:none}
 
+/* popover menu */
+.menu{position:fixed;z-index:40;min-width:180px;background:var(--panel);border:1px solid var(--line2);border-radius:8px;box-shadow:var(--shadow);padding:4px;display:grid}
+.menu button{border:0;background:none;text-align:left;padding:6px 10px;border-radius:4px;font-size:13px;display:flex;gap:10px;align-items:center}
+.menu button:hover,.menu button:focus-visible{background:var(--raised);outline:none}
+.menu button.danger{color:var(--crit)}
+.menu hr{border:0;border-top:1px solid var(--line);margin:4px 2px}
+.menu .k{margin-left:auto;font:11px var(--mono);color:var(--faint)}
+
 /* projects */
 .projects{flex:1 1 auto;min-height:120px;display:flex;flex-direction:column}
 .pfilter{margin:0 12px 6px}
 .pfilter input{width:100%;font-size:12.5px}
 .plist{flex:1 1 auto;overflow:auto;padding:0 6px 8px}
-.proj{display:flex;align-items:center;gap:6px;width:100%;border:0;background:none;text-align:left;padding:5px 6px;border-radius:var(--r);font:13px var(--mono);color:var(--fg)}
+.pgroup{font:600 10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--faint);padding:8px 8px 3px}
+.proj{display:flex;align-items:center;gap:6px;width:100%;border:0;background:none;text-align:left;padding:4px 4px 4px 6px;border-radius:var(--r);font:13px var(--mono);color:var(--fg);min-height:28px}
 .proj:hover{background:var(--raised)}
 .proj.active{background:var(--accent-bg);box-shadow:inset 2px 0 0 var(--accent)}
 .proj .nm{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.proj .pin{border:0;background:none;padding:0 2px;color:var(--faint);font-size:12px;line-height:1;opacity:0}
-.proj:hover .pin,.proj .pin.on,.proj .pin:focus-visible{opacity:1}
-.proj .pin.on{color:var(--warn)}
-.proj .all-ico{width:14px;text-align:center;color:var(--faint)}
+.proj .star{color:var(--warn);font-size:11px;width:12px;text-align:center;flex:0 0 12px}
+.proj .all-ico{width:12px;text-align:center;color:var(--faint);flex:0 0 12px}
+.proj .ibtn{opacity:0;padding:0 6px;font-size:14px;line-height:20px}
+.proj:hover .ibtn,.proj.active .ibtn,.proj .ibtn:focus-visible,.proj .ibtn[aria-expanded=true]{opacity:1}
 .pb{font:600 10.5px var(--mono);padding:0 6px;border-radius:9px;line-height:17px;min-width:18px;text-align:center}
 .pb.open{background:var(--raised);color:var(--fg);border:1px solid var(--line2)}
 .pb.blk{background:var(--warn-bg);color:var(--warn)}
 .pempty{margin:6px 12px;padding:12px;border:1px dashed var(--line2);border-radius:var(--r);font-size:12.5px;color:var(--mut);display:grid;gap:8px}
+.confirm{background:var(--crit-bg);flex-wrap:wrap;border-radius:var(--r);padding:6px;display:flex;gap:6px;align-items:center}
+.confirm .q{flex:1 1 100%;font:12px var(--ui);color:var(--fg);white-space:normal}
+.confirm .btn{font-size:11.5px;padding:1px 8px}
 
 /* agents */
 .agents{flex:0 0 auto;max-height:48%;display:flex;flex-direction:column;border-top:1px solid var(--line)}
 .alist{overflow:auto;padding:0 8px 10px;display:grid;gap:2px}
-.agent{padding:7px 6px;border-radius:var(--r);display:grid;gap:4px}
+.agent{padding:6px 4px 6px 6px;border-radius:var(--r);display:grid;gap:3px}
 .agent:hover{background:var(--raised)}
 .a1{display:flex;align-items:center;gap:8px;min-width:0}
 .aname{font:600 13px var(--mono);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .age{margin-left:auto;font:11px var(--mono);color:var(--faint)}
+.agent .ibtn{opacity:0;padding:0 6px;font-size:14px;line-height:18px}
+.agent:hover .ibtn,.agent .ibtn:focus-visible,.agent .ibtn[aria-expanded=true]{opacity:1}
+.atype{font:11px var(--mono);color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .st{display:inline-flex;align-items:center;gap:5px;font:600 10.5px var(--mono);text-transform:uppercase;letter-spacing:.05em;padding:1px 7px 1px 6px;border-radius:4px;border:1px solid currentColor;line-height:15px}
 .st i{width:6px;height:6px;border-radius:50%;background:currentColor;display:inline-block}
 .st.working{color:var(--working)} .st.idle{color:var(--idle)} .st.blocked{color:var(--blocked)}
@@ -117,40 +139,88 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);outline:none}
 .handoff{font:700 9.5px var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--crit);background:var(--crit-bg);border-radius:3px;padding:0 4px}
 .anote{font-size:11.5px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
-/* conversation */
+/* center: project header + table */
 .conv{background:var(--bg)}
-.conv-h{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
-.conv-h h2{margin:0;font:600 13px var(--mono)}
-.conv-h .meta{font:11.5px var(--mono);color:var(--mut)}
-.tl-wrap{position:relative;flex:1 1 auto;min-height:0}
-.tl{position:absolute;inset:0;overflow:auto;padding:10px 16px 16px}
-.day{display:flex;align-items:center;gap:10px;margin:14px 0 6px;font:11px var(--mono);color:var(--faint);text-transform:uppercase;letter-spacing:.06em}
-.day::before,.day::after{content:"";flex:1;height:1px;background:var(--line)}
-.msg{padding:8px 10px;border-radius:var(--r);display:grid;gap:3px;max-width:880px}
-.msg:hover{background:var(--panel)}
-.msg.human{background:var(--human-bg)}
-.mh{display:flex;align-items:center;flex-wrap:wrap;gap:4px 7px;font:12px var(--mono);color:var(--mut)}
-.mh .from{color:var(--fg);font-weight:600}
-.mh .to{color:var(--fg)}
-.mh time{margin-left:auto;color:var(--faint);font-size:11px}
-.chip{font:600 10px var(--mono);text-transform:uppercase;letter-spacing:.05em;padding:0 5px;border-radius:3px;line-height:16px;border:1px solid var(--line2);color:var(--mut)}
+.phead{padding:10px 16px 9px;border-bottom:1px solid var(--line);background:var(--panel);display:grid;gap:5px}
+.ph1{display:flex;align-items:center;gap:10px;min-width:0}
+.ph1 h2{margin:0;font:600 15px var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ph1 .sp{margin-left:auto;display:flex;gap:6px}
+.ppath{display:flex;align-items:center;gap:6px;font:12px var(--mono);color:var(--mut);min-width:0}
+.ppath .pth{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}
+.ppath .link{font:11.5px var(--mono);flex:0 0 auto}
+.pfacts{display:flex;flex-wrap:wrap;gap:4px 14px;font:11.5px var(--mono);color:var(--mut)}
+.pfacts b{color:var(--fg);font-weight:600}
+.pfacts .ok{color:var(--good)} .pfacts .warn{color:var(--warn)} .pfacts .bad{color:var(--crit)}
+.phint{font-size:12px;color:var(--warn);background:var(--warn-bg);border-radius:var(--r);padding:4px 8px;justify-self:start}
+.phint code{font-family:var(--mono);font-size:11.5px}
+.tbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;padding:8px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+.tbar input[type=search]{flex:1 1 160px;font-size:12.5px;padding:4px 8px}
+.tbar select{font:12px var(--mono);padding:3px 4px;max-width:140px}
+.tbar .count{font:11.5px var(--mono);color:var(--mut);margin-left:auto;white-space:nowrap}
+.twrap{position:relative;flex:1 1 auto;min-height:0}
+.tscroll{position:absolute;inset:0;overflow:auto}
+table.msgs{width:100%;table-layout:fixed;border-collapse:separate;border-spacing:0;font-size:12.5px}
+.msgs th{position:sticky;top:0;z-index:2;background:var(--raised);border-bottom:1px solid var(--line2);text-align:left;font:600 10.5px var(--mono);text-transform:uppercase;letter-spacing:.05em;color:var(--mut);padding:0;white-space:nowrap}
+.msgs th button,.msgs th span{display:flex;align-items:center;gap:4px;width:100%;border:0;background:none;padding:7px 7px;font:inherit;color:inherit;text-transform:inherit;letter-spacing:inherit;text-align:left}
+.msgs th button:hover{color:var(--fg)}
+.msgs th[aria-sort] button{color:var(--fg)}
+.msgs th .ar{font-size:9px;color:var(--accent)}
+.msgs td{padding:6px 7px;border-bottom:1px solid var(--line);vertical-align:top;line-height:1.4;overflow:hidden}
+.msgs tr.row{cursor:pointer}
+.msgs tr.row:hover td{background:var(--panel)}
+.msgs tr.row.open td{background:var(--panel);border-bottom-color:transparent}
+.msgs tr.human td{background:var(--human-bg)}
+.msgs tr.human:hover td{background:var(--panel)}
+.msgs tr.human td:first-child{box-shadow:inset 3px 0 0 var(--accent)}
+.msgs tr.flash td{animation:flash 2.2s ease-out}
+@keyframes flash{0%,35%{background:var(--flash)}100%{background:transparent}}
+.c-time{font:11.5px var(--mono);color:var(--mut);white-space:nowrap;font-variant-numeric:tabular-nums}
+.c-time .dday{font-size:10.5px;color:var(--faint)}
+.c-ft{font:12px var(--mono);white-space:nowrap;text-overflow:ellipsis}
+.c-ft .fr{color:var(--fg);font-weight:600}
+.c-ft .ar{color:var(--faint);padding:0 3px}
+.msgs tr.human .c-ft .fr{color:var(--accent)}
+.c-proj{font:11.5px var(--mono);color:var(--mut);white-space:nowrap;text-overflow:ellipsis}
+.c-id{font:11px var(--mono);color:var(--faint);white-space:nowrap;text-overflow:ellipsis}
+.c-id b{color:var(--mut);font-weight:500}
+.c-body .clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.c-rep{white-space:nowrap}
+.rlink{border:0;background:none;padding:0;font:11px var(--mono);color:var(--accent)}
+.rlink:hover{text-decoration:underline}
+.none{color:var(--faint)}
+.chip{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:top;white-space:nowrap;font:600 10px var(--mono);text-transform:uppercase;letter-spacing:.04em;padding:0 5px;border-radius:3px;line-height:17px;border:1px solid var(--line2);color:var(--mut)}
 .chip.k-task{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
 .chip.k-question{color:var(--done);border-color:color-mix(in srgb,var(--done) 45%,transparent)}
+.chip.k-correction{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,transparent)}
+.chip.k-ack{color:var(--faint);border-style:dashed}
 .chip.s-ok{background:var(--good-bg);color:var(--good);border-color:transparent}
 .chip.s-blk{background:var(--warn-bg);color:var(--warn);border-color:transparent}
 .chip.s-run{background:var(--accent-bg);color:var(--accent);border-color:transparent}
+.chip.s-wait{color:var(--mut);border-style:dashed}
+.chip.s-no{background:var(--crit-bg);color:var(--crit);border-color:transparent}
 .chip.mid{text-transform:none;letter-spacing:0;font-weight:500}
-.ptag{font:11px var(--mono);color:var(--faint)}
-.ptag::before{content:"#"}
-.rbtn{opacity:0;border:0;background:none;color:var(--accent);font:11px var(--mono);padding:0}
-.msg:hover .rbtn,.rbtn:focus-visible{opacity:1}
-.rto{font:11.5px var(--mono);color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-left:2px solid var(--line2);padding-left:7px}
-.body{white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;max-width:76ch}
-.evi{font:11.5px var(--mono);color:var(--mut)}
-.evi b{color:var(--good);font-weight:600}
-.empty{color:var(--mut);padding:28px 4px;max-width:52ch;display:grid;gap:8px}
+tr.detail td{background:var(--panel);padding:2px 16px 14px 18px;cursor:default;border-bottom:1px solid var(--line2)}
+.det{display:grid;grid-template-columns:minmax(0,1fr) minmax(200px,300px);gap:12px 22px}
+.det .body{white-space:pre-wrap;overflow-wrap:anywhere;font:13.5px/1.5 var(--ui);max-width:76ch}
+.det dl{margin:0;display:grid;grid-template-columns:auto minmax(0,1fr);gap:3px 10px;font:11.5px var(--mono);align-content:start}
+.det dt{color:var(--faint)}
+.det dd{margin:0;color:var(--fg);overflow-wrap:anywhere}
+.det .ext{grid-column:1/-1;display:grid;gap:6px}
+.det .fld{display:grid;gap:1px;font-size:12.5px}
+.det .fld b{font:600 10.5px var(--mono);text-transform:uppercase;letter-spacing:.05em;color:var(--faint)}
+.det .fld.evi span{color:var(--good)}
+.thread{grid-column:1/-1;display:grid;gap:2px;border-top:1px dashed var(--line2);padding-top:8px}
+.thread h4{margin:0 0 2px;font:600 10.5px var(--mono);text-transform:uppercase;letter-spacing:.05em;color:var(--faint)}
+.tmsg{display:flex;gap:8px;align-items:baseline;border:0;background:none;text-align:left;padding:3px 6px;border-radius:4px;font-size:12.5px;min-width:0}
+.tmsg:hover{background:var(--raised)}
+.tmsg .w{font:11.5px var(--mono);color:var(--mut);white-space:nowrap}
+.tmsg .t{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tmsg.me{color:var(--fg);font-weight:600}
+.dacts{grid-column:1/-1;display:flex;gap:8px}
+.tfoot{display:flex;align-items:center;justify-content:center;gap:10px;padding:12px;font:11.5px var(--mono);color:var(--faint)}
+.empty{color:var(--mut);padding:28px 16px;max-width:60ch;display:grid;gap:8px}
 .empty h3{margin:0;color:var(--fg);font:600 14px var(--ui)}
-.newpill{position:absolute;bottom:10px;left:50%;transform:translateX(-50%);background:var(--accent);color:var(--accent-ink);border:0;border-radius:14px;padding:3px 12px;font:600 12px var(--mono);box-shadow:0 2px 8px rgba(0,0,0,.3)}
+.newpill{position:absolute;top:38px;left:50%;transform:translateX(-50%);z-index:3;background:var(--accent);color:var(--accent-ink);border:0;border-radius:14px;padding:3px 12px;font:600 12px var(--mono);box-shadow:0 2px 8px rgba(0,0,0,.3)}
 
 /* composer */
 .composer{border-top:1px solid var(--line);background:var(--panel);padding:8px 16px 10px;display:grid;gap:6px}
@@ -160,7 +230,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);outline:none}
 .replying{display:flex;align-items:center;gap:8px;font:11.5px var(--mono);color:var(--mut);background:var(--raised);border-radius:var(--r);padding:3px 8px;min-width:0}
 .replying span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .replying button{margin-left:auto;border:0;background:none;color:var(--mut)}
-textarea#cbody{width:100%;resize:vertical;min-height:52px;max-height:40vh;font:13.5px/1.4 var(--ui)}
+textarea#cbody{width:100%;resize:vertical;min-height:48px;max-height:40vh;font:13.5px/1.4 var(--ui)}
 .cfoot{display:flex;align-items:center;gap:10px}
 .cfoot .hint{font:11px var(--mono);color:var(--faint)}
 .cfoot .err{font:12px var(--ui);color:var(--crit)}
@@ -223,15 +293,17 @@ textarea#cbody{width:100%;resize:vertical;min-height:52px;max-height:40vh;font:1
 .donebar span{font:400 11px var(--mono);letter-spacing:0;color:var(--mut)}
 
 /* dialogs */
-dialog{border:1px solid var(--line2);border-radius:10px;background:var(--panel);color:var(--fg);padding:0;width:min(720px,calc(100vw - 32px));max-height:calc(100vh - 48px)}
+dialog{border:1px solid var(--line2);border-radius:10px;background:var(--panel);color:var(--fg);padding:0;width:min(720px,calc(100vw - 32px));max-height:calc(100vh - 48px);box-shadow:var(--shadow)}
+dialog.wide{width:min(940px,calc(100vw - 32px))}
 dialog::backdrop{background:rgba(5,7,10,.6)}
 .dlg{display:flex;flex-direction:column;max-height:calc(100vh - 50px)}
 .dlg-h{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line)}
 .dlg-h h3{margin:0;font:600 14px var(--ui)}
 .dlg-h .x{margin-left:auto;border:0;background:none;color:var(--mut);font-size:18px;line-height:1}
 .dlg-b{padding:14px 16px;overflow:auto;display:grid;gap:12px;min-height:0}
+.pane{display:grid;gap:12px;min-height:0}
 .dlg-f{display:flex;gap:8px;align-items:center;padding:10px 16px;border-top:1px solid var(--line)}
-.dlg-f .msgline{font-size:12.5px;color:var(--mut);min-width:0}
+.dlg-f .msgline{font-size:12.5px;color:var(--mut);min-width:0;overflow-wrap:anywhere}
 .dlg-f .msgline.err{color:var(--crit)}
 .dlg-f .sp{margin-left:auto}
 .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:-4px 0 0}
@@ -240,6 +312,7 @@ dialog::backdrop{background:rgba(5,7,10,.6)}
 .field{display:grid;gap:4px}
 .field label,.flabel{font:11px var(--mono);color:var(--mut);text-transform:uppercase;letter-spacing:.05em}
 .field input,.field textarea,.field select{width:100%}
+.field .err{font-size:12px;color:var(--crit)}
 .hrow{display:flex;gap:8px;align-items:flex-end}
 .hrow .field{flex:1}
 .help{font-size:12px;color:var(--faint)}
@@ -258,25 +331,70 @@ dialog::backdrop{background:rgba(5,7,10,.6)}
 .rhead{position:sticky;top:0;background:var(--raised);color:var(--faint);font-size:10.5px;text-transform:uppercase;letter-spacing:.05em}
 .checks{display:flex;flex-wrap:wrap;gap:6px}
 .checks label{display:inline-flex;gap:6px;align-items:center;font:12.5px var(--mono);border:1px solid var(--line2);border-radius:var(--r);padding:3px 9px;background:var(--raised)}
-.toast{position:fixed;bottom:16px;right:16px;background:var(--raised);border:1px solid var(--line2);border-radius:var(--r);padding:7px 12px;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.3);z-index:20}
+
+/* navegador de pastas */
+.fsb{display:grid;grid-template-columns:176px minmax(0,1fr);border:1px solid var(--line);border-radius:var(--r);height:min(52vh,460px);min-height:260px;overflow:hidden}
+.places{border-right:1px solid var(--line);background:var(--raised);overflow:auto;padding:6px 4px;display:grid;align-content:start;gap:1px}
+.places h5{margin:6px 6px 2px;font:600 10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+.place{border:0;background:none;text-align:left;padding:4px 8px;border-radius:4px;font:12px var(--mono);color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.place:hover{background:var(--line)}
+.place.on{background:var(--accent-bg);color:var(--accent)}
+.fsmain{display:flex;flex-direction:column;min-width:0;min-height:0}
+.crumbs{display:flex;align-items:center;gap:2px;padding:5px 6px;border-bottom:1px solid var(--line);min-width:0}
+.crumbs .ibtn{flex:0 0 auto}
+.cpath{display:flex;align-items:center;gap:1px;overflow-x:auto;white-space:nowrap;min-width:0;scrollbar-width:thin}
+.cpath button{border:0;background:none;padding:2px 5px;border-radius:4px;font:12px var(--mono);color:var(--mut)}
+.cpath button:hover{background:var(--raised);color:var(--fg)}
+.cpath button:last-child{color:var(--fg);font-weight:600}
+.cpath .sep{color:var(--faint);font:12px var(--mono)}
+.flist{flex:1 1 auto;overflow:auto;min-height:0;outline:none}
+.fe{display:flex;align-items:center;gap:8px;padding:4px 6px 4px 10px;border-bottom:1px solid var(--line);font:12.5px var(--mono);cursor:default;user-select:none;min-height:30px}
+.fe:hover{background:var(--raised)}
+.fe.sel{background:var(--accent-bg);box-shadow:inset 2px 0 0 var(--accent)}
+.fe svg{flex:0 0 auto;color:var(--faint)}
+.fe.repo svg{color:var(--repo)}
+.fe .fn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fe.reg .fn{color:var(--mut)}
+.badge{font:600 10px var(--mono);padding:0 5px;border-radius:3px;line-height:16px;white-space:nowrap;max-width:150px;overflow:hidden;text-overflow:ellipsis}
+.badge.git{color:var(--repo);border:1px solid color-mix(in srgb,var(--repo) 45%,transparent)}
+.badge.amd{color:var(--good);background:var(--good-bg)}
+.badge.reg{color:var(--mut);background:var(--sunk);border:1px solid var(--line)}
+.fe .go{border:0;background:none;color:var(--faint);font:14px var(--mono);padding:0 6px;border-radius:4px}
+.fe .go:hover{color:var(--fg);background:var(--line)}
+.fsnote{padding:18px 14px;color:var(--mut);font-size:12.5px}
+.allrepos{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12.5px;color:var(--mut);background:var(--raised);border:1px solid var(--line);border-radius:var(--r);padding:6px 10px}
+.allrepos b{color:var(--fg)}
+.allrepos .btn{margin-left:auto}
+.target{display:grid;grid-template-columns:minmax(0,1fr) 220px;gap:10px;align-items:end}
+.target .tp{display:grid;gap:4px;min-width:0}
+.target .pth{font:12.5px var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:left;background:var(--sunk);border:1px solid var(--line);border-radius:var(--r);padding:5px 8px}
+
+/* texto copiavel (instrucoes, diagnostico) */
+.copybox{position:relative}
+.copybox pre{margin:0;background:var(--sunk);border:1px solid var(--line);border-radius:var(--r);padding:10px 12px;font:12px/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;max-height:52vh;overflow:auto}
+.copybox pre div{min-height:1em}
+.copybox .lv-OK{color:var(--good)} .copybox .lv-AVISO{color:var(--warn)} .copybox .lv-ERRO{color:var(--crit);font-weight:700}
+.okline{display:flex;gap:8px;align-items:center;color:var(--good);font-weight:600}
+
+.toast{position:fixed;bottom:16px;right:16px;background:var(--raised);border:1px solid var(--line2);border-radius:var(--r);padding:7px 12px;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.3);z-index:50}
+.toast.ok{border-color:var(--good)}
 .toast.err{border-color:var(--crit);color:var(--crit);max-width:min(560px,calc(100vw - 32px));cursor:pointer}
 .offline{position:fixed;top:50px;left:50%;transform:translateX(-50%);z-index:30;background:var(--crit-bg);border:1px solid var(--crit);color:var(--fg);border-radius:var(--r);padding:8px 14px;font-size:13px;max-width:min(680px,calc(100vw - 32px));box-shadow:0 4px 16px rgba(0,0,0,.3);backdrop-filter:blur(6px)}
 .offline b{color:var(--crit)}
 .offline code{font-family:var(--mono);background:var(--sunk);padding:0 4px;border-radius:3px}
-.proj .rm{border:0;background:none;padding:0 3px;color:var(--faint);font-size:14px;line-height:1;opacity:0}
-.proj:hover .rm,.proj .rm:focus-visible{opacity:1}
-.proj .rm:hover{color:var(--crit)}
-.proj.confirm{background:var(--crit-bg);flex-wrap:wrap}
-.proj.confirm .q{flex:1 1 100%;font:12px var(--ui);color:var(--fg);white-space:normal}
-.proj.confirm .btn{font-size:11.5px;padding:1px 8px}
-.proj.confirm .btn.danger{background:var(--crit);border-color:var(--crit);color:#fff;font-weight:600}
+.offline.warn{background:var(--warn-bg);border-color:var(--warn)}
+.offline.warn b{color:var(--warn)}
 
-@media (max-width:1280px){.app{grid-template-columns:240px minmax(0,1fr) 320px}.track{width:72px}}
+@media (max-width:1500px){.app{grid-template-columns:224px minmax(0,1fr) 272px}.track{width:64px}.figs{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:1180px){.msgs .c-id,.msgs col.w-id{display:none}}
 @media (max-width:980px){
   body{overflow:auto}
   .app{height:auto;grid-template-columns:220px minmax(0,1fr)}
   .side,.conv{height:calc(100vh - 42px)}
   .right{grid-column:1/-1;border-top:1px solid var(--line);overflow:visible}
+  .fsb{grid-template-columns:1fr}.places{display:none}
+  .target{grid-template-columns:1fr}
+  .det{grid-template-columns:1fr}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
@@ -289,6 +407,8 @@ dialog::backdrop{background:rgba(5,7,10,.6)}
   </div>
   <div class="crumb"><span>/</span><b id="crumb">todos os projetos</b></div>
   <div class="live" id="live" title="Conexão com o servidor local do Dove"><i></i><span id="livetxt">conectando...</span></div>
+  <span class="ver" id="ver" title="Versão do Dove">v</span>
+  <button class="ibtn" id="hmenu" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="Menu" title="Menu">⋯</button>
 </header>
 
 <main class="app">
@@ -301,17 +421,40 @@ dialog::backdrop{background:rgba(5,7,10,.6)}
       <div class="plist" id="plist" role="list"></div>
     </section>
     <section class="agents" aria-labelledby="ah">
-      <div class="sec-h"><span id="ah">Agentes</span><span class="cnt" id="acount"></span></div>
+      <div class="sec-h"><span id="ah">Agentes</span><span class="cnt" id="acount"></span>
+        <button class="btn sm act" id="addagent" type="button" title="Adicionar agente" aria-label="Adicionar agente">+ Agente</button></div>
       <div class="alist" id="alist"></div>
     </section>
   </aside>
 
-  <!-- conversation -->
+  <!-- conversa em tabela -->
   <section class="col conv" aria-labelledby="ch">
-    <div class="conv-h"><h2 id="ch">Conversa</h2><span class="meta" id="cmeta"></span></div>
-    <div class="tl-wrap">
-      <div class="tl" id="tl" aria-live="polite"></div>
-      <button class="newpill" id="newpill" type="button" hidden>novas mensagens &darr;</button>
+    <div class="phead" id="phead">
+      <div class="ph1"><h2 id="ch">Todos os projetos</h2><div class="sp" id="pacts"></div></div>
+      <div class="ppath" id="ppathrow" hidden></div>
+      <div class="pfacts" id="pfacts"></div>
+      <div class="phint" id="phint" hidden></div>
+    </div>
+    <div class="tbar" role="search">
+      <input type="search" id="tq" placeholder="Buscar nas mensagens" aria-label="Buscar nas mensagens">
+      <select id="ffrom" aria-label="Filtrar por remetente"></select>
+      <select id="fto" aria-label="Filtrar por destinatário"></select>
+      <select id="fkind" aria-label="Filtrar por tipo"></select>
+      <select id="fstate" aria-label="Filtrar por estado"></select>
+      <button class="link" id="fclear" type="button" hidden>Limpar filtros</button>
+      <span class="count" id="tcount"></span>
+    </div>
+    <div class="twrap">
+      <div class="tscroll" id="tscroll">
+        <table class="msgs" id="tbl" aria-describedby="tcount">
+          <colgroup id="tcols"></colgroup>
+          <thead><tr id="thead"></tr></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+        <div id="tempty" hidden></div>
+        <div class="tfoot" id="tfoot"></div>
+      </div>
+      <button class="newpill" id="newpill" type="button" hidden>novas mensagens &uarr;</button>
     </div>
     <form class="composer" id="composer" autocomplete="off">
       <div class="replying" id="replying" hidden><span id="replytxt"></span><button type="button" id="replyx" aria-label="Cancelar resposta">&times;</button></div>
@@ -342,16 +485,32 @@ dialog::backdrop{background:rgba(5,7,10,.6)}
   </aside>
 </main>
 
-<!-- add project -->
-<dialog id="dproj" aria-labelledby="dproj-t">
+<!-- adicionar projeto -->
+<dialog id="dproj" class="wide" aria-labelledby="dproj-t">
   <div class="dlg">
-    <div class="dlg-h"><h3 id="dproj-t">Adicionar projetos</h3><button class="x" type="button" data-close aria-label="Fechar">&times;</button></div>
+    <div class="dlg-h"><h3 id="dproj-t">Adicionar projeto</h3><button class="x" type="button" data-close aria-label="Fechar">&times;</button></div>
     <div class="dlg-b">
       <div class="tabs" role="tablist">
-        <button class="tab" role="tab" id="tab-scan" aria-selected="true" type="button">Descobrir projetos</button>
+        <button class="tab" role="tab" id="tab-nav" aria-selected="true" type="button">Navegar</button>
+        <button class="tab" role="tab" id="tab-scan" aria-selected="false" type="button">Descobrir</button>
         <button class="tab" role="tab" id="tab-path" aria-selected="false" type="button">Colar caminho</button>
       </div>
-      <div id="pane-scan" class="dlg-b" style="padding:0">
+      <div id="pane-nav" class="pane">
+        <div class="fsb">
+          <nav class="places" id="places" aria-label="Locais"></nav>
+          <div class="fsmain">
+            <div class="crumbs"><button class="ibtn" id="fsup" type="button" title="Pasta acima (Backspace)" aria-label="Pasta acima">↑</button><div class="cpath" id="cpath"></div></div>
+            <div class="flist" id="flist" role="listbox" tabindex="0" aria-label="Pastas"></div>
+          </div>
+        </div>
+        <div class="allrepos" id="allrepos" hidden></div>
+        <div class="target">
+          <div class="tp"><span class="flabel">Pasta a adicionar</span><div class="pth"><bdi id="ntarget"></bdi></div></div>
+          <div class="field"><label for="nname">Nome do projeto</label><input type="text" id="nname" maxlength="80"></div>
+        </div>
+        <div class="help">Clique para selecionar, clique duplo (ou Enter) para entrar na pasta. Sem seleção, adiciona a pasta aberta. Repositórios git aparecem com a branch.</div>
+      </div>
+      <div id="pane-scan" class="pane" hidden>
         <div class="hrow">
           <div class="field"><label for="sroot">Pasta raiz</label><input type="text" id="sroot" placeholder="C:\Users\voce\Codigo  ou  ~/code"></div>
           <div class="field" style="flex:0 0 90px"><label for="sdepth">Níveis</label>
@@ -365,18 +524,58 @@ dialog::backdrop{background:rgba(5,7,10,.6)}
           <div class="rlist" id="rlist" style="margin-top:8px"></div>
         </div>
       </div>
-      <div id="pane-path" class="dlg-b" style="padding:0" hidden>
+      <div id="pane-path" class="pane" hidden>
         <div class="field"><label for="ppath">Caminho da pasta</label><input type="text" id="ppath" placeholder="C:\Users\voce\Codigo\lagu"></div>
         <div class="field"><label for="pname">Nome (opcional)</label><input type="text" id="pname" placeholder="usa o nome da pasta"></div>
       </div>
     </div>
-    <div class="dlg-f"><span class="msgline" id="pmsg"></span>
+    <div class="dlg-f"><span class="msgline" id="pmsg" role="status"></span>
       <button class="btn sp" type="button" data-close>Cancelar</button>
-      <button class="btn pri" type="button" id="padd">Adicionar selecionados</button></div>
+      <button class="btn pri" type="button" id="padd">Adicionar esta pasta</button></div>
   </div>
 </dialog>
 
-<!-- new mission -->
+<!-- adicionar agente -->
+<dialog id="dagent" aria-labelledby="dagent-t">
+  <form class="dlg" id="fagent" autocomplete="off" novalidate>
+    <div class="dlg-h"><h3 id="dagent-t">Adicionar agente</h3><button class="x" type="button" data-close aria-label="Fechar">&times;</button></div>
+    <div class="dlg-b" id="agform">
+      <div class="hrow">
+        <div class="field"><label for="atype">Tipo</label>
+          <select id="atype"><option value="claude-code">Claude Code</option><option value="codex">Codex</option><option value="hermes">Hermes</option><option value="outro">Outro</option></select></div>
+        <div class="field"><label for="aname">Nome no canal</label><input type="text" id="aname" maxlength="32" placeholder="ex.: claude" spellcheck="false"></div>
+      </div>
+      <div class="help">Minúsculas, números, <span class="mono">-</span> ou <span class="mono">_</span>. É o nome que o agente usa em <span class="mono">a2a inbox --agent NOME</span>.</div>
+      <div class="field"><label for="amodel">Modelo (opcional)</label><input type="text" id="amodel" maxlength="60" placeholder="ex.: opus, gpt-5"></div>
+      <div class="field"><label for="anote">Nota (opcional)</label><input type="text" id="anote" maxlength="200" placeholder="ex.: cuida do front-end do lagu"></div>
+    </div>
+    <div class="dlg-b" id="agdone" hidden>
+      <div class="okline" id="agok"></div>
+      <div class="help" style="color:var(--mut)">Cole isto como primeira mensagem na sessão do agente (ou adicione o AGENTS.md ao projeto com <span class="mono">a2a onboard --agents-md</span>).</div>
+      <div class="copybox"><pre id="agtext"></pre></div>
+    </div>
+    <div class="dlg-f"><span class="msgline" id="amsg" role="status"></span>
+      <button class="btn sp" type="button" data-close id="acancel">Cancelar</button>
+      <button class="btn" type="button" id="acopy" hidden>Copiar</button>
+      <button class="btn pri" type="submit" id="aadd">Adicionar agente</button></div>
+  </form>
+</dialog>
+
+<!-- texto copiavel: instrucoes do agente / diagnostico -->
+<dialog id="dtext" aria-labelledby="dtext-t">
+  <div class="dlg">
+    <div class="dlg-h"><h3 id="dtext-t"></h3><button class="x" type="button" data-close aria-label="Fechar">&times;</button></div>
+    <div class="dlg-b">
+      <div class="help" id="dtext-help" style="color:var(--mut)"></div>
+      <div class="copybox"><pre id="dtext-pre"></pre></div>
+    </div>
+    <div class="dlg-f"><span class="msgline" id="dtext-msg" role="status"></span>
+      <button class="btn sp" type="button" data-close>Fechar</button>
+      <button class="btn pri" type="button" id="dtext-copy">Copiar</button></div>
+  </div>
+</dialog>
+
+<!-- nova missao -->
 <dialog id="dmis" aria-labelledby="dmis-t">
   <form class="dlg" id="fmis" autocomplete="off">
     <div class="dlg-h"><h3 id="dmis-t">Nova missão</h3><button class="x" type="button" data-close aria-label="Fechar">&times;</button></div>
@@ -395,12 +594,17 @@ dialog::backdrop{background:rgba(5,7,10,.6)}
 
 <div class="toast" id="toast" role="status" hidden></div>
 <div class="offline" id="offline" role="alert" hidden><b>Sem conexão com o servidor do Dove</b> — a janela do PowerShell com <code>dove</code> foi fechada? Rode <code>dove</code> de novo.</div>
+<div class="offline warn" id="stale" role="alert" hidden></div>
 
 <script>
 "use strict";
+var UI_VERSION = "0.6.0";
+var SERVER_V = "__DOVE_SERVER_VERSION__";  // o servidor troca pela versao dele; servidor antigo deixa como esta
 var TOKEN = (document.querySelector('meta[name="dove-token"]') || {}).content || "";
 var S = null;                       // ultimo /api/state
-var ui = {project: null, replyTo: null, open: {}, confirming: null, removing: null, sig: {}, firstConv: true, lastCount: 0, online: null};
+var ui = {project: null, replyTo: null, open: {}, confirming: null, removing: null, agentRemoving: null, sig: {},
+  online: null, older: [], olderMore: null, pinfo: {}, ptab: "nav"};
+var T = {sort: "data", dir: -1, q: "", from: "", to: "", kind: "", state: "", open: {}, seenTop: null, newCount: 0};
 var OFFLINE_MSG = "Sem conexao com o servidor do Dove — a janela do PowerShell com `dove` foi fechada? Rode `dove` de novo.";
 try { ui.project = localStorage.getItem("dove.project") || null; } catch (e) {}
 
@@ -412,6 +616,7 @@ function el(tag, cls, text) {
   if (text != null) n.textContent = String(text);
   return n;
 }
+function btn(cls, text, fn, title) { var b = el("button", cls, text); b.type = "button"; if (fn) b.onclick = fn; if (title) b.title = title; return b; }
 function add(parent) { for (var i = 1; i < arguments.length; i++) if (arguments[i]) parent.appendChild(arguments[i]); return parent; }
 function ts(iso) { var t = Date.parse(iso || ""); return isNaN(t) ? 0 : t; }
 function rel(iso) {
@@ -421,18 +626,21 @@ function rel(iso) {
   if (s < 86400) return Math.floor(s / 3600) + " h"; return Math.floor(s / 86400) + " d";
 }
 function relSec(sec) { return sec ? rel(new Date(sec * 1000).toISOString()) : "—"; }
-function hhmm(iso) { var d = new Date(ts(iso)); return d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}); }
-function dayLabel(iso) {
-  var d = new Date(ts(iso)), today = new Date(), y = new Date(Date.now() - 864e5);
-  if (d.toDateString() === today.toDateString()) return "Hoje";
-  if (d.toDateString() === y.toDateString()) return "Ontem";
-  return d.toLocaleDateString([], {day: "2-digit", month: "short", year: d.getFullYear() === today.getFullYear() ? undefined : "numeric"});
+function hhmm(iso) { var d = new Date(ts(iso)); return d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", hour12: false}); }
+function whenShort(iso) {
+  var d = new Date(ts(iso)); if (!ts(iso)) return "";
+  if (d.toDateString() === new Date().toDateString()) return hhmm(iso);
+  return d.toLocaleDateString([], {day: "2-digit", month: "2-digit"}) + " " + hhmm(iso);
 }
+function whenFull(iso) { var t = ts(iso); return t ? new Date(t).toLocaleString([], {dateStyle: "full", timeStyle: "medium"}) + "\n" + iso : iso || ""; }
+function sid(id) { return String(id || "").slice(0, 7); }
+function oneLine(s, n) { s = String(s || "").replace(/\s+/g, " ").trim(); return n && s.length > n ? s.slice(0, n - 1) + "…" : s; }
 function changed(key, val) { var s = JSON.stringify(val); if (ui.sig[key] === s) return false; ui.sig[key] = s; return true; }
-function toast(msg, err) {
-  var t = $("toast"); t.textContent = msg; t.className = "toast" + (err ? " err" : ""); t.hidden = false;
+function toast(msg, kind) {
+  var t = $("toast"); t.textContent = msg; t.className = "toast" + (kind === true || kind === "err" ? " err" : kind === "ok" ? " ok" : ""); t.hidden = false;
+  var err = t.className.indexOf("err") >= 0;
   t.title = err ? "clique para fechar" : "";
-  clearTimeout(toast._t); toast._t = setTimeout(function () { t.hidden = true; }, err ? 9000 : 2800);
+  clearTimeout(toast._t); toast._t = setTimeout(function () { t.hidden = true; }, err ? 9000 : 3200);
 }
 /* toda chamada ao servidor passa por aqui: erro HTTP -> mensagem do servidor; falha de rede -> OFFLINE_MSG */
 function request(path, opts) {
@@ -441,6 +649,7 @@ function request(path, opts) {
       var j = null; try { j = txt ? JSON.parse(txt) : {}; } catch (e) { j = null; }
       if (!r.ok || !j || j.ok === false) {
         var msg = j && j.error ? j.error : "Erro " + r.status + " do servidor do Dove" + (txt && !j ? ": " + txt.slice(0, 160) : "");
+        if (r.status === 404 && serverOutdated()) msg += " — o servidor do Dove em execução é antigo: feche a janela do dove e rode dove de novo.";
         var err = new Error(msg); err.status = r.status; throw err;
       }
       setOnline(true); return j;
@@ -458,16 +667,44 @@ function getJSON(path, needToken) {
   return request(path, {headers: needToken ? {"X-Dove-Token": TOKEN} : {}, cache: "no-store"});
 }
 function showErr(e) { toast(e && e.message ? e.message : String(e), true); }
+function copyText(text, msgEl) {
+  function done(ok) {
+    if (msgEl) { msgEl.textContent = ok ? "Copiado para a área de transferência." : "Não consegui copiar: selecione o texto e use Ctrl+C."; msgEl.className = "msgline" + (ok ? "" : " err"); }
+    else toast(ok ? "Copiado" : "Não consegui copiar — selecione e use Ctrl+C", ok ? "ok" : true);
+  }
+  function fallback() {
+    var ta = el("textarea"); ta.value = text; ta.setAttribute("readonly", ""); ta.style.position = "fixed"; ta.style.opacity = "0";
+    (document.querySelector("dialog[open]") || document.body).appendChild(ta); ta.select();
+    var ok = false; try { ok = document.execCommand("copy"); } catch (e) {}
+    ta.remove(); done(ok);
+  }
+  if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(function () { done(true); }, fallback);
+  else fallback();
+}
 function setOnline(on) {
   var was = ui.online; ui.online = on;
   $("live").className = "live" + (on ? "" : " off");
   $("live").title = on ? "Conectado ao servidor local do Dove" : OFFLINE_MSG;
   if (!on) $("livetxt").textContent = "offline · sem conexão com o dove";
   $("offline").hidden = on;
-  if (on && was === false) toast("Conexão com o Dove restabelecida");
+  if (on && was === false) toast("Conexão com o Dove restabelecida", "ok");
+}
+function serverVersion() { return S && S.version ? S.version : (SERVER_V.indexOf("__") === 0 ? "" : SERVER_V); }
+function serverOutdated() { return serverVersion() !== UI_VERSION; }
+function renderVersion() {
+  var sv = serverVersion(), bad = serverOutdated();
+  $("ver").textContent = "v" + UI_VERSION;
+  $("ver").className = "ver" + (bad ? " bad" : "");
+  $("ver").title = bad ? "Página " + UI_VERSION + ", servidor " + (sv || "antigo (sem versão)") : "Dove " + UI_VERSION;
+  var st = $("stale");
+  if (bad && S) {
+    st.replaceChildren(add(el("b"), document.createTextNode("Servidor do Dove desatualizado")),
+      document.createTextNode(" — esta página é a versão " + UI_VERSION + ", mas o servidor rodando é " + (sv ? "a " + sv : "anterior a 0.6.0") +
+      ". Feche a janela do PowerShell com o dove (Ctrl+C) e rode "), add(el("code"), document.createTextNode("dove")), document.createTextNode(" de novo."));
+    st.hidden = false;
+  } else st.hidden = true;
 }
 function stateKey(s) { return String(s || "unknown").replace(/[^a-z]/g, ""); }
-function cur() { return ui.project; }
 function inScope(item) { return !ui.project || item.project === ui.project; }
 function summaryFor() {
   if (!S) return null;
@@ -475,67 +712,121 @@ function summaryFor() {
   return S.summary.projects[ui.project] || {open_tasks: [], blocked: [], stale: [], high_context: [], missions: {aberta: 0, reprovada: 0, aval_completo: 0, concluida: 0}, recent_done: []};
 }
 
-/* ---------- top / selection ---------- */
+/* ---------- menu popover (projetos, agentes, cabecalho) ---------- */
+var menuState = null;
+function closeMenu() {
+  if (!menuState) return;
+  menuState.node.remove(); menuState.anchor.setAttribute("aria-expanded", "false");
+  var a = menuState.anchor; menuState = null;
+  if (document.activeElement === document.body) a.focus();
+}
+function openMenu(anchor, items) {
+  if (menuState && menuState.anchor === anchor) { closeMenu(); return; }
+  closeMenu();
+  var m = el("div", "menu"); m.setAttribute("role", "menu");
+  items.forEach(function (it) {
+    if (it === "-") { m.appendChild(el("hr")); return; }
+    var b = btn(it.danger ? "danger" : "", null, function (ev) { ev.stopPropagation(); closeMenu(); it.fn(); });
+    b.setAttribute("role", "menuitem"); add(b, el("span", null, it.label), it.hint ? el("span", "k", it.hint) : null);
+    m.appendChild(b);
+  });
+  document.body.appendChild(m);
+  var r = anchor.getBoundingClientRect(), w = m.offsetWidth, h = m.offsetHeight;
+  var left = Math.min(Math.max(8, r.right - w), window.innerWidth - w - 8);
+  var top = r.bottom + 4; if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 4);
+  m.style.left = left + "px"; m.style.top = top + "px";
+  anchor.setAttribute("aria-expanded", "true");
+  menuState = {node: m, anchor: anchor};
+  var first = m.querySelector("button"); if (first) first.focus();
+  m.addEventListener("keydown", function (e) {
+    var bs = Array.prototype.slice.call(m.querySelectorAll("button")), i = bs.indexOf(document.activeElement);
+    if (e.key === "ArrowDown") { e.preventDefault(); bs[(i + 1) % bs.length].focus(); }
+    if (e.key === "ArrowUp") { e.preventDefault(); bs[(i - 1 + bs.length) % bs.length].focus(); }
+    if (e.key === "Escape" || e.key === "Tab") { e.preventDefault(); closeMenu(); anchor.focus(); }
+  });
+}
+document.addEventListener("mousedown", function (e) { if (menuState && !menuState.node.contains(e.target) && e.target !== menuState.anchor) closeMenu(); });
+window.addEventListener("resize", closeMenu);
+
+/* ---------- selecao ---------- */
 function selectProject(name) {
-  ui.project = name || null; ui.firstConv = true; ui.sig = {};
+  var changedP = (name || null) !== ui.project;
+  ui.project = name || null; ui.sig = {};
+  if (changedP) { ui.older = []; ui.olderMore = null; T.open = {}; T.seenTop = null; $("tscroll").scrollTop = 0; }
   try { if (ui.project) localStorage.setItem("dove.project", ui.project); else localStorage.removeItem("dove.project"); } catch (e) {}
   render();
-  if (ui.project) $("cproj").value = ui.project;
+  if (ui.project) { ensureProjOption(ui.project); $("cproj").value = ui.project; loadProjectInfo(ui.project, true); }
+  else if (changedP && !ui.replyTo) $("cproj").value = "";
+  if (changedP) tick();
 }
 
 /* ---------- projetos ---------- */
+function projectMenu(p, anchor) {
+  openMenu(anchor, [
+    {label: p.pinned ? "Desafixar" : "Fixar no topo", fn: function () {
+      api("/api/project/pin", {name: p.name, pinned: !p.pinned}).then(function () { toast(p.pinned ? "Projeto desafixado" : "Projeto fixado", "ok"); return tick(); }).catch(showErr); }},
+    {label: "Abrir pasta", fn: function () { openFolder(p.name); }},
+    {label: "Copiar caminho", fn: function () { copyText(p.path); }},
+    "-",
+    {label: "Remover da lista", danger: true, fn: function () { ui.removing = p.name; renderProjects(); }}
+  ]);
+}
+function openFolder(name) {
+  api("/api/project/open", {name: name}).then(function (r) { toast("Abrindo " + r.path, "ok"); }).catch(showErr);
+}
+function projRow(p, sp) {
+  if (ui.removing === p.name) return removeConfirm(p);
+  var s = sp[p.name] || {open_tasks: [], blocked: []};
+  var row = el("div", "proj" + (ui.project === p.name ? " active" : "")); row.setAttribute("role", "listitem");
+  row.tabIndex = 0; row.title = p.path;
+  add(row, el("span", "star", p.pinned ? "★" : ""), el("span", "nm", p.name));
+  if (p.pinned) row.firstChild.title = "fixado";
+  if (s.open_tasks.length) { var o = el("span", "pb open", s.open_tasks.length); o.title = s.open_tasks.length + " tarefas abertas"; add(row, o); }
+  if (s.blocked.length) { var bl = el("span", "pb blk", s.blocked.length + " bloq"); bl.title = s.blocked.length + " agente(s) bloqueado(s)"; add(row, bl); }
+  var mb = btn("ibtn", "⋯", null, "Ações do projeto"); mb.setAttribute("aria-label", "Ações do projeto " + p.name); mb.setAttribute("aria-haspopup", "menu");
+  mb.onclick = function (ev) { ev.stopPropagation(); projectMenu(p, mb); };
+  add(row, mb);
+  row.onclick = function () { selectProject(p.name); };
+  row.onkeydown = function (ev) { if (ev.target !== row) return; if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); selectProject(p.name); } };
+  return row;
+}
 function renderProjects() {
   var q = $("psearch").value.trim().toLowerCase();
   var ps = S.projects, sp = S.summary.projects;
   if (!changed("proj", [ps, q, ui.project, ui.removing, Object.keys(sp).map(function (k) { return [k, sp[k].open_tasks.length, sp[k].blocked.length]; })])) return;
+  if (menuState && $("plist").contains(menuState.anchor)) closeMenu();
   var list = $("plist"); list.replaceChildren();
   $("pcount").textContent = ps.length ? String(ps.length) : "";
   if (!ps.length) {
     var e = el("div", "pempty");
-    add(e, el("div", null, "Nenhum projeto ainda. Aponte uma pasta raiz e o Dove acha seus repositórios git."));
-    var b = el("button", "btn pri", "Descobrir projetos"); b.type = "button"; b.onclick = function () { openProjDialog("scan"); };
-    add(e, b); add(list, e);
+    add(e, el("div", null, "Nenhum projeto ainda. Navegue até a pasta do projeto e clique em Adicionar."));
+    add(e, btn("btn pri", "Adicionar projeto", function () { openProjDialog("nav"); }));
+    add(list, e); return;
   }
   var all = el("button", "proj" + (ui.project ? "" : " active")); all.type = "button"; all.setAttribute("role", "listitem");
   add(all, el("span", "all-ico", "∗"), el("span", "nm", "Todos"));
   var g = S.summary.global;
   if (g.open_tasks.length) { var ob = el("span", "pb open", g.open_tasks.length); ob.title = g.open_tasks.length + " tarefas abertas"; add(all, ob); }
   all.onclick = function () { selectProject(null); };
-  if (ps.length) list.appendChild(all);
-  ps.forEach(function (p) {
-    if (q && p.name.toLowerCase().indexOf(q) < 0 && p.path.toLowerCase().indexOf(q) < 0) return;
-    var s = sp[p.name] || {open_tasks: [], blocked: []};
-    var row = el("div", "proj" + (ui.project === p.name ? " active" : "")); row.setAttribute("role", "listitem");
-    row.tabIndex = 0; row.title = p.path;
-    if (ui.removing === p.name) { list.appendChild(removeConfirm(p)); return; }
-    var pin = el("button", "pin" + (p.pinned ? " on" : ""), p.pinned ? "★" : "☆"); pin.type = "button";
-    pin.setAttribute("aria-label", (p.pinned ? "Desafixar " : "Fixar ") + p.name);
-    pin.onclick = function (ev) { ev.stopPropagation(); api("/api/project/pin", {name: p.name, pinned: !p.pinned}).then(tick).catch(showErr); };
-    add(row, pin, el("span", "nm", p.name));
-    if (s.open_tasks.length) { var o = el("span", "pb open", s.open_tasks.length); o.title = s.open_tasks.length + " tarefas abertas"; add(row, o); }
-    if (s.blocked.length) { var bl = el("span", "pb blk", s.blocked.length + " bloq"); bl.title = s.blocked.length + " agente(s) bloqueado(s)"; add(row, bl); }
-    var rm = el("button", "rm", "×"); rm.type = "button"; rm.title = "Remover projeto da lista";
-    rm.setAttribute("aria-label", "Remover projeto " + p.name);
-    rm.onclick = function (ev) { ev.stopPropagation(); ui.removing = p.name; renderProjects(); };
-    add(row, rm);
-    row.onclick = function () { selectProject(p.name); };
-    row.onkeydown = function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); selectProject(p.name); } };
-    list.appendChild(row);
-  });
+  list.appendChild(all);
+  var vis = ps.filter(function (p) { return !q || p.name.toLowerCase().indexOf(q) >= 0 || p.path.toLowerCase().indexOf(q) >= 0; });
+  var pinned = vis.filter(function (p) { return p.pinned; }), rest = vis.filter(function (p) { return !p.pinned; });
+  if (pinned.length) { list.appendChild(el("div", "pgroup", "Fixados")); pinned.forEach(function (p) { list.appendChild(projRow(p, sp)); }); }
+  if (pinned.length && rest.length) list.appendChild(el("div", "pgroup", "Demais"));
+  rest.forEach(function (p) { list.appendChild(projRow(p, sp)); });
+  if (!vis.length) list.appendChild(el("div", "pgroup", "Nenhum projeto com “" + q + "”"));
 }
-
 function removeConfirm(p) {
-  var row = el("div", "proj confirm"); row.setAttribute("role", "listitem");
+  var row = el("div", "confirm"); row.setAttribute("role", "listitem");
   add(row, el("span", "q", "Remover “" + p.name + "” da lista? A pasta e as mensagens não são apagadas."));
-  var yes = el("button", "btn danger", "Remover"); yes.type = "button";
-  var no = el("button", "btn", "Cancelar"); no.type = "button";
+  var yes = btn("btn danger", "Remover"), no = btn("btn", "Cancelar");
   yes.onclick = function (ev) {
     ev.stopPropagation(); yes.disabled = true;
     api("/api/project/remove", {name: p.name}).then(function () {
       ui.removing = null;
       if (S) S.projects = S.projects.filter(function (x) { return x.name !== p.name; });
       if (ui.project === p.name) selectProject(null); else renderProjects();
-      toast("Projeto “" + p.name + "” removido"); return tick();
+      toast("Projeto “" + p.name + "” removido", "ok"); return tick();
     }).catch(function (e) { yes.disabled = false; showErr(e); });
   };
   no.onclick = function (ev) { ev.stopPropagation(); ui.removing = null; renderProjects(); };
@@ -544,9 +835,65 @@ function removeConfirm(p) {
   return row;
 }
 
+/* ---------- cabecalho do projeto ---------- */
+function loadProjectInfo(name, force) {
+  var c = ui.pinfo[name];
+  if (!force && c && Date.now() - c.at < 30000) return;
+  ui.pinfo[name] = {info: c ? c.info : null, at: Date.now(), err: null};
+  getJSON("/api/project/info?name=" + encodeURIComponent(name), true)
+    .then(function (j) { ui.pinfo[name] = {info: j.info, at: Date.now()}; renderHeader(); })
+    .catch(function (e) { ui.pinfo[name] = {info: null, at: Date.now(), err: e.message}; renderHeader(); });
+}
+function fact(label, value, cls, title) {
+  var s = el("span", cls || null); add(s, document.createTextNode(label ? label + " " : ""), el("b", null, value)); if (title) s.title = title; return s;
+}
+function renderHeader() {
+  var p = ui.project, total = allScoped().length;
+  $("crumb").textContent = p || "todos os projetos";
+  var acts = $("pacts"), facts = $("pfacts"), pr = $("ppathrow"), hint = $("phint");
+  if (!changed("head", [p, ui.pinfo[p] && ui.pinfo[p].info, ui.pinfo[p] && ui.pinfo[p].err, total, S.messages_total, Math.floor(Date.now() / 60000)])) return;
+  acts.replaceChildren(); facts.replaceChildren(); pr.replaceChildren(); hint.replaceChildren();
+  if (!p) {
+    $("ch").textContent = "Todos os projetos"; pr.hidden = true; hint.hidden = true;
+    add(facts, fact("", S.projects.length, null), document.createTextNode(" projetos"));
+    add(facts, fact("", S.registered.length), document.createTextNode(" agentes"));
+    add(facts, fact("", S.messages_total != null ? S.messages_total : total), document.createTextNode(" mensagens no canal"));
+    return;
+  }
+  $("ch").textContent = p;
+  var proj = S.projects.filter(function (x) { return x.name === p; })[0];
+  var c = ui.pinfo[p] || {}, info = c.info;
+  if (!proj) {
+    pr.hidden = true; hint.hidden = false;
+    hint.textContent = "“" + p + "” aparece nas mensagens mas não está registrado como projeto. Use + Adicionar para apontar a pasta.";
+    return;
+  }
+  pr.hidden = false;
+  var bd = el("div", "pth"); bd.appendChild(el("bdi", null, proj.path)); bd.title = proj.path;
+  add(pr, bd, btn("link", "copiar", function () { copyText(proj.path); }, "Copiar caminho"));
+  add(acts, btn("btn sm", "Abrir pasta", function () { openFolder(p); }, "Abre no gerenciador de arquivos"));
+  var mb = btn("ibtn", "⋯", null, "Ações do projeto"); mb.setAttribute("aria-haspopup", "menu");
+  mb.onclick = function () { projectMenu(proj, mb); }; add(acts, mb);
+  if (c.err) { add(facts, el("span", "bad", "não consegui ler o projeto: " + c.err)); return; }
+  if (!info) { add(facts, el("span", null, "lendo pasta...")); return; }
+  if (!info.exists) { add(facts, el("span", "bad", "a pasta não existe mais neste caminho")); hint.hidden = true; return; }
+  if (info.is_repo) {
+    add(facts, fact("branch", info.branch || "—"));
+    add(facts, fact("remoto", info.host || (info.remote ? "local" : "nenhum"), null, info.remote || "sem remote origin"));
+    if (info.last_activity_iso) add(facts, fact("atividade", rel(info.last_activity_iso) === "agora" ? "agora" : "há " + rel(info.last_activity_iso), null, info.last_activity_iso));
+  } else add(facts, el("span", null, "não é repositório git"));
+  add(facts, info.has_agents_md ? el("span", "ok", "AGENTS.md ✓") : el("span", "warn", "sem AGENTS.md"));
+  var n = allScoped().length; add(facts, fact("", S.messages_total != null ? S.messages_total : n), document.createTextNode(" mensagens"));
+  if (!info.has_agents_md) {
+    hint.hidden = false;
+    add(hint, document.createTextNode("Este projeto ainda não tem AGENTS.md — veja "), el("code", null, "a2a onboard --agents-md --project " + p));
+  } else hint.hidden = true;
+}
+
 /* ---------- agentes ---------- */
+var TYPE_LABEL = {"claude-code": "Claude Code", codex: "Codex", hermes: "Hermes", outro: "Outro"};
 function ctxNode(c) {
-  var wrap = el("span", "ctx"), tr = el("span", "track"), f = el("span", "fill"), lbl;
+  var wrap = el("span", "ctx"), tr = el("span", "track"), f = el("span", "fill");
   [70, 90].forEach(function (v) { var t = el("span", "tick"); t.style.left = v + "%"; tr.appendChild(t); });
   if (c == null) { wrap.className += " unk"; wrap.title = "contexto não informado"; add(wrap, tr, el("span", "pct", "—")); return wrap; }
   f.style.width = Math.max(2, Math.min(100, c)) + "%"; tr.insertBefore(f, tr.firstChild);
@@ -556,76 +903,285 @@ function ctxNode(c) {
   add(wrap, tr, el("span", "pct", c + "%"));
   return wrap;
 }
+function agentMenu(a, anchor) {
+  openMenu(anchor, [
+    {label: "Ver instruções", fn: function () { showOnboard(a.agent); }},
+    "-",
+    {label: "Remover agente", danger: true, fn: function () { ui.agentRemoving = a.agent; ui.sig.agents = null; renderAgents(); }}
+  ]);
+}
+function showOnboard(name) {
+  getJSON("/api/onboard?agent=" + encodeURIComponent(name) + "&project=" + encodeURIComponent(ui.project || ""), true)
+    .then(function (j) {
+      openText("Instruções para " + name, "Cole isto como primeira mensagem na sessão do agente (ou adicione o AGENTS.md ao projeto com a2a onboard --agents-md).", j.text);
+    }).catch(showErr);
+}
+function agentConfirm(a) {
+  var row = el("div", "confirm");
+  add(row, el("span", "q", "Remover o agente “" + a.agent + "”? Some do quadro e da lista de destinatários; as mensagens antigas ficam."));
+  var yes = btn("btn danger", "Remover"), no = btn("btn", "Cancelar");
+  yes.onclick = function () {
+    yes.disabled = true;
+    api("/api/agent/remove", {name: a.agent}).then(function () { ui.agentRemoving = null; toast("Agente “" + a.agent + "” removido", "ok"); return tick(); })
+      .catch(function (e) { yes.disabled = false; showErr(e); });
+  };
+  no.onclick = function () { ui.agentRemoving = null; ui.sig.agents = null; renderAgents(); };
+  add(row, yes, no); setTimeout(function () { no.focus(); }, 0);
+  return row;
+}
 function renderAgents() {
+  var meta = S.agent_meta || {};
   var ags = S.agents.filter(function (a) { return S.registered.indexOf(a.agent) >= 0 || a.state !== "unknown"; });
-  if (!changed("agents", ags)) return;
+  if (!changed("agents", [ags, meta, ui.agentRemoving])) return;
+  if (menuState && $("alist").contains(menuState.anchor)) closeMenu();
   var list = $("alist"); list.replaceChildren(); $("acount").textContent = ags.length ? String(ags.length) : "";
-  if (!ags.length) { add(list, el("div", "pempty", "Nenhum agente convidado. No terminal: a2a join --agent claude")); return; }
+  if (!ags.length) {
+    var e = el("div", "pempty"); add(e, el("div", null, "Nenhum agente ainda. Adicione o Claude Code, o Codex ou outro agente que vai trabalhar nos projetos."));
+    add(e, btn("btn pri", "+ Adicionar agente", openAgentDialog)); list.appendChild(e); return;
+  }
   ags.forEach(function (a) {
-    var k = stateKey(a.state), row = el("div", "agent");
-    row.title = [a.agent + " — " + a.state, a.project ? "projeto: " + a.project : "", a.note ? "nota: " + a.note : "", a.updated ? "atualizado: " + a.updated : ""].filter(Boolean).join("\n");
+    if (ui.agentRemoving === a.agent) { list.appendChild(agentConfirm(a)); return; }
+    var m = meta[a.agent] || {}, k = stateKey(a.state), row = el("div", "agent");
+    row.title = [a.agent + " — " + a.state, m.type ? "tipo: " + (TYPE_LABEL[m.type] || m.type) : "", a.project ? "projeto: " + a.project : "",
+      a.note ? "nota: " + a.note : (m.note ? "nota: " + m.note : ""), a.updated ? "atualizado: " + a.updated : ""].filter(Boolean).join("\n");
     var st = el("span", "st " + k); add(st, el("i"), document.createTextNode(k));
-    add(row, add(el("div", "a1"), el("span", "aname", a.agent), st, el("span", "age", a.age === "-" ? "" : a.age)));
-    add(row, add(el("div", "a2"), el("span", "model", a.model || (a.project ? "#" + a.project : "")), ctxNode(a.context)));
-    if (a.note) add(row, el("div", "anote", a.note));
+    var mb = btn("ibtn", "⋯", null, "Ações do agente"); mb.setAttribute("aria-label", "Ações do agente " + a.agent); mb.setAttribute("aria-haspopup", "menu");
+    mb.onclick = function (ev) { ev.stopPropagation(); agentMenu(a, mb); };
+    add(row, add(el("div", "a1"), el("span", "aname", a.agent), st, el("span", "age", a.age === "-" ? "" : a.age), mb));
+    var tl = [TYPE_LABEL[m.type] || "", a.model || m.model || ""].filter(Boolean).join(" · ");
+    if (tl) row.appendChild(el("div", "atype", tl));
+    add(row, add(el("div", "a2"), el("span", "model", a.project ? "#" + a.project : ""), ctxNode(a.context)));
+    if (a.note || m.note) add(row, el("div", "anote", a.note || m.note));
     list.appendChild(row);
   });
 }
 
-/* ---------- conversa ---------- */
+/* ---------- conversa em tabela ---------- */
+var STATE_SHORT = {AGUARDANDO_ACEITE: "a aceitar", AGUARDANDO_APROVACAO: "a aprovar", EM_EXECUCAO: "em execução",
+  EM_REVISAO: "em revisão", CONCLUIDO: "concluído", CANCELADO: "cancelado", BLOQUEADO: "bloqueado", ACEITO: "aceito"};
 function stateChip(s) {
-  if (!s) return null;
-  var c = s === "CONCLUIDO" || s === "CANCELADO" ? "s-ok" : (s === "BLOQUEADO" || s === "AGUARDANDO_APROVACAO") ? "s-blk" : "s-run";
-  return el("span", "chip " + c, s.replace(/_/g, " "));
+  if (!s) return el("span", "none", "—");
+  var c = s === "CONCLUIDO" ? "s-ok" : s === "CANCELADO" ? "s-no" : (s === "BLOQUEADO" || s === "AGUARDANDO_APROVACAO") ? "s-blk" : s === "AGUARDANDO_ACEITE" ? "s-wait" : "s-run";
+  var n = el("span", "chip " + c, STATE_SHORT[s] || s.replace(/_/g, " ").toLowerCase()); n.title = s; return n;
 }
-function renderConversation() {
-  var msgs = S.messages.filter(inScope);
-  var crumb = ui.project || "todos os projetos";
-  $("crumb").textContent = crumb;
-  $("ch").textContent = ui.project ? "Conversa · " + ui.project : "Conversa · todos";
-  $("cmeta").textContent = msgs.length ? msgs.length + " mensagens" : "";
-  if (!changed("conv", [ui.project, msgs.map(function (m) { return m.msg_id; }), Math.floor(Date.now() / 60000)])) return;
-  var tl = $("tl"), atBottom = tl.scrollHeight - tl.scrollTop - tl.clientHeight < 60, prevTop = tl.scrollTop;
-  var grew = msgs.length > ui.lastCount; ui.lastCount = msgs.length;
-  tl.replaceChildren();
-  if (!msgs.length) {
-    var e = el("div", "empty");
-    add(e, el("h3", null, ui.project ? "Nada conversado em " + ui.project + " ainda" : "Nenhuma mensagem no canal ainda"),
-      el("div", null, "Mande a primeira tarefa no campo abaixo: escolha o agente, escreva o pedido e tecle Ctrl+Enter. Os agentes leem com a2a inbox e respondem aqui."));
-    tl.appendChild(e); return;
-  }
-  var byId = {}; S.messages.forEach(function (m) { byId[m.msg_id] = m; });
-  var mids = {}; S.missions.forEach(function (m) { mids[m.id] = m; });
-  var lastDay = "";
-  msgs.forEach(function (m) {
-    var d = dayLabel(m.data); if (d !== lastDay) { lastDay = d; tl.appendChild(el("div", "day", d)); }
-    var a = el("article", "msg" + (m.from === S.human ? " human" : "")); a.id = "m-" + m.msg_id;
-    var h = el("div", "mh");
-    add(h, el("span", "from", m.from), el("span", null, "→"), el("span", "to", m.to === "all" ? "todos" : m.to),
-      el("span", "chip k-" + (m.kind || ""), m.kind), stateChip(m.state));
-    if (!ui.project && m.project) add(h, el("span", "ptag", m.project));
-    if (m.task_id && mids[m.task_id]) { var mc = el("span", "chip mid", "missão " + m.task_id); mc.title = mids[m.task_id].title; add(h, mc); }
-    var t = el("time", null, hhmm(m.data)); t.dateTime = m.data; t.title = m.data; add(h, t);
-    if (m.kind !== "ack") {
-      var rb = el("button", "rbtn", "responder"); rb.type = "button";
-      rb.onclick = function () { setReply(m); }; add(h, rb);
+function kindChip(k) { var n = el("span", "chip k-" + (k || ""), k || "—"); n.title = "tipo: " + k; return n; }
+function allLoaded() {
+  var seen = {}, out = [];
+  ui.older.concat(S.messages).forEach(function (m) { if (!seen[m.msg_id]) { seen[m.msg_id] = 1; out.push(m); } });
+  return out;
+}
+function allScoped() { return S ? allLoaded().filter(inScope) : []; }
+var COLS = [
+  {k: "data", label: "Hora", w: 62, cls: "c-time"},
+  {k: "from", label: "De → Para", w: 128, cls: "c-ft"},
+  {k: "kind", label: "Tipo", w: 86, cls: "c-kind"},
+  {k: "state", label: "Estado", w: 104, cls: "c-state"},
+  {k: "project", label: "Projeto", w: 88, cls: "c-proj", allOnly: true},
+  {k: "task", label: "Tarefa/ID", w: 82, cls: "c-id"},
+  {k: "body", label: "Mensagem", cls: "c-body", nosort: true},
+  {k: "reply", label: "Resposta a", w: 78, cls: "c-rep", nosort: true}
+];
+function visCols() { return COLS.filter(function (c) { return !(c.allOnly && ui.project); }); }
+function sortVal(m, k) {
+  if (k === "data") return m._i;
+  if (k === "from") return (m.from + " " + m.to).toLowerCase();
+  if (k === "task") return (m.task_id || m.msg_id || "").toLowerCase();
+  return String(m[k] || "").toLowerCase();
+}
+function filtered(list) {
+  var q = T.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  return list.filter(function (m) {
+    if (T.from && m.from !== T.from) return false;
+    if (T.to && m.to !== T.to) return false;
+    if (T.kind && m.kind !== T.kind) return false;
+    if (T.state && (m.state || "-") !== T.state) return false;
+    if (q.length) {
+      var hay = [m.body, m.from, m.to, m.project, m.msg_id, m.task_id, m.evidence, m.result, m.pending, m.next_action, m.state, m.kind].join(" ").toLowerCase();
+      for (var i = 0; i < q.length; i++) if (hay.indexOf(q[i]) < 0) return false;
     }
-    a.appendChild(h);
-    if (m.in_reply_to) {
-      var o = byId[m.in_reply_to];
-      a.appendChild(el("div", "rto", o ? "↳ em resposta a " + o.from + ": " + (o.body || "").replace(/\s+/g, " ").slice(0, 120) : "↳ em resposta a " + m.in_reply_to));
-    }
-    a.appendChild(el("div", "body", m.body));
-    if (m.evidence) { var ev = el("div", "evi"); add(ev, el("b", null, "evidência "), document.createTextNode(m.evidence)); a.appendChild(ev); }
-    tl.appendChild(a);
+    return true;
   });
-  if (ui.firstConv || atBottom) { tl.scrollTop = tl.scrollHeight; $("newpill").hidden = true; }
-  else { tl.scrollTop = prevTop; if (grew) $("newpill").hidden = false; }
-  ui.firstConv = false;
+}
+function sortedRows() {
+  var list = allScoped(); list.forEach(function (m, i) { m._i = i; });
+  var f = filtered(list), k = T.sort, d = T.dir;
+  f.sort(function (a, b) { var x = sortVal(a, k), y = sortVal(b, k); return (x < y ? -1 : x > y ? 1 : 0) * d || (b._i - a._i); });
+  return {rows: f, total: list.length};
+}
+function syncFilters(list) {
+  function uniq(key, dflt) { var s = {}; list.forEach(function (m) { s[m[key] || dflt] = 1; }); return Object.keys(s).sort(); }
+  [["ffrom", "from", "De: todos"], ["fto", "to", "Para: todos"], ["fkind", "kind", "Tipo: todos"], ["fstate", "state", "Estado: todos"]].forEach(function (f) {
+    var vals = uniq(f[1], f[1] === "state" ? "-" : ""), sel = $(f[0]), cur = T[f[1]];
+    if (cur && vals.indexOf(cur) < 0) vals.push(cur);
+    if (!changed("f-" + f[0], vals)) return;
+    sel.replaceChildren(new Option(f[2], ""));
+    vals.forEach(function (v) {
+      var label = f[1] === "state" ? (v === "-" ? "(sem estado)" : STATE_SHORT[v] || v) : f[1] === "to" && v === "all" ? "todos (all)" : v;
+      sel.appendChild(new Option(label, v));
+    });
+    sel.value = cur;
+  });
+  $("fclear").hidden = !(T.q || T.from || T.to || T.kind || T.state);
+}
+function renderHead() {
+  var cols = visCols();
+  if (!changed("thead", [cols.map(function (c) { return c.k; }), T.sort, T.dir])) return;
+  var cg = $("tcols"), th = $("thead"); cg.replaceChildren(); th.replaceChildren();
+  cols.forEach(function (c) {
+    var col = el("col", c.k === "task" ? "w-id" : null); if (c.w) col.style.width = c.w + "px"; cg.appendChild(col);
+    var h = el("th", c.cls); h.scope = "col";
+    if (c.nosort) h.appendChild(el("span", null, c.label));
+    else {
+      var b = btn(null, null, function () { if (T.sort === c.k) T.dir = -T.dir; else { T.sort = c.k; T.dir = c.k === "data" ? -1 : 1; } renderTable(); });
+      add(b, el("span", null, c.label));
+      if (T.sort === c.k) { h.setAttribute("aria-sort", T.dir < 0 ? "descending" : "ascending"); add(b, el("span", "ar", T.dir < 0 ? "▼" : "▲")); }
+      b.title = "Ordenar por " + c.label.toLowerCase(); h.appendChild(b);
+    }
+    th.appendChild(h);
+  });
+}
+function cellFor(c, m, byId) {
+  var td = el("td", c.cls);
+  if (c.k === "data") {
+    var t = el("time", null, hhmm(m.data)); t.dateTime = m.data; td.title = whenFull(m.data); td.appendChild(t);
+    var dd = new Date(ts(m.data)); if (dd.toDateString() !== new Date().toDateString()) td.appendChild(el("div", "dday", dd.toLocaleDateString([], {day: "2-digit", month: "2-digit"})));
+  }
+  else if (c.k === "from") { add(td, el("span", "fr", m.from), el("span", "ar", "→"), el("span", "to", m.to === "all" ? "todos" : m.to)); td.title = m.from + " → " + m.to; }
+  else if (c.k === "kind") td.appendChild(kindChip(m.kind));
+  else if (c.k === "state") td.appendChild(stateChip(m.state));
+  else if (c.k === "project") { td.textContent = m.project || "—"; if (!m.project) td.className += " none"; td.title = m.project || ""; }
+  else if (c.k === "task") {
+    if (m.task_id) { add(td, el("b", null, sid(m.task_id))); td.title = "tarefa: " + m.task_id + "\nmsg: " + m.msg_id; }
+    else { td.textContent = sid(m.msg_id); td.title = "msg: " + m.msg_id; }
+  }
+  else if (c.k === "body") { td.appendChild(el("div", "clamp", oneLine(m.body, 400))); }
+  else if (c.k === "reply") {
+    if (m.in_reply_to) {
+      var o = byId[m.in_reply_to], b = btn("rlink", "↳ " + sid(m.in_reply_to), function (ev) { ev.stopPropagation(); jumpTo(m.in_reply_to); });
+      b.title = o ? "Ir para a mensagem original — " + o.from + ": " + oneLine(o.body, 120) : "Original: " + m.in_reply_to + " (não carregada)";
+      td.appendChild(b);
+    } else td.appendChild(el("span", "none", ""));
+  }
+  return td;
+}
+function detailRow(m, byId, ncol) {
+  var tr = el("tr", "detail"), td = el("td"); td.colSpan = ncol; tr.appendChild(td);
+  var d = el("div", "det");
+  d.appendChild(el("div", "body", m.body || "(sem texto)"));
+  var dl = el("dl");
+  function kv(k, v) { if (!v) return; add(dl, el("dt", null, k), el("dd", null, v)); }
+  kv("de → para", m.from + " → " + (m.to === "all" ? "todos" : m.to));
+  kv("data", new Date(ts(m.data)).toLocaleString() + " (" + m.data + ")");
+  kv("tipo", m.kind); kv("estado", m.state); kv("projeto", m.project);
+  kv("tarefa", m.task_id); kv("msg_id", m.msg_id); kv("resposta a", m.in_reply_to);
+  d.appendChild(dl);
+  var ext = el("div", "ext");
+  [["Evidência", m.evidence, "evi"], ["Resultado", m.result], ["Pendente", m.pending], ["Próxima ação", m.next_action]].forEach(function (f) {
+    if (!f[1]) return; var x = el("div", "fld" + (f[2] ? " " + f[2] : "")); add(x, el("b", null, f[0]), el("span", null, f[1])); ext.appendChild(x);
+  });
+  if (ext.childNodes.length) d.appendChild(ext);
+  var parent = m.in_reply_to ? byId[m.in_reply_to] : null;
+  var replies = allLoaded().filter(function (x) { return x.in_reply_to === m.msg_id; });
+  if (m.in_reply_to || replies.length) {
+    var th = el("div", "thread"); th.appendChild(el("h4", null, "Conversa"));
+    function tline(x, cls, prefix) {
+      var b = btn("tmsg" + (cls ? " " + cls : ""), null, x === m ? null : function () { jumpTo(x.msg_id); });
+      add(b, el("span", "w", prefix + whenShort(x.data) + " " + x.from + " → " + x.to), el("span", "t", oneLine(x.body, 200)));
+      if (x === m) b.disabled = true; return b;
+    }
+    if (parent) th.appendChild(tline(parent, "", "↑ "));
+    else if (m.in_reply_to) th.appendChild(el("div", "help", "↑ original " + m.in_reply_to + " não está entre as mensagens carregadas"));
+    th.appendChild(tline(m, "me", "• "));
+    replies.forEach(function (r) { th.appendChild(tline(r, "", "↳ ")); });
+    d.appendChild(th);
+  }
+  var acts = el("div", "dacts");
+  if (m.kind !== "ack") add(acts, btn("btn sm", "Responder", function () { setReply(m); }));
+  add(acts, btn("btn sm", "Copiar ID", function () { copyText(m.msg_id); }));
+  d.appendChild(acts);
+  td.appendChild(d);
+  return tr;
+}
+function renderTable() {
+  if (!S) return;
+  var r = sortedRows(), rows = r.rows, cols = visCols(), byId = {};
+  allLoaded().forEach(function (m) { byId[m.msg_id] = m; });
+  syncFilters(allScoped());
+  var more = ui.older.length ? ui.olderMore : S.messages_has_more;
+  var totalAll = S.messages_total != null && S.messages_project === (ui.project || "") ? S.messages_total : r.total;
+  $("tcount").textContent = "Mostrando " + rows.length + " de " + r.total + (totalAll > r.total ? " · " + totalAll + " no total" : "");
+  renderHead();
+  if (!changed("tbody", [rows.map(function (m) { return m.msg_id; }), cols.length, T.open, more, Math.floor(Date.now() / 60000)])) return;
+  var sc = $("tscroll"), tb = $("tbody");
+  // ancora: a primeira linha visivel continua no mesmo lugar depois de redesenhar (polling nao pula a lista)
+  var anchor = null, off = 0;
+  if (sc.scrollTop > 0) {
+    var trs = tb.querySelectorAll("tr.row"), headH = $("thead").offsetHeight;
+    for (var i = 0; i < trs.length; i++) { if (trs[i].offsetTop + trs[i].offsetHeight > sc.scrollTop + headH) { anchor = trs[i].dataset.id; off = trs[i].offsetTop - sc.scrollTop; break; } }
+  }
+  tb.replaceChildren();
+  var empty = $("tempty"); empty.replaceChildren();
+  if (!rows.length) {
+    empty.hidden = false; var e = el("div", "empty");
+    if (r.total) add(e, el("h3", null, "Nenhuma mensagem com esses filtros"), btn("btn sm", "Limpar filtros", clearFilters));
+    else add(e, el("h3", null, ui.project ? "Nada conversado em " + ui.project + " ainda" : "Nenhuma mensagem no canal ainda"),
+      el("div", null, "Mande a primeira tarefa no campo abaixo: escolha o agente, escreva o pedido e tecle Ctrl+Enter. Os agentes leem com a2a inbox e respondem aqui."));
+    empty.appendChild(e);
+  } else empty.hidden = true;
+  rows.forEach(function (m) {
+    var tr = el("tr", "row" + (m.from === S.human ? " human" : "") + (T.open[m.msg_id] ? " open" : ""));
+    tr.dataset.id = m.msg_id; tr.tabIndex = 0; tr.setAttribute("aria-expanded", T.open[m.msg_id] ? "true" : "false");
+    cols.forEach(function (c) { tr.appendChild(cellFor(c, m, byId)); });
+    tr.onclick = function () { toggleRow(m.msg_id); };
+    tr.onkeydown = function (ev) { if (ev.target === tr && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); toggleRow(m.msg_id); } };
+    tb.appendChild(tr);
+    if (T.open[m.msg_id]) tb.appendChild(detailRow(m, byId, cols.length));
+  });
+  var ft = $("tfoot"); ft.replaceChildren();
+  if (more) add(ft, btn("btn sm", "Carregar mais antigas", loadMore));
+  else if (rows.length) ft.appendChild(el("span", null, "início da conversa"));
+  if (anchor) { var a = tb.querySelector('tr[data-id="' + CSS.escape(anchor) + '"]'); if (a) sc.scrollTop = a.offsetTop - off; }
+  // novas mensagens no topo enquanto o usuario esta rolado para baixo
+  var top = rows.length ? rows[0].msg_id : null;
+  if (T.sort === "data" && T.dir < 0 && T.seenTop && top !== T.seenTop && sc.scrollTop > 40) {
+    var idx = rows.map(function (m) { return m.msg_id; }).indexOf(T.seenTop);
+    T.newCount = idx > 0 ? idx : T.newCount + 1;
+    $("newpill").textContent = T.newCount + (T.newCount === 1 ? " nova mensagem ↑" : " novas mensagens ↑"); $("newpill").hidden = false;
+  }
+  if (sc.scrollTop <= 40) { T.seenTop = top; T.newCount = 0; $("newpill").hidden = true; }
+}
+function toggleRow(id) {
+  if (T.open[id]) delete T.open[id]; else T.open[id] = true;
+  renderTable();
+  var tr = $("tbody").querySelector('tr[data-id="' + CSS.escape(id) + '"]'); if (tr) tr.focus({preventScroll: true});
+}
+function clearFilters() {
+  T.q = T.from = T.to = T.kind = T.state = ""; $("tq").value = "";
+  ["ffrom", "fto", "fkind", "fstate"].forEach(function (k) { $(k).value = ""; });
+  renderTable();
+}
+function jumpTo(id) {
+  var loaded = allLoaded().some(function (m) { return m.msg_id === id; });
+  if (!loaded) { toast("A mensagem original não está entre as carregadas — use “Carregar mais antigas”.", true); return; }
+  var m = allLoaded().filter(function (x) { return x.msg_id === id; })[0];
+  if (!inScope(m)) { toast("A original é do projeto “" + (m.project || "nenhum") + "”. Abra “Todos” para vê-la.", true); return; }
+  if (!filtered([m]).length) { clearFilters(); toast("Filtros limpos para mostrar a mensagem original"); }
+  renderTable();
+  var tr = $("tbody").querySelector('tr[data-id="' + CSS.escape(id) + '"]'); if (!tr) return;
+  tr.scrollIntoView({block: "center"}); tr.classList.remove("flash"); void tr.offsetWidth; tr.classList.add("flash");
+  tr.focus({preventScroll: true});
+  setTimeout(function () { tr.classList.remove("flash"); }, 2300);
+}
+function loadMore() {
+  var list = allScoped(), oldest = list.length ? list[0].msg_id : "";
+  var b = $("tfoot").querySelector("button"); if (b) { b.disabled = true; b.textContent = "Carregando..."; }
+  getJSON("/api/messages?limit=300&before=" + encodeURIComponent(oldest) + (ui.project ? "&project=" + encodeURIComponent(ui.project) : ""))
+    .then(function (j) { ui.older = j.messages.concat(ui.older); ui.olderMore = j.has_more; ui.sig.tbody = null; renderTable(); })
+    .catch(function (e) { showErr(e); ui.sig.tbody = null; renderTable(); });
 }
 function setReply(m) {
   ui.replyTo = m;
-  $("replytxt").textContent = "↳ respondendo a " + m.from + ": " + (m.body || "").replace(/\s+/g, " ").slice(0, 90);
+  $("replytxt").textContent = "↳ respondendo a " + m.from + ": " + oneLine(m.body, 90);
   $("replying").hidden = false;
   if (S.registered.indexOf(m.from) >= 0) $("cto").value = m.from;
   if (m.project) { ensureProjOption(m.project); $("cproj").value = m.project; }
@@ -648,7 +1204,7 @@ function syncComposer() {
     var pv = pj.value; pj.replaceChildren(); pj.appendChild(new Option("(nenhum)", ""));
     names.forEach(function (n) { pj.appendChild(new Option(n, n)); });
     pj.value = pv || ui.project || "";
-    if (pj.value === "" && ui.project) ensureProjOption(ui.project);
+    if (pj.value === "" && ui.project) { ensureProjOption(ui.project); pj.value = ui.project; }
   }
   $("chint").textContent = "Ctrl+Enter envia · como " + S.human;
 }
@@ -660,12 +1216,12 @@ function send(ev) {
   if (ev) ev.preventDefault();
   var body = $("cbody").value.trim(); $("cerr").textContent = "";
   if (!body) { $("cerr").textContent = "Escreva a mensagem antes de enviar."; return; }
-  var btn = $("csend"); btn.disabled = true;
+  var b = $("csend"); b.disabled = true;
   api("/api/send", {to: $("cto").value, kind: $("ckind").value, project: $("cproj").value, body: body,
     reply_to: ui.replyTo ? ui.replyTo.msg_id : ""})
-    .then(function () { $("cbody").value = ""; clearReply(); ui.firstConv = true; toast("Mensagem enviada"); return tick(); })
+    .then(function () { $("cbody").value = ""; clearReply(); $("tscroll").scrollTop = 0; toast("Mensagem enviada", "ok"); return tick(); })
     .catch(function (e) { $("cerr").textContent = e.message; })
-    .then(function () { btn.disabled = false; });
+    .then(function () { b.disabled = false; });
 }
 
 /* ---------- onde estamos ---------- */
@@ -690,7 +1246,6 @@ function renderWhere() {
     .concat(s.high_context.map(function (c) { return {a: c.agent, b: "contexto em " + c.context + "%" + (c.context >= 90 ? " — handoff" : "")}; }))
     .concat(s.stale.map(function (x) { return {a: x.agent, b: "sem sinal (stale)"}; }));
   add(w, wlist("Precisa de atenção", att, "Nenhum agente bloqueado, sem sinal ou com contexto alto.", function (x) { return wi(x.a, x.b, x.b); }));
-  var ms = s.missions;
   var mw = el("div", "wl"); mw.appendChild(el("h4", null, "Missões"));
   var mc = el("div", "mcounts");
   [["aberta", "aguardando"], ["reprovada", "reprovadas"], ["aval_completo", "aval completo"], ["concluida", "concluídas"]].forEach(function (k) {
@@ -709,12 +1264,12 @@ function renderMissions() {
   if (!changed("mis", [ms, ui.open, ui.confirming, Math.floor(Date.now() / 60000)])) return;
   var list = $("mlist"); list.replaceChildren();
   var pend = ms.filter(function (m) { return m.status !== "concluida"; }).length;
-  $("mcount").textContent = ms.length ? pend + " abertas / " + ms.length : "";
+  $("mcount").textContent = ms.length ? pend + "/" + ms.length : ""; $("mcount").title = pend + " abertas de " + ms.length;
   if (!ms.length) {
     var e = el("div", "pempty");
     add(e, el("div", null, "Missão é um objetivo que só termina quando todos os agentes participantes conferem e aprovam com evidência — e você confirma no fim."),
       el("div", null, "Os agentes aprovam pelo terminal; aqui você acompanha os avais."));
-    var b = el("button", "btn", "+ Criar a primeira missão"); b.type = "button"; b.onclick = openMissionDialog; add(e, b);
+    add(e, btn("btn", "+ Criar a primeira missão", openMissionDialog));
     list.appendChild(e); return;
   }
   ms.forEach(function (m) { list.appendChild(missionCard(m)); });
@@ -730,7 +1285,7 @@ function missionCard(m) {
   var chips = el("div", "achips");
   m.agents.forEach(function (a) {
     var v = ap[a], k = !v ? "wait" : v.verdict === "approve" ? "ok" : "no";
-    var seg = el("i", k === "ok" ? "ok" : k === "no" ? "no" : ""); segs.appendChild(seg);
+    segs.appendChild(el("i", k === "ok" ? "ok" : k === "no" ? "no" : ""));
     var ch = el("span", "ac " + k);
     add(ch, el("span", null, k === "ok" ? "✓" : k === "no" ? "✗" : "⏳"), document.createTextNode(a),
       el("em", null, k === "ok" ? "aprovado" : k === "no" ? "reprovado" : "pendente"));
@@ -747,9 +1302,8 @@ function missionCard(m) {
   }
   var hasEv = m.agents.some(function (a) { return ap[a] && ap[a].verdict === "approve"; });
   if (hasEv) {
-    var tg = el("button", "link", ui.open[m.id] ? "Ocultar evidências" : "Ver evidências"); tg.type = "button";
+    var tg = btn("link", ui.open[m.id] ? "Ocultar evidências" : "Ver evidências", function () { ui.open[m.id] = !ui.open[m.id]; renderMissions(); });
     tg.setAttribute("aria-expanded", ui.open[m.id] ? "true" : "false");
-    tg.onclick = function () { ui.open[m.id] = !ui.open[m.id]; renderMissions(); };
     c.appendChild(tg);
     if (ui.open[m.id]) {
       var evl = el("div", "evlist");
@@ -763,15 +1317,10 @@ function missionCard(m) {
     var row = el("div", "row");
     if (ui.confirming === m.id) {
       add(row, el("span", null, "Confirmar que a missão está concluída?"));
-      var yes = el("button", "btn pri", "Sim, concluir"); yes.type = "button";
-      yes.onclick = function () { yes.disabled = true; api("/api/mission/done", {id: m.id}).then(function () { ui.confirming = null; toast("Missão concluída"); return tick(); }).catch(function (e) { showErr(e); yes.disabled = false; }); };
-      var no = el("button", "btn", "Cancelar"); no.type = "button"; no.onclick = function () { ui.confirming = null; renderMissions(); };
-      add(row, yes, no);
-    } else {
-      var b = el("button", "btn pri", "Confirmar conclusão (" + cap(S.human) + ")"); b.type = "button";
-      b.onclick = function () { ui.confirming = m.id; renderMissions(); };
-      row.appendChild(b);
-    }
+      var yes = btn("btn pri", "Sim, concluir");
+      yes.onclick = function () { yes.disabled = true; api("/api/mission/done", {id: m.id}).then(function () { ui.confirming = null; toast("Missão concluída", "ok"); return tick(); }).catch(function (e) { showErr(e); yes.disabled = false; }); };
+      add(row, yes, btn("btn", "Cancelar", function () { ui.confirming = null; renderMissions(); }));
+    } else row.appendChild(btn("btn pri", "Confirmar conclusão (" + cap(S.human) + ")", function () { ui.confirming = m.id; renderMissions(); }));
     bn.appendChild(row); c.appendChild(bn);
   }
   if (m.status === "concluida" && m.human) {
@@ -782,19 +1331,156 @@ function missionCard(m) {
 }
 function cap(s) { s = String(s || ""); return s.charAt(0).toUpperCase() + s.slice(1); }
 
-/* ---------- dialogos ---------- */
+/* ---------- dialogo: adicionar projeto ---------- */
 function openProjDialog(tab) {
-  var d = $("dproj"); $("pmsg").textContent = ""; $("pmsg").className = "msgline";
+  pmsg("");
   if (!$("sroot").value && S && S.config.scan_root) $("sroot").value = S.config.scan_root;
-  setTab(tab || "scan"); d.showModal();
-  (tab === "path" ? $("ppath") : $("sroot")).focus();
+  setTab(tab || "nav"); $("dproj").showModal();
+  if (ui.ptab === "nav") { navGo(nav.path || ""); $("flist").focus(); }
+  else (ui.ptab === "path" ? $("ppath") : $("sroot")).focus();
 }
 function setTab(t) {
-  $("tab-scan").setAttribute("aria-selected", t === "scan"); $("tab-path").setAttribute("aria-selected", t === "path");
-  $("pane-scan").hidden = t !== "scan"; $("pane-path").hidden = t !== "path";
-  $("padd").textContent = t === "scan" ? "Adicionar selecionados" : "Adicionar projeto";
-  ui.ptab = t; updateScanInfo();
+  ["nav", "scan", "path"].forEach(function (k) { $("tab-" + k).setAttribute("aria-selected", t === k); $("pane-" + k).hidden = t !== k; });
+  ui.ptab = t; pmsg(""); updateAddBtn();
 }
+function pmsg(t, err) { $("pmsg").textContent = t; $("pmsg").className = "msgline" + (err ? " err" : ""); }
+function updateAddBtn() {
+  var b = $("padd");
+  if (ui.ptab === "nav") {
+    var tg = navTarget();
+    b.textContent = tg ? "Adicionar “" + oneLine($("nname").value || tg.name, 28) + "”" : "Adicionar esta pasta";
+    b.disabled = !tg || !!tg.project;
+    b.title = tg && tg.project ? "Esta pasta já é o projeto “" + tg.project + "”" : "";
+  } else if (ui.ptab === "scan") {
+    var n = Object.keys(scan.sel).length; b.textContent = "Adicionar selecionados" + (n ? " (" + n + ")" : ""); b.disabled = !n; b.title = "";
+  } else { b.textContent = "Adicionar projeto"; b.disabled = false; b.title = ""; }
+}
+
+/* Navegar */
+var nav = {path: "", data: null, sel: null, places: []};
+var FOLDER_SVG = "M1.5 3.5h4l1.2 1.4h7.8v8.6h-13z";
+function folderIcon() {
+  var ns = "http://www.w3.org/2000/svg", s = document.createElementNS(ns, "svg"), p = document.createElementNS(ns, "path");
+  s.setAttribute("width", "16"); s.setAttribute("height", "16"); s.setAttribute("viewBox", "0 0 16 16"); s.setAttribute("aria-hidden", "true");
+  p.setAttribute("d", FOLDER_SVG); p.setAttribute("fill", "currentColor"); p.setAttribute("fill-opacity", ".22"); p.setAttribute("stroke", "currentColor"); p.setAttribute("stroke-width", "1.2"); p.setAttribute("stroke-linejoin", "round");
+  s.appendChild(p); return s;
+}
+function baseName(p) { var s = String(p || "").replace(/[\\\/]+$/, ""); var i = Math.max(s.lastIndexOf("\\"), s.lastIndexOf("/")); return (i >= 0 ? s.slice(i + 1) : s) || s; }
+function navTarget() {
+  if (!nav.data || !nav.data.path) return null;
+  if (nav.sel) return nav.sel;
+  return {name: baseName(nav.data.path), path: nav.data.path, project: nav.data.project || "", is_repo: nav.data.is_repo};
+}
+function navGo(path, keepSel) {
+  pmsg(path ? "" : "Abrindo...");
+  return getJSON("/api/fs/list?path=" + encodeURIComponent(path || ""), true).then(function (j) {
+    if (j.places && j.places.length) nav.places = j.places;
+    if (!j.path) {
+      pmsg("");
+      var start = nav.places.filter(function (p) { return p.kind === "recent"; })[0] || nav.places.filter(function (p) { return p.kind === "home"; })[0];
+      if (start) return navGo(start.path);
+      nav.data = j; renderNav(); return;
+    }
+    pmsg("");
+    nav.data = j; nav.path = j.path;
+    nav.sel = keepSel ? j.entries.filter(function (e) { return e.path === keepSel; })[0] || null : null;
+    setNavName(); renderNav();
+    $("flist").scrollTop = 0;
+    if (nav.sel) { var r = $("flist").querySelector(".fe.sel"); if (r) r.scrollIntoView({block: "nearest"}); }
+  }).catch(function (e) {
+    pmsg(e.message, true);
+    if (!nav.data || !nav.data.path) {  // ultima pasta sumiu: cai no inicio
+      var home = nav.places.filter(function (p) { return p.kind === "home"; })[0];
+      if (home && home.path !== path) return navGo(home.path);
+      renderNav();
+    }
+  });
+}
+function setNavName() { var t = navTarget(); $("nname").value = t ? t.name : ""; updateAddBtn(); renderTarget(); }
+function renderTarget() {
+  var t = navTarget(), bd = $("ntarget");
+  bd.textContent = t ? t.path : "—"; bd.title = t ? t.path : "";
+  if (t && t.project) pmsg("Esta pasta já está na lista como “" + t.project + "”.");
+  else if ($("pmsg").className.indexOf("err") < 0) pmsg("");
+}
+function crumbsOf(path) {
+  var out = [], win = path.indexOf("\\") >= 0 || /^[A-Za-z]:/.test(path);
+  if (win) {
+    var unc = path.indexOf("\\\\") === 0, parts = path.split("\\").filter(Boolean), acc;
+    if (unc) { acc = "\\\\" + parts.shift() + "\\" + (parts.length ? parts.shift() : ""); out.push({label: acc, path: acc}); }
+    else { acc = parts.shift() + "\\"; out.push({label: acc, path: acc}); }
+    parts.forEach(function (p) { acc = acc.replace(/\\$/, "") + "\\" + p; out.push({label: p, path: acc}); });
+  } else {
+    out.push({label: "/", path: "/"}); var a = "";
+    path.split("/").filter(Boolean).forEach(function (p) { a += "/" + p; out.push({label: p, path: a}); });
+  }
+  return out;
+}
+function renderNav() {
+  var d = nav.data || {entries: []}, pl = $("places"); pl.replaceChildren();
+  var groups = [["Locais", ["home", "folder"]], ["Recentes", ["recent"]], ["Onde estão seus projetos", ["projects"]], ["Discos", ["drive"]]];
+  groups.forEach(function (g) {
+    var items = nav.places.filter(function (p) { return g[1].indexOf(p.kind) >= 0; });
+    if (!items.length) return;
+    pl.appendChild(el("h5", null, g[0]));
+    items.forEach(function (p) {
+      var b = btn("place" + (d.path === p.path ? " on" : ""), p.label, function () { navGo(p.path); }, p.path);
+      pl.appendChild(b);
+    });
+  });
+  var cp = $("cpath"); cp.replaceChildren();
+  if (d.path) crumbsOf(d.path).forEach(function (c, i) {
+    if (i) cp.appendChild(el("span", "sep", "›"));
+    cp.appendChild(btn(null, c.label, function () { navGo(c.path); }, c.path));
+  });
+  cp.scrollLeft = cp.scrollWidth;
+  $("fsup").disabled = !d.parent;
+  var fl = $("flist"); fl.replaceChildren();
+  if (!d.path) fl.appendChild(el("div", "fsnote", "Escolha um local à esquerda."));
+  else if (!d.entries.length) fl.appendChild(el("div", "fsnote", "Nenhuma subpasta aqui. Você pode adicionar esta própria pasta."));
+  d.entries.forEach(function (e) {
+    var row = el("div", "fe" + (e.is_repo ? " repo" : "") + (e.project ? " reg" : "") + (nav.sel && nav.sel.path === e.path ? " sel" : ""));
+    row.setAttribute("role", "option"); row.setAttribute("aria-selected", nav.sel && nav.sel.path === e.path ? "true" : "false");
+    row.title = e.path; row.dataset.path = e.path;
+    add(row, folderIcon(), el("span", "fn", e.name));
+    if (e.is_repo) { var g = el("span", "badge git", "git" + (e.branch ? " · " + e.branch : "")); g.title = "repositório git" + (e.branch ? ", branch " + e.branch : ""); row.appendChild(g); }
+    if (e.has_agents_md) { var am = el("span", "badge amd", "AGENTS.md"); am.title = "tem AGENTS.md"; row.appendChild(am); }
+    if (e.project) { var rg = el("span", "badge reg", e.project === e.name ? "já adicionado" : "já adicionado · " + e.project); rg.title = "registrado como projeto “" + e.project + "”"; row.appendChild(rg); }
+    var go = btn("go", "›", function (ev) { ev.stopPropagation(); navGo(e.path); }, "Entrar na pasta"); go.tabIndex = -1; go.setAttribute("aria-label", "Entrar em " + e.name);
+    row.appendChild(go);
+    row.onclick = function () { navSelect(e); };
+    row.ondblclick = function () { navGo(e.path); };
+    fl.appendChild(row);
+  });
+  if (d.truncated) fl.appendChild(el("div", "fsnote", "Mostrando as primeiras 2000 pastas."));
+  var repos = d.entries.filter(function (e) { return e.is_repo; }), todo = repos.filter(function (e) { return !e.project; });
+  var ar = $("allrepos"); ar.replaceChildren();
+  if (repos.length > 1 || (repos.length === 1 && todo.length && d.entries.length > 1)) {
+    ar.hidden = false;
+    add(ar, add(el("span"), el("b", null, repos.length + " repositórios git"), document.createTextNode(" nesta pasta" + (todo.length < repos.length ? " (" + (repos.length - todo.length) + " já adicionados)" : ""))));
+    var b = btn("btn sm", todo.length ? "Adicionar todos os " + todo.length + " repositórios desta pasta" : "Todos já adicionados", function () { addMany(todo); });
+    b.disabled = !todo.length; ar.appendChild(b);
+  } else ar.hidden = true;
+  renderTarget(); updateAddBtn();
+}
+function navSelect(e) {
+  nav.sel = nav.sel && nav.sel.path === e.path ? null : e;
+  Array.prototype.forEach.call($("flist").querySelectorAll(".fe"), function (r) {
+    var on = nav.sel && r.dataset.path === nav.sel.path; r.classList.toggle("sel", !!on); r.setAttribute("aria-selected", on ? "true" : "false");
+    if (on) r.scrollIntoView({block: "nearest"});
+  });
+  setNavName();
+}
+function navKey(ev) {
+  var es = nav.data ? nav.data.entries : []; if (!nav.data) return;
+  var i = nav.sel ? es.indexOf(es.filter(function (e) { return e.path === nav.sel.path; })[0]) : -1;
+  if (ev.key === "ArrowDown" && es.length) { ev.preventDefault(); nav.sel = null; navSelect(es[Math.min(es.length - 1, i + 1)]); }
+  else if (ev.key === "ArrowUp" && es.length) { ev.preventDefault(); nav.sel = null; navSelect(es[Math.max(0, i - 1)]); }
+  else if (ev.key === "Enter" && nav.sel) { ev.preventDefault(); navGo(nav.sel.path); }
+  else if (ev.key === "Backspace" && nav.data.parent) { ev.preventDefault(); navGo(nav.data.parent, nav.data.path); }
+}
+
+/* Descobrir */
 var scan = {repos: [], sel: {}};
 function doScan() {
   var root = $("sroot").value.trim(); if (!root) { pmsg("Informe a pasta raiz.", true); return; }
@@ -808,7 +1494,6 @@ function doScan() {
     .catch(function (e) { pmsg(e.message, true); })
     .then(function () { $("sgo").disabled = false; });
 }
-function pmsg(t, err) { $("pmsg").textContent = t; $("pmsg").className = "msgline" + (err ? " err" : ""); }
 function scanVisible() {
   var q = $("sfilter").value.trim().toLowerCase();
   return scan.repos.filter(function (r) { return !q || (r.name + " " + r.path + " " + r.host + " " + r.branch).toLowerCase().indexOf(q) >= 0; });
@@ -822,7 +1507,7 @@ function renderScan() {
     var row = el("label", "rr" + (r.registered ? " reg" : ""));
     var cb = document.createElement("input"); cb.type = "checkbox"; cb.disabled = r.registered; cb.checked = !!scan.sel[r.path];
     cb.onchange = function () { if (cb.checked) scan.sel[r.path] = r; else delete scan.sel[r.path]; updateScanInfo(); };
-    var nm = el("span", "rn"); var pth = el("span"); pth.appendChild(el("bdi", null, r.path));
+    var nm = el("span", "rn"), pth = el("span"); pth.appendChild(el("bdi", null, r.path));
     add(nm, el("b", null, r.name + (r.registered ? " (já adicionado)" : "")), pth);
     nm.title = r.path;
     var rem = el("span", "c", r.host || (r.remote ? "local" : "—")); rem.title = r.remote || "sem remote origin";
@@ -835,28 +1520,107 @@ function updateScanInfo() {
   var n = Object.keys(scan.sel).length, vis = scanVisible().filter(function (r) { return !r.registered; });
   $("sinfo").textContent = n + " selecionados";
   $("sall").checked = vis.length > 0 && vis.every(function (r) { return scan.sel[r.path]; });
-  if (ui.ptab === "scan") { $("padd").textContent = "Adicionar selecionados" + (n ? " (" + n + ")" : ""); $("padd").disabled = !n; }
-  else $("padd").disabled = false;
+  updateAddBtn();
 }
-function addProjects() {
-  var reqs;
-  if (ui.ptab === "path") {
-    var path = $("ppath").value.trim(); if (!path) { pmsg("Cole o caminho da pasta.", true); return; }
-    reqs = [{name: $("pname").value.trim(), path: path}];
-  } else reqs = Object.keys(scan.sel).map(function (k) { return {name: scan.sel[k].name, path: k, auto_name: true}; });
+
+/* adicionar (os tres jeitos usam /api/project/add) */
+function finishAdd(added, errs, total) {
+  if (errs.length) {
+    var head = total === 1 ? "Não foi possível adicionar: " : added.length + " adicionados; " + errs.length + " com erro: ";
+    pmsg(head + errs[0] + (errs.length > 1 ? " (+" + (errs.length - 1) + ")" : ""), true);
+    $("padd").disabled = false;
+    return tick().then(function () { if (ui.ptab === "nav" && nav.path) navGo(nav.path); });
+  }
+  $("dproj").close();
+  scan.sel = {}; $("ppath").value = ""; $("pname").value = "";
+  return tick().then(function () {
+    if (added.length === 1) { selectProject(added[0].name); toast("Projeto “" + added[0].name + "” adicionado", "ok"); }
+    else toast(added.length + " projetos adicionados", "ok");
+  });
+}
+function addReqs(reqs) {
   if (!reqs.length) return;
-  $("padd").disabled = true; var ok = 0, errs = [];
-  reqs.reduce(function (p, r) { return p.then(function () { return api("/api/project/add", r).then(function () { ok++; }, function (e) { errs.push(e.network ? e.message : (reqs.length > 1 ? r.path + ": " : "") + e.message); }); }); }, Promise.resolve())
-    .then(function () {
-      tick();
-      if (errs.length) {
-        var head = reqs.length === 1 ? "Não foi possível adicionar: " : ok + " adicionados; " + errs.length + " com erro: ";
-        pmsg(head + errs[0] + (errs.length > 1 ? " (+" + (errs.length - 1) + ")" : ""), true);
-        toast(head + errs[0], true); $("padd").disabled = false;
-      }
-      else { $("dproj").close(); toast(ok === 1 ? "Projeto adicionado" : ok + " projetos adicionados"); scan.sel = {}; $("ppath").value = ""; $("pname").value = ""; }
+  $("padd").disabled = true; var added = [], errs = [];
+  pmsg(reqs.length > 1 ? "Adicionando " + reqs.length + " projetos..." : "Adicionando...");
+  return reqs.reduce(function (p, r) {
+    return p.then(function () {
+      return api("/api/project/add", r).then(function (j) { added.push(j.project); },
+        function (e) { errs.push(e.network ? e.message : (reqs.length > 1 ? r.path + ": " : "") + e.message); });
     });
+  }, Promise.resolve()).then(function () { return finishAdd(added, errs, reqs.length); });
 }
+function addMany(entries) { addReqs(entries.map(function (e) { return {name: e.name, path: e.path, auto_name: true}; })); }
+function addProjects() {
+  if (ui.ptab === "nav") {
+    var t = navTarget(); if (!t) { pmsg("Escolha uma pasta.", true); return; }
+    addReqs([{name: $("nname").value.trim(), path: t.path}]);
+  } else if (ui.ptab === "path") {
+    var path = $("ppath").value.trim(); if (!path) { pmsg("Cole o caminho da pasta.", true); return; }
+    addReqs([{name: $("pname").value.trim(), path: path}]);
+  } else addReqs(Object.keys(scan.sel).map(function (k) { return {name: scan.sel[k].name, path: k, auto_name: true}; }));
+}
+
+/* ---------- dialogo: adicionar agente ---------- */
+var AGENT_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+var PRESET = {"claude-code": "claude", codex: "codex", hermes: "hermes", outro: ""};
+function openAgentDialog() {
+  $("fagent").reset(); $("agform").hidden = false; $("agdone").hidden = true;
+  $("aadd").hidden = false; $("aadd").disabled = false; $("acopy").hidden = true; $("acancel").textContent = "Cancelar";
+  $("amsg").textContent = ""; $("amsg").className = "msgline";
+  var taken = S ? S.registered : [], t = ["claude-code", "codex", "hermes"].filter(function (k) { return taken.indexOf(PRESET[k]) < 0; })[0] || "outro";
+  $("atype").value = t; $("aname").value = PRESET[t]; $("aname").dataset.preset = PRESET[t];
+  $("dagent").showModal(); $("aname").focus(); $("aname").select();
+}
+function agentErr(name) {
+  if (!name) return "Dê um nome ao agente.";
+  if (!AGENT_RE.test(name)) return "Use só minúsculas, números, - ou _ (até 32), começando com letra ou número.";
+  if (S && S.registered.indexOf(name) >= 0) return "Já existe um agente “" + name + "”.";
+  if (S && name === S.human) return "“" + name + "” é você (o humano do canal).";
+  return "";
+}
+function submitAgent(ev) {
+  ev.preventDefault();
+  if ($("aadd").hidden) { $("dagent").close(); return; }
+  var name = $("aname").value.trim(), m = $("amsg"), er = agentErr(name);
+  if (er) { m.textContent = er; m.className = "msgline err"; $("aname").focus(); return; }
+  $("aadd").disabled = true; m.textContent = "Adicionando..."; m.className = "msgline";
+  api("/api/agent/add", {name: name, type: $("atype").value, model: $("amodel").value.trim(), note: $("anote").value.trim(), project: ui.project || ""})
+    .then(function (r) {
+      $("agform").hidden = true; $("agdone").hidden = false; $("aadd").hidden = true; $("acopy").hidden = false;
+      $("acancel").textContent = "Concluir"; m.textContent = "";
+      $("agok").textContent = "✓ Agente “" + r.agent.name + "” adicionado";
+      $("agtext").textContent = r.onboard; $("acopy").focus();
+      return tick();
+    })
+    .catch(function (e) { m.textContent = e.message; m.className = "msgline err"; $("aadd").disabled = false; });
+}
+
+/* ---------- dialogo de texto (instrucoes / diagnostico) ---------- */
+function openText(title, help, text, levels) {
+  $("dtext-t").textContent = title; $("dtext-help").textContent = help || ""; $("dtext-msg").textContent = ""; $("dtext-msg").className = "msgline";
+  var pre = $("dtext-pre"); pre.replaceChildren();
+  if (levels) text.split("\n").forEach(function (l) {
+    var lv = (l.match(/^(OK|AVISO|ERRO)\b/) || [])[1], d = el("div");
+    if (lv) add(d, el("span", "lv-" + lv, l.slice(0, 5)), document.createTextNode(l.slice(5))); else d.textContent = l;
+    pre.appendChild(d);
+  }); else pre.textContent = text;
+  $("dtext").dataset.text = text;
+  if (!$("dtext").open) $("dtext").showModal();
+  $("dtext-copy").focus();
+}
+function openDoctor() {
+  openText("Diagnóstico", "Rodando verificações...", "", false);
+  getJSON("/api/doctor", true).then(function (j) {
+    var extra = "OK    pagina: interface " + UI_VERSION + ", servidor " + (serverVersion() || "antigo") + "\nOK    navegador: " + navigator.userAgent;
+    if (serverOutdated()) extra = extra.replace(/^OK   /, "AVISO");
+    openText("Diagnóstico", "Copie e cole este relatório para quem está ajudando você. Também dá para gerar no terminal com: a2a doctor", j.text + "\n" + extra, true);
+  }).catch(function (e) {
+    openText("Diagnóstico", "O servidor não respondeu ao diagnóstico. Rode no terminal: a2a doctor",
+      "ERRO  /api/doctor: " + e.message + "\nOK    pagina: interface " + UI_VERSION + ", servidor " + (serverVersion() || "antigo (sem versao)"), true);
+  });
+}
+
+/* ---------- dialogo: nova missao ---------- */
 function openMissionDialog() {
   if (!S) return;
   $("mmsg").textContent = ""; $("mmsg").className = "msgline"; $("fmis").reset();
@@ -867,7 +1631,7 @@ function openMissionDialog() {
   names.forEach(function (n) { mp.appendChild(new Option(n, n)); });
   if (ui.project) mp.value = ui.project;
   var box = $("magents"); box.replaceChildren();
-  if (!S.registered.length) box.appendChild(el("span", "help", "Nenhum agente registrado (a2a join --agent nome)."));
+  if (!S.registered.length) box.appendChild(el("span", "help", "Nenhum agente registrado — use + Agente na barra lateral."));
   S.registered.forEach(function (n) {
     var l = el("label"), cb = document.createElement("input"); cb.type = "checkbox"; cb.value = n; cb.checked = true; cb.name = "ag";
     add(l, cb, document.createTextNode(n)); box.appendChild(l);
@@ -884,7 +1648,7 @@ function createMission(ev) {
   if (!agents.length) { m.textContent = "Escolha ao menos um agente."; return; }
   $("mcreate").disabled = true;
   api("/api/mission/new", {title: title, description: $("mdesc").value.trim(), project: project, agents: agents})
-    .then(function (r) { $("dmis").close(); toast("Missão " + r.mission.id + " criada e enviada a " + agents.length + " agente(s)"); return tick(); })
+    .then(function (r) { $("dmis").close(); toast("Missão " + r.mission.id + " criada e enviada a " + agents.length + " agente(s)", "ok"); return tick(); })
     .catch(function (e) { m.textContent = e.message; })
     .then(function () { $("mcreate").disabled = false; });
 }
@@ -892,25 +1656,53 @@ function createMission(ev) {
 /* ---------- loop ---------- */
 function render() {
   if (!S) return;
-  if (ui.project && !S.projects.some(function (p) { return p.name === ui.project; }) && !S.summary.projects[ui.project]) ui.project = null;
-  renderProjects(); renderAgents(); syncComposer(); renderConversation(); renderWhere(); renderMissions();
+  if (ui.project && !S.projects.some(function (p) { return p.name === ui.project; }) && !S.summary.projects[ui.project]) { ui.project = null; ui.older = []; }
+  renderVersion(); renderProjects(); renderAgents(); syncComposer(); renderHeader(); renderTable(); renderWhere(); renderMissions();
+  if (ui.project) loadProjectInfo(ui.project);
 }
+var ticking = null;
 function tick() {
-  return getJSON("/api/state")
-    .then(function (s) { S = s; $("livetxt").textContent = "online · " + hhmm(s.generated); render(); })
+  var proj = ui.project;
+  ticking = getJSON("/api/state?limit=300" + (proj ? "&project=" + encodeURIComponent(proj) : ""))
+    .then(function (s) {
+      if (proj !== ui.project) return;  // resposta de um projeto que ja nao esta selecionado
+      S = s; $("livetxt").textContent = "online · " + hhmm(s.generated); render();
+    })
     .catch(function (e) {
       if (!e.network) { $("live").className = "live off"; $("livetxt").textContent = "erro no servidor"; $("live").title = e.message; }
     });
+  return ticking;
 }
 
 $("composer").addEventListener("submit", send);
 $("cbody").addEventListener("keydown", function (e) { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send(e); });
 $("replyx").onclick = clearReply;
 $("psearch").addEventListener("input", function () { if (S) renderProjects(); });
-$("addproj").onclick = function () { openProjDialog("scan"); };
+$("addproj").onclick = function () { openProjDialog("nav"); };
+$("addagent").onclick = openAgentDialog;
 $("newmission").onclick = openMissionDialog;
+$("hmenu").onclick = function () {
+  openMenu($("hmenu"), [
+    {label: "Diagnóstico", fn: openDoctor},
+    {label: "Adicionar projeto", fn: function () { openProjDialog("nav"); }},
+    {label: "Adicionar agente", fn: openAgentDialog},
+    "-",
+    {label: "Instruções para o AGENTS.md", fn: function () { showOnboardGeneric(); }}
+  ]);
+};
+function showOnboardGeneric() {
+  getJSON("/api/onboard?project=" + encodeURIComponent(ui.project || ""), true).then(function (j) {
+    openText("Seção para o AGENTS.md", "Cole no AGENTS.md do projeto (lido pelo Codex e outros agentes). No CLAUDE.md, adicione a linha @AGENTS.md.", j.text);
+  }).catch(showErr);
+}
+$("tab-nav").onclick = function () { setTab("nav"); if (!nav.data) navGo(""); };
 $("tab-scan").onclick = function () { setTab("scan"); };
 $("tab-path").onclick = function () { setTab("path"); };
+$("fsup").onclick = function () { if (nav.data && nav.data.parent) navGo(nav.data.parent, nav.data.path); };
+$("flist").addEventListener("keydown", navKey);
+$("nname").addEventListener("input", updateAddBtn);
+$("nname").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); addProjects(); } });
+$("ppath").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); addProjects(); } });
 $("sgo").onclick = doScan;
 $("sroot").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); doScan(); } });
 $("sfilter").addEventListener("input", renderScan);
@@ -920,11 +1712,26 @@ $("sall").onchange = function () {
   renderScan();
 };
 $("padd").onclick = addProjects;
+$("fagent").addEventListener("submit", submitAgent);
+$("atype").onchange = function () {
+  var n = $("aname"), p = PRESET[$("atype").value];
+  if (!n.value || n.value === n.dataset.preset) { n.value = p; n.dataset.preset = p; }
+};
+$("acopy").onclick = function () { copyText($("agtext").textContent, $("amsg")); };
+$("dtext-copy").onclick = function () { copyText($("dtext").dataset.text || "", $("dtext-msg")); };
 $("fmis").addEventListener("submit", createMission);
 $("toast").onclick = function () { $("toast").hidden = true; };
 document.querySelectorAll("[data-close]").forEach(function (b) { b.onclick = function () { b.closest("dialog").close(); }; });
-$("newpill").onclick = function () { var tl = $("tl"); tl.scrollTop = tl.scrollHeight; $("newpill").hidden = true; };
-$("tl").addEventListener("scroll", function () { var tl = $("tl"); if (tl.scrollHeight - tl.scrollTop - tl.clientHeight < 60) $("newpill").hidden = true; });
+$("tq").addEventListener("input", function () { T.q = $("tq").value; renderTable(); });
+[["ffrom", "from"], ["fto", "to"], ["fkind", "kind"], ["fstate", "state"]].forEach(function (f) {
+  $(f[0]).addEventListener("change", function () { T[f[1]] = $(f[0]).value; renderTable(); });
+});
+$("fclear").onclick = clearFilters;
+$("newpill").onclick = function () { $("tscroll").scrollTop = 0; };
+$("tscroll").addEventListener("scroll", function () {
+  if ($("tscroll").scrollTop <= 40 && !$("newpill").hidden) { $("newpill").hidden = true; T.newCount = 0; var f = $("tbody").querySelector("tr.row"); T.seenTop = f ? f.dataset.id : null; }
+});
+renderVersion();
 tick(); setInterval(tick, 3000);
 </script>
 </body>

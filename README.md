@@ -4,7 +4,7 @@ Dove é um canal simples para seus agentes de IA (ex.: `claude`, `hermes`) **con
 
 Cada mensagem é um arquivo JSON numa pasta compartilhada. Um agente escreve um pedido → o outro vê na sua caixa → responde no mesmo lugar. Os agentes usam a linha de comando (`a2a`); você usa o app **`dove`** no navegador.
 
-![App dove: projetos e agentes à esquerda, conversa no centro, "onde estamos" e missões à direita](docs/dove-ui.png)
+![App dove: projetos e agentes à esquerda, conversas em tabela no centro, "onde estamos" e missões à direita](docs/dove-ui.png)
 
 ## Onde fica (é GLOBAL)
 Não fica dentro de um projeto. Fica na sua pasta de usuário, acima de todos os projetos:
@@ -13,7 +13,7 @@ Não fica dentro de um projeto. Fica na sua pasta de usuário, acima de todos os
 ~/.a2a/            ← o canal (criado 1 vez)
   bus/             ← as mensagens (1 arquivo JSON cada)
   cursor/          ← o que cada agente já leu
-  agents/          ← agentes registrados
+  agents/          ← agentes registrados (arquivo vazio ou JSON com tipo/modelo/nota)
   status/          ← estado de cada agente (modo herdr, contexto %)
   missions/        ← missões com aval de todos os agentes
   projects.json    ← projetos registrados (sidebar do dove)
@@ -44,9 +44,10 @@ Cria os links `~/.local/bin/a2a` e `~/.local/bin/dove` (ambos -> `<repo>/a2a.py`
 - Depois: `a2a init` e `a2a join --agent <nome>`.
 
 ## Como convidar um agente
-1. Escolha um nome único (ex.: `claude`, `hermes`).
-2. Registre: `a2a join --agent claude`
-3. Cole as instruções na sessão do agente: `a2a onboard --agent claude --project <proj>` (ou use o card abaixo).
+1. Escolha um nome único (ex.: `claude`, `hermes`): minúsculas, números, `-` ou `_`.
+2. Registre: `a2a join --agent claude [--type claude-code|codex|hermes|outro] [--model opus]` — ou no app, botão **+ Agente**.
+3. Cole as instruções na sessão do agente: `a2a onboard --agent claude --project <proj>` (o **+ Agente** já mostra esse texto com o botão **Copiar**).
+4. Para tirar: `a2a leave --agent claude` (o histórico de mensagens fica).
 4. Teste: `a2a send --from claude --to hermes --kind report --state ACEITO --body "online"`
 
 ## Usando num projeto (AGENTS.md)
@@ -136,16 +137,28 @@ a2a panel                 # mesmo servidor, sem abrir o navegador
 `dove` é o mesmo que `a2a panel --open`. Se já houver um dove rodando na porta, ele só abre o navegador. Tudo com a biblioteca padrão do Python (sem dependências, sem CDN, sem build); a página fica em `ui/index.html`, ao lado do `a2a.py`.
 
 Layout no estilo herdr, atualizado a cada 3s:
-- **Projetos** (esquerda, em cima): projetos registrados, fixados primeiro, com filtro e selos de tarefas abertas / agentes bloqueados. **+ Adicionar** cola um caminho ou **Descobre projetos** numa pasta raiz (o dove lembra a última raiz usada). Clicar num projeto filtra o app; **Todos** mostra tudo.
-- **Agentes** (esquerda, embaixo): estado (working/idle/blocked/done/unknown, com cor **e** texto), idade, nota, modelo e a **barra de contexto** (neutra abaixo de 70%, alerta de 70 a 89%, crítica com o selo `handoff` a partir de 90%; `—` quando o agente não informou).
-- **Conversa** (centro): linha do tempo das mensagens com de → para, tipo/estado, hora e indicação de resposta. Embaixo, o campo para você escrever como `luiz` (Para, Tipo, Projeto; **Ctrl+Enter** envia; "responder" em cada mensagem faz o `--reply-to`).
+- **Projetos** (esquerda, em cima): fixados primeiro, depois os demais, com filtro e selos de tarefas abertas / agentes bloqueados; passar o mouse mostra o caminho. O menu **⋯** de cada projeto tem Fixar/Desafixar, Abrir pasta, Copiar caminho e Remover. Clicar num projeto filtra o app; **Todos** mostra tudo.
+- **+ Adicionar** abre um diálogo com três abas:
+  - **Navegar** (padrão): um navegador de pastas com atalhos (Início, Desktop, Documentos, última pasta, onde estão seus projetos e, no Windows, os discos). Repositórios git aparecem com a branch; pastas já registradas aparecem como "já adicionado". Clique seleciona, clique duplo entra; **Adicionar esta pasta** usa o nome da pasta (editável). Se a pasta aberta tem vários repositórios, aparece **Adicionar todos os N repositórios desta pasta**.
+  - **Descobrir**: procura repositórios git sob uma pasta raiz (o dove lembra a última).
+  - **Colar caminho**: cola `C:\Users\voce\Codigo\lagu` (com ou sem aspas).
+- **Agentes** (esquerda, embaixo): estado (working/idle/blocked/done/unknown, com cor **e** texto), idade, tipo e modelo, nota e a **barra de contexto** (neutra abaixo de 70%, alerta de 70 a 89%, crítica com o selo `handoff` a partir de 90%; `—` quando o agente não informou). **+ Agente** registra um agente (nome, tipo, modelo, nota) e mostra as instruções para colar na sessão dele; o **⋯** de cada agente tem Ver instruções e Remover.
+- **Centro**: o cabeçalho do projeto selecionado (caminho, branch, remoto, última atividade e se há `AGENTS.md`) e as **conversas em tabela**: Hora · De → Para · Tipo · Estado · Projeto · Tarefa/ID · Mensagem · Resposta a. Mais nova no topo; clique no cabeçalho para ordenar; busca e filtros (De, Para, Tipo, Estado) com "Mostrando N de M". Clicar numa linha abre a mensagem inteira, evidência, resultado, pendências e a conversa (original e respostas); "Resposta a" pula para a mensagem original e a destaca. Mensagens suas (`luiz`) têm uma faixa à esquerda. Carrega as últimas 300; **Carregar mais antigas** busca o resto. A atualização a cada 3s não mexe em ordenação, filtros, linhas abertas nem na rolagem. Embaixo, o campo para você escrever como `luiz` (Para, Tipo, Projeto; **Ctrl+Enter** envia; **Responder** na linha aberta faz o `--reply-to`).
 - **Onde estamos** e **Missões** (direita): o resumo do projeto selecionado e os cartões de missão com o aval de cada agente.
 
-Tema escuro por padrão e claro conforme o sistema. Se o servidor cair, o topo mostra "sem conexão com o dove".
+Tema escuro por padrão e claro conforme o sistema. Se o servidor cair, o topo mostra "sem conexão com o dove". O topo mostra a versão (`v0.6.0`); se a página for mais nova que o servidor em execução (você deu `git pull` com o dove aberto), aparece um aviso para fechar a janela do dove e abrir de novo. O menu **⋯** do topo tem **Diagnóstico**.
+
+### Quando algo não funciona: `a2a doctor`
+```
+a2a --version
+a2a doctor
+```
+Imprime um relatório para colar (cada linha `OK`, `AVISO` ou `ERRO`): versão, Python, sistema, `A2A_HOME` e se dá para gravar nele, contagem de mensagens/agentes/status/missões, `projects.json` (lê e regrava o mesmo conteúdo), `config.json`, se a porta 8765 está livre ou com um Dove (e de qual versão — um dove antigo aberto é causa comum de "não funciona"), os atalhos `a2a`/`dove` em `~/bin` (Windows) ou `~/.local/bin` e para qual `a2a.py` apontam, se essa pasta está no PATH e se a pasta de cada projeto existe. No app: **⋯ → Diagnóstico**, com botão **Copiar**. Erros das ações do app também aparecem com data e hora na janela onde o `dove` está rodando.
 
 ### Segurança do app
 O app só escuta em `127.0.0.1` por padrão e protege toda escrita:
-- **Token por sessão:** a cada início o servidor gera um token aleatório (`secrets.token_urlsafe`) e o injeta na página. Todo `POST` (e o `GET /api/scan`, que lê o disco) exige o cabeçalho `X-Dove-Token` igual.
+- **Token por sessão:** a cada início o servidor gera um token aleatório (`secrets.token_urlsafe`) e o injeta na página. Todo `POST` e os `GET` que leem o disco (`/api/scan`, `/api/fs/list`, `/api/project/info`, `/api/doctor`, `/api/onboard`) exigem o cabeçalho `X-Dove-Token` igual.
+- **Abrir pasta** só abre a pasta de um projeto registrado (pelo nome), nunca um caminho qualquer.
 - **Host:** qualquer requisição com `Host` diferente de `127.0.0.1:PORTA` / `localhost:PORTA` recebe 403 (bloqueia DNS rebinding).
 - **Origin:** um `POST` com `Origin` de outro site recebe 403.
 - **Corpo:** só `Content-Type: application/json`, no máximo 64 KB.
@@ -155,11 +168,17 @@ O app só escuta em `127.0.0.1` por padrão e protege toda escrita:
 ### API
 | Rota | O que faz |
 |---|---|
-| `GET /api/ping` | `{"dove": true}` |
-| `GET /api/state` | agentes (com `context`/`model`), mensagens, projetos, missões (com status calculado) e resumo |
-| `GET /api/scan?root=...&depth=3` | descobre repositórios git (exige token) |
+| `GET /api/ping` | `{"dove": true, "version": "0.6.0"}` |
+| `GET /api/state?project=&limit=300` | versão, agentes (com `context`/`model`) e `agent_meta`, últimas mensagens (`messages_total`, `messages_has_more`), projetos, missões e resumo |
+| `GET /api/messages?project=&limit=300&before=<msg_id>` | mensagens mais antigas que `before` (`has_more`) |
+| `GET /api/scan?root=...&depth=3` | descobre repositórios git (token) |
+| `GET /api/fs/list?path=...` | subpastas de `path` (`is_repo`, `branch`, `has_agents_md`, `project`), `parent` e atalhos; sem `path`, só os atalhos (token) |
+| `GET /api/project/info?name=` | caminho, branch, remoto, atividade, `AGENTS.md` (token) |
+| `GET /api/doctor` | o relatório do `a2a doctor` (token) |
+| `GET /api/onboard?agent=&project=` | instruções do agente; sem `agent`, a seção do AGENTS.md (token) |
 | `POST /api/send` | envia como o humano (`luiz`): `to`, `project`, `kind`, `body`, `reply_to` |
-| `POST /api/project/add` · `/remove` · `/pin` | gerencia projetos |
+| `POST /api/project/add` · `/remove` · `/pin` · `/open` | gerencia projetos; `open` abre a pasta de um projeto registrado |
+| `POST /api/agent/add` · `/api/agent/remove` | registra (`name`, `type`, `model`, `note`) e devolve as instruções / remove agente e status (mensagens ficam) |
 | `POST /api/mission/new` · `/api/mission/done` | cria missão / confirma a conclusão (humano) |
 
 ## Projetos
@@ -205,8 +224,11 @@ Mostra tarefas abertas (`task` sem resposta `CONCLUIDO`/`CANCELADO`, ligada por 
 ## Comandos
 | Comando | O que faz |
 |---|---|
+| `--version` | versão do Dove |
+| `doctor [--port 8765]` | diagnóstico para colar quando algo não funciona |
 | `init` | cria `~/.a2a/` |
-| `join --agent X` | registra o agente X |
+| `join --agent X [--type T] [--model M] [--note N]` | registra o agente X (com tipo/modelo opcionais) |
+| `leave --agent X` | remove o agente X e o status dele (mensagens ficam) |
 | `agents` | lista agentes registrados |
 | `send ...` | envia uma mensagem |
 | `inbox --agent X` | lista mensagens não lidas de X |

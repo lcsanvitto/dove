@@ -3,6 +3,8 @@
 import argparse, glob, hmac, json, os, re, secrets, sys, time, traceback, uuid
 from datetime import datetime, timezone
 
+DOVE_VERSION = "0.6.0"
+
 HOME = os.environ.get("A2A_HOME", os.path.expanduser("~/.a2a"))
 BUS, CURSOR, AGENTS, STATUS, MISSIONS = (os.path.join(HOME, d) for d in
                                          ("bus", "cursor", "agents", "status", "missions"))
@@ -88,12 +90,60 @@ def visible_for(m, agent, project=None):
     if project and m.get("project") != project: return False
     return True
 def registered_agents():
-    ensure_dirs(); return sorted(n for n in os.listdir(AGENTS) if not n.startswith("."))
+    ensure_dirs(); return sorted(n for n in os.listdir(AGENTS) if not n.startswith(".") and not n.endswith((".tmp", ".lock")))
+
+# ---------------------------------------------------------------- agentes (agents/<nome>: vazio ou JSON com metadados)
+AGENT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+AGENT_TYPES = {"claude-code": "Claude Code", "codex": "Codex", "hermes": "Hermes", "outro": "Outro"}
+def agent_meta(name):
+    """Metadados do agente. Arquivo vazio (formato antigo) ou ilegivel = {}."""
+    if not name or "/" in name or "\\" in name or name.startswith("."): return {}
+    m = read_json(os.path.join(AGENTS, name), {})
+    return m if isinstance(m, dict) else {}
+def check_agent_name(name):
+    name = (name or "").strip()
+    if not AGENT_RE.match(name):
+        raise DoveError(f"nome de agente invalido: '{name}' - use letras minusculas, numeros, - ou _ (ate 32), "
+                        "comecando com letra ou numero")
+    if name == human_name(): raise DoveError(f"'{name}' e o humano do canal - escolha outro nome")
+    return name
+def agent_join(name, type_="", model="", note="", must_be_new=False):
+    """Registra (ou atualiza) o agente. Metadados novos se juntam aos existentes."""
+    name = check_agent_name(name); ensure_dirs(); p = os.path.join(AGENTS, name)
+    type_, model, note = ((x or "").strip() for x in (type_, model, note))
+    if type_ and type_ not in AGENT_TYPES: raise DoveError(f"tipo invalido: '{type_}' (use {', '.join(AGENT_TYPES)})")
+    with FileLock(p):
+        if os.path.exists(p):
+            if must_be_new: raise DoveError(f"agente '{name}' ja existe")
+            meta = agent_meta(name)
+        else: meta = {}
+        if not meta.get("added") and (type_ or model or note): meta["added"] = now_iso()
+        for k, v in (("type", type_), ("model", model), ("note", note)):
+            if v: meta[k] = v
+        if meta: write_json(p, meta)
+        elif not os.path.exists(p): open(p, "w").close()
+    return dict(meta, name=name)
+def agent_leave(name):
+    """Remove o registro e o status do agente. O historico de mensagens fica."""
+    name = (name or "").strip()
+    if not name or "/" in name or "\\" in name or name.startswith(".") or not (
+            name in registered_agents() or os.path.exists(status_path(name))):
+        raise DoveError(f"agente '{name}' nao encontrado")
+    for f in (os.path.join(AGENTS, name), status_path(name)):
+        try: os.remove(f)
+        except FileNotFoundError: pass
+        except OSError as e: raise DoveError(f"nao consegui remover {f}: {e}")
 
 def cmd_init(a): ensure_dirs(); print(f"a2a pronto em {HOME}")
 def cmd_join(a):
-    ensure_dirs(); open(os.path.join(AGENTS, a.agent), "w").close()
-    print(f"agente '{a.agent}' registrado. Caixa global: {HOME}")
+    try: m = agent_join(a.agent, a.type or "", a.model or "", a.note or "")
+    except DoveError as e: fail(f"erro: {e}")
+    extra = ", ".join(x for x in (AGENT_TYPES.get(m.get("type", ""), ""), m.get("model", "")) if x)
+    print(f"agente '{a.agent}' registrado" + (f" ({extra})" if extra else "") + f". Caixa global: {HOME}")
+def cmd_leave(a):
+    try: agent_leave(a.agent)
+    except DoveError as e: fail(f"erro: {e}")
+    print(f"agente '{a.agent}' removido (mensagens antigas continuam no historico)")
 def cmd_agents(a):
     n = registered_agents()
     print("\n".join(n) if n else "(nenhum agente registrado)")
@@ -416,6 +466,122 @@ def scan_add(repos):
         except DoveError: pass
     return added
 
+# ---------------------------------------------------------------- navegador de pastas (dialogo "Adicionar projeto")
+FS_MAX = 2000
+def _gitdir(repo):
+    """Caminho do gitdir de um repo (pasta .git ou arquivo 'gitdir: ...'); '' se nao for repo."""
+    g = os.path.join(repo, ".git")
+    if os.path.isdir(g): return g
+    if os.path.isfile(g):
+        m = re.match(r"gitdir:\s*(.+)", _read_text(g).strip())
+        if m: return os.path.normpath(os.path.join(repo, m.group(1).strip()))
+    return ""
+def git_branch(repo):
+    gd = _gitdir(repo)
+    if not gd: return ""
+    head = _read_text(os.path.join(gd, "HEAD")).strip()
+    return head[16:] if head.startswith("ref: refs/heads/") else head[:7]
+def _hidden(e):
+    if e.name.startswith((".", "$")): return True
+    try: attrs = getattr(e.stat(follow_symlinks=False), "st_file_attributes", 0)
+    except OSError: return True
+    return bool(attrs & 0x6)  # Windows: FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM
+def windows_drives():
+    if not is_windows(): return []
+    import string
+    out = []
+    for L in string.ascii_uppercase[2:]:  # pula A:/B: (disquete lento)
+        try:
+            if os.path.exists(f"{L}:\\"): out.append(f"{L}:\\")
+        except OSError: pass
+    return out
+def fs_places():
+    """Atalhos do navegador: inicio, Desktop, Documentos, raiz do scan, ultima pasta, pais dos projetos, discos."""
+    home, out, seen = os.path.expanduser("~"), [], set()
+    def put(label, path, kind):
+        try:
+            if not path or not os.path.isdir(path): return
+        except (OSError, ValueError): return
+        k = norm_path(path)
+        if k in seen: return
+        seen.add(k); out.append({"label": label, "path": os.path.normpath(path), "kind": kind})
+    put("Início", home, "home")
+    for sub, lbl in (("Desktop", "Desktop"), ("Documents", "Documentos"),
+                     (os.path.join("OneDrive", "Desktop"), "Desktop (OneDrive)"),
+                     (os.path.join("OneDrive", "Documents"), "Documentos (OneDrive)")):
+        put(lbl, os.path.join(home, sub), "folder")
+    cfg = load_config()
+    for key, lbl in (("fs_last", "Última pasta"), ("scan_root", "Raiz do Descobrir")):
+        if isinstance(cfg.get(key), str): put(lbl, cfg[key], "recent")
+    parents = {}
+    for p in load_projects():
+        if isinstance(p.get("path"), str):
+            d = os.path.dirname(p["path"].rstrip("\\/")); parents[d] = parents.get(d, 0) + 1
+    for d, _ in sorted(parents.items(), key=lambda x: -x[1])[:8]:
+        put(os.path.basename(d) or d, d, "projects")
+    for d in windows_drives(): put(d, d, "drive")
+    return out
+def fs_list(path=""):
+    """Lista so as subpastas de path (uma camada). Pula ocultas/sistema/$, erros por entrada; ate FS_MAX."""
+    res = {"path": "", "parent": "", "entries": [], "truncated": False, "places": fs_places(), "drives": windows_drives()}
+    path = clean_path(path)
+    if not path: return res
+    if not os.path.exists(path): raise DoveError(f"pasta nao encontrada: {path}")
+    if not os.path.isdir(path): raise DoveError(f"o caminho nao e uma pasta: {path}")
+    try:
+        with os.scandir(path) as it: raw = list(it)
+    except PermissionError: raise DoveError(f"sem permissao para abrir a pasta: {path}")
+    except OSError as e: raise DoveError(f"nao consegui abrir a pasta {path}: {e}")
+    reg = {norm_path(p["path"]): p["name"] for p in load_projects() if isinstance(p.get("path"), str)}
+    out = []
+    for e in sorted(raw, key=lambda e: e.name.lower()):
+        if len(out) >= FS_MAX: res["truncated"] = True; break
+        try:
+            if _hidden(e) or not e.is_dir(): continue  # is_dir segue link; link quebrado/em loop -> OSError/False
+            full = os.path.join(path, e.name)
+            br = git_branch(full)
+            out.append({"name": e.name, "path": full, "is_repo": bool(br) or os.path.exists(os.path.join(full, ".git")),
+                        "branch": br, "has_agents_md": os.path.isfile(os.path.join(full, "AGENTS.md")),
+                        "link": _is_link(e), "project": reg.get(norm_path(full), "")})
+        except (OSError, ValueError): continue
+    parent = os.path.dirname(path)
+    res.update(path=path, parent="" if parent == path else parent, entries=out,
+               project=reg.get(norm_path(path), ""), is_repo=bool(_gitdir(path)))
+    try: save_config(fs_last=path)
+    except DoveError: pass
+    return res
+
+def find_project(name):
+    p = next((x for x in load_projects() if x["name"] == (name or "").strip()), None)
+    if not p: raise DoveError(f"projeto '{name}' nao encontrado")
+    return p
+def project_info(name):
+    p = find_project(name); path = p.get("path") or ""
+    info = {"name": p["name"], "path": path, "pinned": bool(p.get("pinned")), "exists": os.path.isdir(path),
+            "is_repo": False, "branch": "", "remote": "", "host": "", "last_activity_iso": "",
+            "has_agents_md": False, "has_claude_md": False}
+    if not info["exists"]: return info
+    info["has_agents_md"] = os.path.isfile(os.path.join(path, "AGENTS.md"))
+    info["has_claude_md"] = os.path.isfile(os.path.join(path, "CLAUDE.md"))
+    if os.path.exists(os.path.join(path, ".git")):
+        g = safe_git_info(path, os.path.join(path, ".git"))
+        info.update(is_repo=True, branch=g["branch"], remote=g["remote"], host=g["host"],
+                    last_activity_iso=g["last_activity_iso"])
+    return info
+def project_open(name):
+    """Abre a pasta de um projeto REGISTRADO no gerenciador de arquivos (nunca um caminho arbitrario)."""
+    path = find_project(name).get("path") or ""
+    if not os.path.isdir(path): raise DoveError(f"a pasta do projeto nao existe mais: {path}")
+    if os.environ.get("DOVE_FAKE_OPEN") == "1": return path  # testes: nao abre nada
+    try:
+        if is_windows(): os.startfile(path)  # type: ignore[attr-defined]
+        else:
+            import subprocess
+            subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", path],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e: raise DoveError(f"nao consegui abrir a pasta {path}: {e}")
+    return path
+
 def cmd_project(a):
     try:
         if a.pcmd == "add":
@@ -602,26 +768,39 @@ def cmd_summary(a):
     for d in s["recent_done"]: print(f"  - [{d['when']}] {d['who']}: {short(d['text'], 80)}")
 
 # ---------------------------------------------------------------- painel web (app dove)
+TOKEN_GETS = ("/api/scan", "/api/doctor", "/api/fs/list", "/api/project/info", "/api/onboard")
 FALLBACK_HTML = """<!doctype html><meta charset="utf-8"><title>Dove</title>
 <p>Dove: ui/index.html nao encontrado ao lado do a2a.py. Atualize o repo (git pull).</p>"""
-def panel_state(stale_min=30, limit=400):
+def messages_page(msgs, project=None, limit=300, before=""):
+    """Pagina de mensagens (mais nova por ultimo): as `limit` anteriores a `before` (msg_id), do projeto."""
+    if project: msgs = [m for m in msgs if m.get("project") == project]
+    total = len(msgs)
+    if before:
+        i = next((i for i, m in enumerate(msgs) if m.get("msg_id") == before), None)
+        if i is None: raise DoveError(f"mensagem '{before}' nao encontrada")
+        msgs = msgs[:i]
+    page = msgs[-limit:] if limit and limit > 0 else msgs
+    return {"messages": page, "has_more": len(msgs) > len(page), "total": total}
+def panel_state(stale_min=30, limit=300, project=None):
     msgs, agents, missions = all_messages(), board_data(stale_min), all_missions()
     projects = sorted_projects(load_projects()); hn = human_name()
     per = {p["name"]: summary_data(p["name"], msgs, agents, missions) for p in projects}
     for m in msgs + missions:
         n = m.get("project")
         if n and n not in per: per[n] = summary_data(n, msgs, agents, missions)
-    return {"agents": [x for x in agents if x["agent"] != hn], "registered": registered_agents(), "human": hn,
-            "messages": log_data(limit, msgs=msgs), "projects": projects,
+    page = messages_page(msgs, project, limit)
+    reg = registered_agents()
+    return {"version": DOVE_VERSION, "agents": [x for x in agents if x["agent"] != hn], "registered": reg, "human": hn,
+            "agent_meta": {n: agent_meta(n) for n in reg},
+            "messages": page["messages"], "messages_total": page["total"], "messages_has_more": page["has_more"],
+            "messages_project": project or "", "projects": projects,
             "missions": [mission_view(m) for m in missions],
             "summary": {"global": summary_data(None, msgs, agents, missions), "projects": per},
             "config": {"scan_root": load_config().get("scan_root", "")}, "generated": now_iso()}
 def dove_running(host, port):
-    import urllib.request
-    try:
-        with urllib.request.urlopen(f"http://{host}:{port}/api/ping", timeout=1.5) as r:
-            return json.loads(r.read().decode("utf-8")).get("dove") is True
-    except Exception: return False
+    """None se nao ha Dove na porta; senao a versao dele ('' = antiga, sem versao)."""
+    r = ping_dove(host, port)
+    return (r.get("version") or "") if r else None
 def open_browser(url):
     if os.environ.get("DOVE_NO_BROWSER") == "1": return
     import webbrowser
@@ -650,12 +829,132 @@ def api_post(path, d, human):
         if not s("name").strip(): raise DoveError("informe o nome do projeto")
         project_remove(s("name").strip()); return {}
     if path == "/api/project/pin": return {"project": project_pin(s("name"), bool(d.get("pinned", True)))}
+    if path == "/api/project/open": return {"path": project_open(s("name"))}
+    if path == "/api/agent/add":
+        m = agent_join(s("name"), s("type"), s("model"), s("note"), must_be_new=True)
+        return {"agent": m, "onboard": onboard_text(m["name"], s("project").strip() or "<projeto>")}
+    if path == "/api/agent/remove": agent_leave(s("name")); return {}
     if path == "/api/mission/new":
         ags = d.get("agents") if isinstance(d.get("agents"), list) else []
         return {"mission": mission_view(mission_new(s("project"), s("title"), s("description"),
                                                     [x for x in ags if isinstance(x, str)], human))}
     if path == "/api/mission/done": return {"mission": mission_view(mission_done(s("id"), human))}
     return None
+# ---------------------------------------------------------------- doctor (diagnostico para colar)
+def ping_dove(host, port, timeout=1.5):
+    """None = nada escutando; {} = outro programa; dict do /api/ping se for Dove."""
+    import socket, urllib.request
+    try:
+        with socket.create_connection((host, port), timeout=timeout): pass
+    except OSError: return None
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/api/ping", timeout=timeout) as r:
+            j = json.loads(r.read().decode("utf-8"))
+            return j if isinstance(j, dict) and j.get("dove") is True else {}
+    except Exception: return {}
+def ui_version():
+    m = re.search(r'UI_VERSION\s*=\s*"([^"]+)"', _read_text(UI_FILE))
+    return m.group(1) if m else ""
+def doctor_checks(port=8765, self_port=None):
+    import platform, shutil
+    checks = []
+    def chk(label, fn):
+        try: r = fn()
+        except Exception as e: r = [("ERRO", f"{type(e).__name__}: {e}")]
+        for lvl, det in (r if isinstance(r, list) else [r]): checks.append({"level": lvl, "check": label, "detail": det})
+    me = os.path.realpath(__file__)
+    chk("versao", lambda: ("OK", f"dove {DOVE_VERSION} ({me})"))
+    chk("python", lambda: ("OK", f"{platform.python_version()} ({sys.executable})"))
+    chk("sistema", lambda: ("OK", f"{platform.platform()} (os.name={os.name})"))
+    def ui():
+        if not os.path.isfile(UI_FILE): return ("ERRO", f"nao achei {UI_FILE} - rode git pull no repo do dove")
+        v = ui_version()
+        if v != DOVE_VERSION: return ("AVISO", f"{UI_FILE} e da versao '{v or '?'}' (a2a.py e {DOVE_VERSION}) - git pull incompleto?")
+        return ("OK", f"{UI_FILE} (versao {v})")
+    chk("pagina", ui)
+    def home():
+        if not os.path.isdir(HOME): return ("ERRO", f"{HOME} nao existe - rode: a2a init")
+        t = os.path.join(HOME, f".doctor-{uuid.uuid4().hex[:6]}.tmp")
+        with open(t, "w", encoding="utf-8") as f: f.write("ok")
+        os.remove(t)
+        return ("OK", f"{HOME} (gravavel)")
+    chk("A2A_HOME", home)
+    def dirs():
+        out = []
+        for d in (BUS, AGENTS, STATUS, MISSIONS):
+            if not os.path.isdir(d): out.append(("AVISO", f"{d} nao existe (rode a2a init)")); continue
+            n = len([x for x in os.listdir(d) if not x.startswith(".")])
+            out.append(("OK", f"{os.path.basename(d)}: {n} arquivo(s)"))
+        return out
+    chk("pastas", dirs)
+    def projects():
+        if not os.path.exists(PROJECTS): return ("OK", f"{PROJECTS} ainda nao existe (nasce no primeiro projeto)")
+        raw = read_json(PROJECTS, None)
+        if not isinstance(raw, list): return ("ERRO", f"{PROJECTS} ilegivel ou nao e uma lista JSON")
+        with FileLock(PROJECTS): write_json(PROJECTS, raw)  # mesma gravacao do "adicionar projeto"
+        return ("OK", f"{PROJECTS}: {len(raw)} projeto(s), leitura e gravacao ok")
+    chk("projects.json", projects)
+    def config():
+        if not os.path.exists(CONFIG): return ("OK", f"{CONFIG} ainda nao existe")
+        c = read_json(CONFIG, None)
+        if not isinstance(c, dict): return ("AVISO", f"{CONFIG} ilegivel")
+        return ("OK", f"{CONFIG}: " + (", ".join(f"{k}={v}" for k, v in sorted(c.items())) or "vazio"))
+    chk("config.json", config)
+    def port_chk():
+        if self_port == port: return ("OK", f"porta {port}: este painel (versao {DOVE_VERSION})")
+        r = ping_dove("127.0.0.1", port)
+        if r is None: return ("OK", f"porta {port} livre")
+        if not r: return ("AVISO", f"porta {port} ocupada por outro programa - use: dove --port 8766")
+        v = r.get("version") or ""
+        if v == DOVE_VERSION: return ("OK", f"porta {port}: Dove {v} rodando")
+        return ("AVISO", f"porta {port}: Dove ANTIGO rodando (versao {v or 'anterior a 0.6.0'}; este e {DOVE_VERSION}). "
+                         "Feche a janela do PowerShell com o dove antigo (Ctrl+C) e rode dove de novo")
+    chk("porta", port_chk)
+    def shims():
+        h = os.path.expanduser("~")
+        bindir = os.path.join(h, "bin") if is_windows() else os.path.join(h, ".local", "bin")
+        names = ("a2a.cmd", "dove.cmd", "a2a", "dove") if is_windows() else ("a2a", "dove")
+        out = []
+        for n in names:
+            f = os.path.join(bindir, n)
+            if not os.path.lexists(f): out.append(("AVISO", f"{f} nao existe (rode o instalador)")); continue
+            if os.path.islink(f):
+                tgt = os.path.realpath(f)
+                out.append(("OK", f"{f} -> {tgt}") if os.path.normcase(tgt) == os.path.normcase(me)
+                           else ("AVISO", f"{f} aponta para {tgt}, nao para {me}"))
+            else:
+                txt = _read_text(f)
+                out.append(("OK", f"{f}") if os.path.normcase(me) in os.path.normcase(txt) or not txt
+                           else ("AVISO", f"{f} chama outro a2a.py: {short(txt, 120)}"))
+        on_path = [os.path.normcase(os.path.normpath(x)) for x in os.environ.get("PATH", "").split(os.pathsep) if x]
+        out.append(("OK", f"{bindir} esta no PATH") if os.path.normcase(os.path.normpath(bindir)) in on_path
+                   else ("AVISO", f"{bindir} NAO esta no PATH desta janela (abra um terminal novo ou rode o instalador)"))
+        w = shutil.which("a2a")
+        out.append(("OK", f"comando a2a -> {w}") if w else ("AVISO", "comando a2a nao encontrado no PATH"))
+        return out
+    chk("atalhos", shims)
+    def projs():
+        ps = load_projects()
+        if not ps: return ("OK", "nenhum projeto registrado")
+        miss = [p for p in ps if not os.path.isdir(p.get("path") or "")]
+        out = [("ERRO", f"{p['name']}: pasta nao existe: {p.get('path')}") for p in miss]
+        if len(ps) <= 50:
+            out = [("OK", f"{p['name']}: {p['path']}") for p in ps if p not in miss] + out
+        else: out.insert(0, ("OK", f"{len(ps) - len(miss)} de {len(ps)} projetos com pasta existente"))
+        return out
+    chk("projetos", projs)
+    return checks
+def doctor_text(checks):
+    lines = [f"Dove doctor - {now_iso()}"]
+    lines += [f"{c['level']:<5} {c['check']}: {c['detail']}" for c in checks]
+    n = {k: sum(1 for c in checks if c["level"] == k) for k in ("OK", "AVISO", "ERRO")}
+    lines.append(f"-- {n['OK']} OK, {n['AVISO']} aviso(s), {n['ERRO']} erro(s)")
+    return "\n".join(lines)
+def cmd_doctor(a):
+    try: text = doctor_text(doctor_checks(a.port))
+    except Exception as e: text = f"ERRO  doctor: {type(e).__name__}: {e}"  # nunca derruba
+    print(text)
+
 def log_err(msg):
     """Log do servidor no stderr com data/hora (a janela do PowerShell mostra)."""
     try:
@@ -667,7 +966,12 @@ def cmd_panel(a):
     ensure_dirs()
     view_host = "127.0.0.1" if a.host in ("0.0.0.0", "::", "") else a.host
     url = f"http://{view_host}:{a.port}/"
-    if a.open and dove_running(view_host, a.port):
+    running = dove_running(view_host, a.port) if a.open else None
+    if running is not None:
+        if running != DOVE_VERSION:
+            print(f"AVISO: o Dove rodando em {url} e a versao {running or 'antiga (anterior a 0.6.0)'}, "
+                  f"mas este a2a.py e a {DOVE_VERSION}.\n       Feche a janela do PowerShell/terminal com o dove antigo "
+                  "(Ctrl+C) e rode dove de novo - senao o painel novo conversa com o servidor velho.", file=sys.stderr)
         print(f"Dove ja esta rodando em {url} - abrindo o navegador"); open_browser(url); return
     token = secrets.token_urlsafe(24)
     allowed = {f"{h}:{a.port}" for h in ("127.0.0.1", "localhost", "[::1]", a.host)}
@@ -690,6 +994,7 @@ def cmd_panel(a):
             try: fn()
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError): pass  # navegador desistiu
             except DoveError as e:
+                log_err(f"400 em {self.command} {urlparse(self.path).path}: {e}")
                 if not self.replied: self.reply(400, {"ok": False, "error": str(e)})
             except Exception as e:
                 log_err(f"erro em {self.command} {self.path}:\n" + traceback.format_exc().rstrip())
@@ -711,20 +1016,36 @@ def cmd_panel(a):
                 try:
                     with open(UI_FILE, "r", encoding="utf-8") as f: html = f.read()
                 except OSError: html = FALLBACK_HTML
-                self.reply(200, html.replace("__DOVE_TOKEN__", token).encode("utf-8"), "text/html; charset=utf-8")
-            elif u.path == "/api/ping": self.reply(200, {"dove": True})
-            elif u.path == "/api/state": self.reply(200, panel_state(a.stale_minutes))
-            elif u.path == "/api/scan":  # le o disco: exige token mesmo sendo GET
-                if not self.token_ok(): return
-                q = parse_qs(u.query); root = (q.get("root") or [""])[0]
-                try: depth = max(0, min(6, int((q.get("depth") or ["3"])[0])))
-                except ValueError: depth = 3
+                html = html.replace("__DOVE_TOKEN__", token).replace("__DOVE_SERVER_VERSION__", DOVE_VERSION)
+                self.reply(200, html.encode("utf-8"), "text/html; charset=utf-8")
+                return
+            q = {k: v[0] for k, v in parse_qs(u.query).items()}
+            def qint(k, d, lo, hi):
+                try: return max(lo, min(hi, int(q.get(k, d))))
+                except ValueError: return d
+            if u.path == "/api/ping": self.reply(200, {"dove": True, "version": DOVE_VERSION})
+            elif u.path == "/api/state":
+                self.reply(200, panel_state(a.stale_minutes, qint("limit", 300, 1, 5000), q.get("project") or None))
+            elif u.path == "/api/messages":
+                self.reply(200, dict(messages_page(all_messages(), q.get("project") or None, qint("limit", 300, 1, 5000),
+                                                   q.get("before", "")), ok=True))
+            elif u.path in TOKEN_GETS and not self.token_ok(): return  # leem o disco: exigem token mesmo sendo GET
+            elif u.path == "/api/doctor":
+                c = doctor_checks(a.port, a.port); self.reply(200, {"ok": True, "checks": c, "text": doctor_text(c)})
+            elif u.path == "/api/fs/list": self.reply(200, dict(fs_list(q.get("path", "")), ok=True))
+            elif u.path == "/api/project/info": self.reply(200, {"ok": True, "info": project_info(q.get("name", ""))})
+            elif u.path == "/api/onboard":
+                ag, pj = q.get("agent", "").strip(), q.get("project", "").strip()
+                if ag and ag not in registered_agents(): raise DoveError(f"agente '{ag}' nao encontrado")
+                self.reply(200, {"ok": True, "text": onboard_text(ag, pj or "<projeto>") if ag else onboard_text(None, pj or None)})
+            elif u.path == "/api/scan":
+                root, depth = q.get("root", ""), qint("depth", 3, 0, 6)
                 t0 = time.time(); repos = scan_repos(root, depth); root = clean_path(root)
                 try: save_config(scan_root=root)
                 except DoveError as e: log_err(f"aviso: nao gravei scan_root: {e}")
                 self.reply(200, {"ok": True, "root": root, "repos": repos, "elapsed": round(time.time() - t0, 3)})
             elif u.path == "/api/debug/raise" and test_raise: raise RuntimeError("falha de teste (DOVE_TEST_RAISE)")
-            else: self.reply(404, {"ok": False, "error": "nao encontrado"})
+            else: self.reply(404, {"ok": False, "error": f"rota nao encontrada: GET {u.path}"})
         def read_body(self):
             """Le o corpo ANTES de responder: fechar o socket com dados nao lidos manda RST e o navegador
             mostra 'Failed to fetch' em vez da resposta de erro."""
@@ -755,7 +1076,7 @@ def cmd_panel(a):
             path = urlparse(self.path).path
             if path == "/api/debug/raise" and test_raise: raise RuntimeError("falha de teste (DOVE_TEST_RAISE)")
             res = api_post(path, d, human_name())
-            if res is None: self.reply(404, {"ok": False, "error": "nao encontrado"}); return
+            if res is None: self.reply(404, {"ok": False, "error": f"rota nao encontrada: POST {path} (servidor do dove desatualizado? feche e rode dove de novo)"}); return
             self.reply(200, dict(res, ok=True))
         def log_message(self, *x): pass
     class Server(ThreadingHTTPServer):
@@ -823,9 +1144,16 @@ def cmd_onboard(a):
 
 def build_parser():
     p = argparse.ArgumentParser(prog="a2a", description="Canal A2A local e global (Dove)")
+    p.add_argument("--version", action="version", version=f"dove {DOVE_VERSION}")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("init").set_defaults(func=cmd_init)
-    j = sub.add_parser("join"); j.add_argument("--agent", required=True); j.set_defaults(func=cmd_join)
+    j = sub.add_parser("join", help="registra o agente (com tipo/modelo opcionais)")
+    j.add_argument("--agent", required=True); j.add_argument("--type", choices=list(AGENT_TYPES))
+    j.add_argument("--model"); j.add_argument("--note"); j.set_defaults(func=cmd_join)
+    j = sub.add_parser("leave", help="remove o agente (o historico de mensagens fica)")
+    j.add_argument("--agent", required=True); j.set_defaults(func=cmd_leave)
+    d = sub.add_parser("doctor", help="diagnostico do Dove para colar quando algo nao funciona")
+    d.add_argument("--port", type=int, default=8765); d.set_defaults(func=cmd_doctor)
     sub.add_parser("agents").set_defaults(func=cmd_agents)
     s = sub.add_parser("send")
     s.add_argument("--from", dest="_from", required=True); s.add_argument("--to", required=True)
