@@ -2,7 +2,7 @@
 
 > **Sessão nova? Comece por [`docs/HANDOFF.md`](HANDOFF.md)** — contexto, regras e próximos passos para retomar sem reexplicar.
 
-Estado em 2026-10-19 · base `main` em fc7eca4.
+Estado em 2026-10-19 · base `main` em f48f101.
 
 ## 1. O que é o Dove
 Canal A2A local e global: os agentes (`claude`, `codex`, `hermes`) conversam e dividem trabalho por arquivos JSON em `~/.a2a`, sem nuvem.
@@ -63,9 +63,9 @@ Todos os passos têm aval do Luiz; o 12 foi aceito com risco em 2026-10-19 (desl
 | 12 | Hermes no vigia (opt-in) | **FEITO** · f95a7b0 (risco aceito pelo Luiz, 2026-10-19: "quero arriscar"; desligado por padrão) |
 | 13 | Política de subagentes | **FEITO** · 898c637 (+ c65d148 teste determinístico) |
 | 14 | `assignee` (responsável único) em missões e tarefas | **FEITO** · 38d8b13 (emenda ao passo 7) |
-| 15 | `parent` (missão-mãe) em missões | **APROVADO** (Luiz, 2026-10-19: "sim") · entra junto com o 11, depois do 7 |
+| 15 | `parent` (missão-mãe) em missões | **FEITO** · f48f101 |
 
-Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"). O passo 14 entrou depois (38d8b13) como **emenda** ao 7, não como pré-requisito: hoje o vigia acorda **só o `assignee`** quando ele está definido numa missão ou tarefa; sem o campo, continua acordando todo participante elegível, como antes. O passo 9 (96e904c) já usou a 7 atual para liberar o codex. O passo 12 (f95a7b0) acrescentou o opt-in do hermes, independente dos demais. O passo 11 (fc7eca4) só propõe e manda mensagem — não toca em missão nem em `parent` — então não precisou esperar a 15.
+Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"). O passo 14 entrou depois (38d8b13) como **emenda** ao 7, não como pré-requisito: hoje o vigia acorda **só o `assignee`** quando ele está definido numa missão ou tarefa; sem o campo, continua acordando todo participante elegível, como antes. O passo 9 (96e904c) já usou a 7 atual para liberar o codex. O passo 12 (f95a7b0) acrescentou o opt-in do hermes, independente dos demais. O passo 11 (fc7eca4) só propõe e manda mensagem — não toca em missão nem em `parent` — então não precisou esperar a 15. O passo 15 (f48f101) fechou a Fase 3: todos os 16 passos (0+1 a 15) estão **FEITOS**.
 
 **Passo 9 — Codex no vigia** (**FEITO**, 96e904c):
 - `codex exec --json -s workspace-write -C <cópia> --add-dir <A2A_HOME> -` (já estava na tabela desde a etapa 7; só faltava liberar o gatilho).
@@ -92,11 +92,14 @@ Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** 
 - Desligado por padrão: sem sandbox de SO (`approvals.mode` do hermes só reduz o risco), risco aceito pelo Luiz em 2026-10-19 ("quero arriscar"), por isso opt-in explícito em vez de automático.
 - `a2a watch check` mostra se está ligado por opt-in ou desabilitado (com o comando para habilitar).
 
-**Passo 15 — `parent`** (aprovado; o 11 já saiu independente, não precisa mais esperar por este):
-- Campo opcional `parent` em missões: id da missão-mãe.
-- Escopo mínimo: o campo + somar o gasto das filhas no orçamento da mãe e no `a2a cost`.
-- A mãe só fecha quando todas as filhas estiverem `CONCLUIDO` ou `CANCELADO`; fechar continua só humano (`require_human`).
-- **Sem** automação de propagação de estado e **sem** UI de árvore.
+**Passo 15 — `parent`** (**FEITO**, f48f101):
+- Campo opcional `parent` em missões (`a2a mission new --parent`): id da missão-mãe. Validado na criação: a mãe precisa existir (`load_mission`), estar aberta (sem `human` / conclusão) e ser do mesmo projeto da filha; inválido não grava nada (nem missão, nem mensagem). Sem o campo, nada muda.
+- `mission_children(mid)` (só leitura, sem `ensure_dirs`, no mesmo padrão de `mission_assignees()`, etapa 14): filhas diretas de uma missão (não recursivo).
+- Soma o gasto das filhas no orçamento/teto da mãe (`budget_status`, `run_budget_cap`) e no `a2a cost --mission`: **uma única passada** com escopo-família (ids = mãe + filhas diretas, agentes em união, janela = menor criação até maior conclusão-ou-agora), em vez de somar chamadas independentes por missão — evita contar o mesmo registro do vigia duas vezes. A busca pelas filhas só acontece depois do `has_budget` (sem orçamento definido, nada extra é lido). O rollup é só para cima: a filha nunca vê o gasto da mãe.
+- `mission done` (`mission_done`) só fecha a mãe quando **todas** as filhas diretas estiverem `concluida` (reprovada **não** conta como fechada — o último veredito de cada agente vale, e um reject é retrabalhável); fechar continua só humano (`require_human`).
+- `mission show` lista `mae: <id>` (na filha) e `filhas: <id> (status), ...` (na mãe).
+- **Sem** automação de propagação de estado e **sem** UI de árvore, como no escopo aprovado.
+- **Decisão explícita, não implementada**: `run_budget_cap` soma o orçamento da própria missão (e agora das filhas dela), mas **não propaga** o teto de uma mãe para baixo quando quem está rodando é a filha direto (sem passar pela mãe) — ou seja, uma mãe com orçamento esgotado não impede sozinha a próxima execução de uma filha, a não ser que o teto seja checado explicitamente com `--mission <id-da-mãe>`. Ver "Pendentes".
 
 **Nota do passo 7 (implementado em 396cfd5)**:
 - `"mission"` e `"usage_file"` (Hermes) gravados nos registros de run.
@@ -118,14 +121,15 @@ Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** 
 - Hermes no vigia (passo 12, **FEITO**, f95a7b0): o Luiz aceitou o risco em 2026-10-19 ("quero arriscar"); desligado por padrão, liga só com `a2a watch hermes --enable --from <humano>`.
 - Orquestrador (passo 11, **FEITO**, fc7eca4): agente comum (`a2a join`), restrito a leitura + `a2a send/brief/read/status/fact`; nunca vota/aprova/conclui missão nem merge/deploy/gasto/exclusão. Sem cópia de projeto (pasta própria).
 
-- `assignee` (passo 14) e `parent` (passo 15): aprovados pelo Luiz em 2026-10-19 ("sim"), nos termos acima.
+- `assignee` (passo 14) e `parent` (passo 15): aprovados pelo Luiz em 2026-10-19 ("sim"), nos termos acima. Ambos **FEITOS**.
 - **Descartados** explicitamente: prioridade, tags, dependências entre tarefas e qualquer coisa que o agente já leia no texto da missão.
 
 **Pendentes**
 - Teste manual do vigia (passo 7) com o `claude` real, acompanhado pelo Luiz (os testes automáticos usam executor falso).
 - Pergunta única ao `luiz` quando o gasto chegar a 80% (nota do passo 7, ver acima).
 - Vigia contínuo (sem `--once`): hoje só existe `a2a watch --once`/`a2a watch plan`. Sem ele, o orquestrador (passo 11) só tem o gatilho por evento (mensagem nova endereçada a ele); o tique periódico e os gatilhos extras (agente `blocked`, `ctx>=80%`, task sem `ACEITO` em 30min) ficam pendentes.
-- `parent` (passo 15): aprovado, ainda não implementado.
+- `run_budget_cap` não propaga o teto de uma missão-mãe (passo 15) para a execução de uma filha quando ela é acionada direto pelo id dela (sem passar `--mission <mãe>`); decisão explícita de não automatizar isso agora (ver passo 15).
+- Pergunta aberta ao Luiz: hoje missão não tem conceito de cancelamento (só `aberta`/`reprovada`/`aval_completo`/`concluida`); o gate do passo 15 exige `concluida` nas filhas para fechar a mãe. Quer um `mission cancel` humano-only, para destravar uma mãe cuja filha ficou obsoleta sem precisar concluí-la de verdade?
 
 ## 6. Depois da Fase 3
 - Canal entre máquinas: VPS Ubuntu 24.04 + Omarchy + Windows.
