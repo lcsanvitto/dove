@@ -1,0 +1,16 @@
+# Revisão: interface enxuta para os agentes (o que foi implementado)
+
+- Data: 2026-10-19 · Base: `main` em e3b3d80 · Proposta original: branch `proposta/interface-agentes`
+- Medições recebidas: `brief` −72,9%; `--file` −96%; núcleo do AGENTS.md com 189 tokens, contra 1.117 do guia completo; prefixo do `a2a prompt` estável (54% do prompt).
+- **Veredito geral: aprovado.** A meta mínima da proposta era −70%, e o `brief` passou dela. Abaixo vai o parecer sobre os 6 desvios.
+
+| # | Desvio | Parecer |
+|---|---|---|
+| 1 | Linhas N da mais antiga para a mais nova | **Concordo.** A regra escrita vale; o meu exemplo é que estava errado (as idades estavam invertidas). Com `--limit`, é a mais antiga que aparece primeiro, e o resto vem na próxima chamada com `--mark-read`, numa fila. Corrigir o exemplo na proposta não é necessário: a revisão registra isso. |
+| 2 | Task de missão só como M, nunca como T | **Concordo.** Evita duplicação. A ação real numa missão é dar aval, e M já leva a isso. Se a task da missão ainda não foi lida, ela aparece também em N, o que é correto: N é mensagem, M é pendência. |
+| 3 | `abertas` conta só as tarefas já lidas (T) | **Concordo, com uma ressalva de documentação.** Contar as não lidas duplicaria o `novas`. Mas o nome engana: proponho deixar no `--help` do `brief` a frase "abertas = tarefas já lidas ainda sem CONCLUIDO/CANCELADO; as não lidas estão em novas". Não renomear a chave (compatibilidade do `--json`). |
+| 4 | `onboard`: `--agents-md` = núcleo, `--agent X` = guia completo | **Concordo.** É mais simples que `--core/--topic`. Proponho só um complemento pequeno, quando for fácil: `a2a onboard --check <arquivo>`, que compara o bloco do Dove num AGENTS.md/CLAUDE.md com o núcleo atual (hash) e avisa se está desatualizado. Isso fica mais útil ainda com o desvio 6. |
+| 5 | `archive`: o humano não conta como "não lido" | **Concordo.** O humano lê pelo painel e não tem cursor; contá-lo travaria o arquivo para sempre. O risco ficou coberto: só fios de `task` encerrados são arquivados, missões sem confirmação do humano nunca saem, e o arquivo é manual e reversível (`--restore`). |
+| 6 | Instruções globais (`a2a instructions install` em `~/.claude/CLAUDE.md` e `~/.codex/AGENTS.md`) | **Concordo com a direção, mas proponho condições, e isto precisa de aval do Luiz.** Grava fora do `~/.a2a`, em arquivos de configuração pessoais que ele já mantém à mão. Condições: (a) bloco delimitado `<!-- dove:begin v=<hash> -->` … `<!-- dove:end -->`, idempotente, sem tocar no resto do arquivo; (b) `--dry-run` mostra o diff antes de gravar e a gravação faz um `.bak`; (c) `a2a instructions uninstall` remove só o bloco; (d) `a2a instructions check` avisa quando o bloco está desatualizado; (e) só o humano roda (`require_human`); (f) o núcleo global começa com "vale só em projetos registrados no Dove (`a2a project list`); fora deles, ignore". Sem isso, todo repositório da máquina pagaria os tokens do bloco à toa. O AGENTS.md por repositório continua opcional, para quem quiser sobrescrever por projeto. |
+
+Pendências desta revisão: a frase do desvio 3 no `--help`; `onboard --check` (desvio 4, opcional); as condições (a) a (f) antes de implementar o desvio 6.
