@@ -53,10 +53,18 @@ B = {  # corpos fixos, 120-300 caracteres
 
 def mid(i): return hashlib.sha1(f"{SEED}:{i}".encode()).hexdigest()[:12]
 
-def seed_home(home):
+def write_msg(home, m, t):
+    """Grava a mensagem no bus/ como o a2a (nome = data compacta + msg_id) com mtime t (ordem cronologica)."""
+    fn = m["data"].replace(":", "").replace("-", "") + "-" + m["msg_id"] + ".json"
+    with open(os.path.join(home, "bus", fn), "w", encoding="utf-8") as f: json.dump(m, f, ensure_ascii=False, indent=2)
+    os.utime(os.path.join(home, "bus", fn), (t, t))
+
+def seed_home(home, now=None):
+    """now: relogio do cenario (padrao: agora). Com um now fixo as datas das mensagens tambem ficam fixas."""
+    now = time.time() if now is None else now
     for d in ("bus", "cursor", "agents", "status", "missions"): os.makedirs(os.path.join(home, d), exist_ok=True)
     for a in ("claude", "codex", "hermes"): open(os.path.join(home, "agents", a), "w").close()
-    base = time.time() - 4 * 3600  # 40 mensagens, 1 por minuto: idades entre 3h e 4h (2 caracteres)
+    base = now - 4 * 3600  # 40 mensagens, 1 por minuto: idades entre 3h e 4h (2 caracteres)
     msgs, seen = [], []
     def put(frm, to, kind, body, project="lagu", state="", evidence="", reply="", task="", read=False):
         i = len(msgs); m_id = mid(i)
@@ -112,10 +120,7 @@ def seed_home(home):
     put("claude", "codex", "ack", "recebido", reply=q_codex)
     put("claude", "codex", "report", B["fix"], state="AGUARDANDO_APROVACAO", evidence="commit 3c41d2e")
     assert len(msgs) == 40, len(msgs)
-    for m in msgs:
-        fn = m["data"].replace(":", "").replace("-", "") + "-" + m["msg_id"] + ".json"
-        with open(os.path.join(home, "bus", fn), "w", encoding="utf-8") as f: json.dump(m, f, ensure_ascii=False, indent=2)
-        t = base + msgs.index(m) * 60; os.utime(os.path.join(home, "bus", fn), (t, t))
+    for i, m in enumerate(msgs): write_msg(home, m, base + i * 60)
     with open(os.path.join(home, "cursor", "codex.json"), "w") as f: json.dump(sorted(seen), f)
     ap = lambda *xs: {a: {"verdict": "approve", "ts": "2026-10-18T12:00:00Z", "evidence": "ok", "reason": ""} for a in xs}
     for m_id, title, proj, agents, approvals in (
@@ -128,7 +133,7 @@ def seed_home(home):
                        "history": [], "human": None}, f, ensure_ascii=False, indent=2)
     with open(os.path.join(home, "status", "codex.json"), "w") as f:
         json.dump({"agent": "codex", "state": "working", "note": "webhook novo", "project": "lagu",
-                   "context": 64, "updated": "x", "ts": time.time()}, f)
+                   "context": 64, "updated": "x", "ts": now}, f)
     vis = [m for m in msgs if m["to"] in (AGENT, "all") and m["from"] != AGENT]
     unread = [m for m in vis if m["msg_id"] not in seen]
     assert len(vis) == 14 and len(unread) == 5 and sum(m["kind"] == "ack" for m in unread) == 1, (len(vis), len(unread))

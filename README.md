@@ -435,6 +435,10 @@ python tests/test_a2a.py
 python tests/measure_brief.py   # quanto texto o agente le para se atualizar (antes/depois do brief)
 python tests/measure_bus.py     # tempo de brief/summary/inbox/painel com um bus de 2.000 mensagens (com/sem indice, antes/depois do archive)
 ```
+```
+python tests/measure_tokens.py [--agents-md CAMINHO/AGENTS.md] [--show]
+```
+Medição reprodutível de tokens (proposta `docs/propostas/2026-10-19-economia-de-tokens.md`): cenários fixos num `A2A_HOME` temporário, `chars`, `bytes` UTF-8 e `tokens_est = ceil(chars/4)`, numa tabela por medida. **M1** núcleo do `AGENTS.md` × guia completo (com `--agents-md`, também a seção do Dove de um `AGENTS.md` real); **M2** estabilidade do prefixo do `a2a prompt` (mesmo hash com bus, status e relógio diferentes); **M3** custo de relembrar uma missão (12 mensagens) × memória do projeto; **M4** `git ls-files` + `head -40` × mapa do repositório. Medidas cujo comando ainda não existe aparecem como `pendente`, com o "antes" já medido.
 
 ## Próximos passos (ideias)
 - Canal entre máquinas (VPS como ponte) — Windows, Omarchy/Linux, VPS (Ubuntu 24.04 LTS).
