@@ -1,4 +1,4 @@
-import hashlib, http.client, json, os, re, signal, socket, subprocess, sys, tempfile, time, pathlib, urllib.request
+import hashlib, http.client, json, os, re, signal, socket, subprocess, sys, tempfile, threading, time, pathlib, urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 for _k in ("A2A_RUNNER", "A2A_RUN_ID"): os.environ.pop(_k, None)  # os testes comecam como o humano (fora de execucao automatica)
@@ -6,7 +6,7 @@ A2A = ROOT / "a2a.py"
 
 def run(env, *args):
     return subprocess.run([sys.executable, str(A2A), *args],
-                          capture_output=True, text=True, env=env)
+                          capture_output=True, text=True, encoding="utf-8", env=env)
 
 def main():
     tmp = tempfile.mkdtemp()
@@ -159,10 +159,10 @@ def main():
         h = run(env, *cmd, "--help").stdout
         assert "exemplos:\n" in h and ex_ in h, (cmd, h)
     assert "Resumo unico para o agente se atualizar (substitui inbox + read de cada\nmensagem" in \
-        subprocess.run([sys.executable, str(A2A), "brief", "--help"], capture_output=True, text=True,
+        subprocess.run([sys.executable, str(A2A), "brief", "--help"], capture_output=True, text=True, encoding="utf-8",
                        env=dict(uenv, COLUMNS="80")).stdout  # descricao continua quebrada pela largura
     assert run(env, "onboard").returncode != 0
-    h = " ".join(subprocess.run([sys.executable, str(A2A), "brief", "--help"], capture_output=True, text=True, env=uenv).stdout.split())
+    h = " ".join(subprocess.run([sys.executable, str(A2A), "brief", "--help"], capture_output=True, text=True, encoding="utf-8", env=uenv).stdout.split())
     assert "O contador abertas conta so as tarefas abertas que voce ja leu (linhas T); as nao lidas aparecem como N." in h, h
     print("OK: a2a onboard (--agent guia com exemplos, --agents-md nucleo curto) e --help com exemplos")
 
@@ -170,21 +170,21 @@ def main():
     if os.name != "nt":
         h = tempfile.mkdtemp(); ienv = dict(os.environ, HOME=h, A2A_HOME=os.path.join(h, ".a2a"))
         for _ in range(2):  # idempotente
-            r = subprocess.run(["bash", str(ROOT / "install.sh")], capture_output=True, text=True, env=ienv)
+            r = subprocess.run(["bash", str(ROOT / "install.sh")], capture_output=True, text=True, encoding="utf-8", env=ienv)
             assert r.returncode == 0, r.stdout + r.stderr
         link = os.path.join(h, ".local", "bin", "a2a")
         assert os.path.islink(link) and os.path.realpath(link) == str(A2A.resolve()), link
-        r = subprocess.run([link, "--help"], capture_output=True, text=True, env=ienv)
+        r = subprocess.run([link, "--help"], capture_output=True, text=True, encoding="utf-8", env=ienv)
         assert r.returncode == 0 and "onboard" in r.stdout, r.stdout + r.stderr
         assert sorted(os.listdir(os.path.join(h, ".a2a", "agents"))) == ["claude", "codex", "hermes"]
         dlink = os.path.join(h, ".local", "bin", "dove")
         assert os.path.islink(dlink) and os.path.realpath(dlink) == str(A2A.resolve()), dlink
         ienv = {k: v for k, v in ienv.items() if k not in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "HERMES_HOME")}
-        r = subprocess.run(["bash", str(ROOT / "install.sh")], capture_output=True, text=True, env=ienv)
+        r = subprocess.run(["bash", str(ROOT / "install.sh")], capture_output=True, text=True, encoding="utf-8", env=ienv)
         assert "Para valer em todos os projetos: a2a instructions install" in r.stdout, r.stdout
         assert not os.path.exists(os.path.join(h, ".claude")), "sem --instructions nao mexe nos arquivos globais"
         for _ in range(2):  # --instructions: claude e codex (nao hermes), idempotente
-            r = subprocess.run(["bash", str(ROOT / "install.sh"), "--instructions", "claude"], capture_output=True, text=True, env=ienv)
+            r = subprocess.run(["bash", str(ROOT / "install.sh"), "--instructions", "claude"], capture_output=True, text=True, encoding="utf-8", env=ienv)
             assert r.returncode == 0 and "Para valer" not in r.stdout, r.stdout + r.stderr
         assert "ja atualizado" in r.stdout and os.path.isfile(os.path.join(h, ".claude", "CLAUDE.md")), r.stdout
         assert os.path.isfile(os.path.join(h, ".codex", "AGENTS.md")) and not os.path.exists(os.path.join(h, ".hermes"))
@@ -205,7 +205,7 @@ def main():
     if shutil.which("pwsh"):
         ps = ("$e=$null; [System.Management.Automation.Language.Parser]::ParseFile("
               f"'{ROOT / 'install.ps1'}',[ref]$null,[ref]$e) | Out-Null; if($e){{$e; exit 1}}")
-        r = subprocess.run(["pwsh", "-NoProfile", "-Command", ps], capture_output=True, text=True)
+        r = subprocess.run(["pwsh", "-NoProfile", "-Command", ps], capture_output=True, text=True, encoding="utf-8")
         assert r.returncode == 0, r.stdout + r.stderr
         print("OK: install.ps1 (sintaxe)")
     else:
@@ -453,7 +453,7 @@ def fase1():
         try:
             assert wait_ping(port, p), "dove nao serviu /api/ping"
             r = subprocess.run([dove, "--port", str(port)], env=dict(env, DOVE_NO_BROWSER="1"),
-                               capture_output=True, text=True, timeout=10)
+                               capture_output=True, text=True, encoding="utf-8", timeout=10)
             assert r.returncode == 0 and "ja esta rodando" in r.stdout, r.stdout + r.stderr
         finally:
             p.terminate(); p.wait(timeout=5)
@@ -487,9 +487,10 @@ def robustez():
     assert not a2a.name_taken("Dove", ["lagu", "dove"], windows=False)
     assert a2a.name_taken("dove", ["dove"], windows=False)
     assert a2a.path_key("C:/Users/Dell/dove/", windows=True) == a2a.path_key("c:\\users\\DELL\\Dove", windows=True)
-    assert a2a.unique_name("App", "/x/y/App", ["app"]) == "App"  # Linux: diferencia maiusculas
     real_isw = a2a.is_windows
     try:
+        a2a.is_windows = lambda: False  # Linux simulado: "App" nao colide com "app"
+        assert a2a.unique_name("App", "/x/y/App", ["app"]) == "App"
         a2a.is_windows = lambda: True  # Windows simulado: "LAGU" colide com "lagu" ja registrado
         a2a.project_add("x-tmp", d); a2a.project_remove("x-tmp")
         try: a2a.project_add("X-TMP", d); a2a.project_add("x-tmp", tempfile.mkdtemp()); assert False
@@ -530,7 +531,8 @@ def robustez():
     assert dt < 3, dt
     assert os.path.join(root, "ok", "r1") in paths and os.path.join(root, "estranho") in paths, paths
     assert len(paths) == len(set(paths)) and not any("atalho" in p or "raiz" in p or "eu" in p.split(os.sep) for p in paths), paths
-    if os.geteuid() != 0: assert os.path.join(root, "trancada", "segredo") not in paths, paths
+    if not a2a.is_windows() and os.geteuid() != 0:  # chmod 0 nao bloqueia leitura no Windows (ACL, nao bits POSIX)
+        assert os.path.join(root, "trancada", "segredo") not in paths, paths
     # root le tudo: simula PermissionError na pasta trancada
     real_scandir = os.scandir
     def fake_scandir(p="."):
@@ -598,8 +600,17 @@ def robustez():
     print("OK: painel robusto (400 com mensagem em add/remove/scan, aspas, JSON invalido, 500 JSON + traceback, segue no ar)")
 
 def start_panel(env, port):
+    """Inicia o painel com stdout/stderr dreanados em threads: sem isto, um teste longo (muitos 4xx/5xx, cada um
+    logado em log_err) enche o buffer do pipe do SO e a escrita no stderr do painel trava (log_err roda ANTES do
+    reply() em guarded()) - a conexao HTTP fica pendurada para sempre, mesmo sem nenhum deadlock de git/lock."""
     p = subprocess.Popen([sys.executable, str(A2A), "panel", "--port", str(port)], env=env,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    p.dove_out, p.dove_err = [], []
+    def drain(stream, buf):
+        for line in stream: buf.append(line)
+    to = threading.Thread(target=drain, args=(p.stdout, p.dove_out), daemon=True); to.start()
+    te = threading.Thread(target=drain, args=(p.stderr, p.dove_err), daemon=True); te.start()
+    p.dove_threads = (to, te)
     assert wait_ping(port, p), "painel nao respondeu"
     tok = re.search(r'name="dove-token" content="([^"]+)"', req(port, "GET", "/")[1]).group(1)
     return p, {"X-Dove-Token": tok}
@@ -773,7 +784,9 @@ def fase2():
         assert len(req(port, "GET", "/api/state")[1]["messages"]) <= 300
         code, j = req(port, "POST", "/api/rota/inventada", {}, T); assert code == 404 and "rota nao encontrada" in j["error"], j
     finally:
-        p.terminate(); _, err = p.communicate(timeout=5)
+        p.terminate(); p.wait(timeout=5)
+        for t in p.dove_threads: t.join(timeout=2)
+    err = "".join(p.dove_err)
     assert "400 em POST /api/project/open" in err, err  # erros do usuario aparecem na janela do dove
     print("OK: API nova (ping/versao, no-store, token+Host+Origin nas rotas novas, fs/list, project/open+info, agent add/remove, paginacao)")
 
@@ -794,7 +807,7 @@ def git_fase():
                  ("CONFIG", os.path.join(home, "config.json"))):
         setattr(a2a, k, v)
     def g(cwd, *args, check=True):
-        r = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, text=True)
+        r = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8")
         if check: assert r.returncode == 0, (args, r.stdout, r.stderr)
         return r.stdout.strip()
     def write(p, t): open(p, "w", encoding="utf-8").write(t)
@@ -1009,7 +1022,7 @@ def git_fase():
         assert not os.path.exists(os.path.join(home, "status", "luiz.json"))
         print("OK: cada acao do humano vira report luiz -> all no canal; luiz continua sem status")
     finally:
-        p.terminate(); p.communicate(timeout=5)
+        p.terminate(); p.wait(timeout=5)
 
     # ---- nenhuma acao monta argv proibido (--force, reset, rebase, clean, branch -D)
     calls, real = [], a2a.run_git
@@ -1236,7 +1249,7 @@ def wait(timeout, interval=0.2):
 out = {}
 for i in range(200): a2a.post_message("hermes", "claude", f"ruido {i}", auto_status=False)
 calls.update(all=0, passes=0)
-rc, txt = wait(3)
+rc, txt = wait(10)
 out["idle"] = dict(calls, rc=rc, txt=txt)
 # mensagem gravada no meio da espera: entregue em ate um --interval
 calls.update(all=0, passes=0); t_write = {}
@@ -1274,12 +1287,14 @@ def wait_fase():
     """wait sem reler o bus a toa (item 3): poucas leituras completas, entrega rapida, saida igual."""
     tmp = tempfile.mkdtemp(); env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8")
     run(env, "init")
-    r = subprocess.run([sys.executable, "-c", WAIT_PROBE, str(ROOT)], capture_output=True, text=True, env=env)
+    r = subprocess.run([sys.executable, "-c", WAIT_PROBE, str(ROOT)], capture_output=True, text=True, encoding="utf-8", env=env)
     assert r.returncode == 0, r.stderr
     o = json.loads(r.stdout)
     idle, mid, old, seen = o["idle"], o["mid"], o["old"], o["seen"]
     assert idle["rc"] == 2 and idle["txt"] == "(timeout)\n", idle
-    assert idle["all"] <= 2 and 10 <= idle["passes"] <= 20, idle  # antes: 1 releitura completa por volta (~15)
+    # antes: 1 releitura completa por volta (~15 em 3s numa FS rapida); timeout/piso generosos porque o primeiro
+    # index_build (200 msgs) pode ser lento no Windows (antivirus no primeiro acesso aos arquivos recem-criados)
+    assert idle["all"] <= 2 and 5 <= idle["passes"] <= 50, idle
     assert mid["rc"] == 0 and "chegou no meio" in mid["txt"] and mid["all"] <= 2, mid
     assert mid["lag"] < 0.2 + 0.25, mid  # em ate um --interval (com folga para o agendador)
     assert old["rc"] == 0 and "velho0000001" in old["txt"], old
@@ -1301,7 +1316,9 @@ def archive_fase():
     bus, now, seen = os.path.join(tmp, "bus"), time.time(), {"claude": [], "codex": [], "hermes": []}
     n = [0]
     def put(days, frm, to, kind, body, state="", reply="", task="", read=True):
-        n[0] += 1; mid = "%012d" % n[0]; t = now - days * 86400 + n[0]
+        # -600s de margem (alem do +n[0] de ordem): sem isto, "Xd" na saida do brief podia virar "Xd"+1 se o teste
+        # (muitos subprocessos; mais lento no Windows) demorasse mais que n[0] segundos entre o put() e o snap()
+        n[0] += 1; mid = "%012d" % n[0]; t = now - days * 86400 - 600 + n[0]
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
         m = {"data": ts, "task_id": task, "msg_id": mid, "from": frm, "to": to, "project": "lagu", "in_reply_to": reply,
              "kind": kind, "state": state, "result": "", "evidence": "", "pending": "", "next_action": "", "body": body}
@@ -1421,7 +1438,7 @@ def index_fase():
             "inbox --agent codex --no-auto-status", "inbox --agent claude --no-auto-status", "log --limit 3000", "mission list")
     def outs(): return {c: run(env, *c.split()).stdout for c in cmds}
     def state():
-        r = subprocess.run([sys.executable, "-c", INDEX_PROBE, str(ROOT)], capture_output=True, text=True, env=env)
+        r = subprocess.run([sys.executable, "-c", INDEX_PROBE, str(ROOT)], capture_output=True, text=True, encoding="utf-8", env=env)
         assert r.returncode == 0, r.stderr
         return json.loads(r.stdout)
     def drop():
@@ -1496,7 +1513,7 @@ def files_fase():
     last = [""]
     def send(*extra, cwd=work, frm="claude"):
         r = subprocess.run([sys.executable, str(A2A), "send", "--from", frm, "--to", "codex", "--body", "veja", "--no-auto-status", *extra],
-                           capture_output=True, text=True, env=env, cwd=cwd)
+                           capture_output=True, text=True, encoding="utf-8", env=env, cwd=cwd)
         if r.returncode == 0: last[0] = r.stdout.split()[1]
         return r
     def last_msg():
@@ -1540,7 +1557,7 @@ def files_fase():
                       f"file: a.py:7 sha={sha(code)}"], c
     assert json.loads(run(env, "read", with_files).stdout)["files"][0]["lines"] == "3-5"
     open(os.path.join(work, "a.py"), "ab").write(b"mais\n")
-    v = subprocess.run([sys.executable, str(A2A), "read", with_files, "--compact", "--verify-files"], capture_output=True, text=True, env=env, cwd=work).stdout
+    v = subprocess.run([sys.executable, str(A2A), "read", with_files, "--compact", "--verify-files"], capture_output=True, text=True, encoding="utf-8", env=env, cwd=work).stdout
     assert f"verify: a.py:3-5 sha={sha(code)} mudou desde a mensagem (agora {sha(code + b'mais' + chr(10).encode())})" in v and "verify: sub/b.py" in v and " ok" in v, v
     # painel: /api/state com as mesmas chaves e files dentro da mensagem; /api/send ignora files
     port = free_port(); p, tok = start_panel(env, port)
@@ -1644,6 +1661,21 @@ def prompt_fase():
         assert hp["sha256"] != h["prefixo"]["sha256"], (mode, extra, ag)
     f = run(env, *args, "--for", "codex").stdout
     assert "- Executor: `codex exec`" in f.split(boundary)[0], f
+    # etapa 11: orquestrador tem papel proprio (so leitura + a2a send/brief/read/status/fact), prefixo estavel e
+    # diferente do claude/codex, sem pasta de projeto (pasta propria, run/orquestrador-home)
+    oargs = ["prompt", "--agent", "orquestrador", "--project", "lagu"]
+    ofixed, ofixed2 = run(env, *oargs).stdout.split(boundary)[0], run(env, *oargs).stdout.split(boundary)[0]
+    assert ofixed == ofixed2, "prefixo do orquestrador tem que ser estavel entre execucoes"
+    for el in ("Você é `orquestrador`", "projeto `lagu`", "nunca `mission approve/reject/done`",
+               "merge, deploy, gasto ou exclusão", "a2a send", "a2a fact add", "a2a mission new",
+               "a2a models suggest", "orquestrador-home"):
+        assert el in ofixed, (el, ofixed)
+    assert "Sua pasta de trabalho" not in ofixed and "Pasta do projeto" not in ofixed, ofixed
+    oh = dict(kv.split("=", 1) for kv in inproc("plain", *oargs, "--prefix-hash").splitlines()[0].split()[1:])
+    assert oh["sha256"] != h["prefixo"]["sha256"], (oh, h)  # diferente do prefixo do codex (h, acima)
+    ch = dict(kv.split("=", 1) for kv in inproc("plain", "prompt", "--agent", "claude", "--project", "lagu",
+                                                 "--prefix-hash").splitlines()[0].split()[1:])
+    assert oh["sha256"] != ch["sha256"], (oh, ch)  # e do claude
     # quase fixa: pasta do projeto registrado ou a copia do agente (estavel entre execucoes)
     work = os.path.join(tmp, "lagu"); os.makedirs(work); run(env, "project", "add", "lagu", work)
     p1 = run(env, *args).stdout.split(boundary)[0]
@@ -1681,10 +1713,15 @@ def instructions_fase():
     import glob as _glob
     tmp = tempfile.mkdtemp(); home = os.path.join(tmp, "home"); os.makedirs(home)
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "HERMES_HOME")}
-    env.update(HOME=home, USERPROFILE=home, A2A_HOME=os.path.join(tmp, "a2a"), PYTHONIOENCODING="utf-8")
+    # LOCALAPPDATA tambem precisa ir para a sandbox: sem isto, o fallback do hermes no Windows (sem HERMES_HOME)
+    # cai no %LOCALAPPDATA%\hermes de verdade da maquina (pode existir de verdade, como neste Windows do Luiz)
+    env.update(HOME=home, USERPROFILE=home, LOCALAPPDATA=os.path.join(home, "AppData", "Local"),
+               A2A_HOME=os.path.join(tmp, "a2a"), PYTHONIOENCODING="utf-8")
     def a2a(*args, e=None, code=0):
-        r = subprocess.run([sys.executable, str(A2A), *args], capture_output=True, env=e or env)
-        out = r.stdout.decode("utf-8") + r.stderr.decode("utf-8")
+        # text=True (universal newlines): sem isto, no Windows os comandos que nao chamam utf8_stdout() saem com
+        # \r\n e as comparacoes exatas ("...\n") falham - rb() le os arquivos em binario e fica imune a isto.
+        r = subprocess.run([sys.executable, str(A2A), *args], capture_output=True, text=True, encoding="utf-8", env=e or env)
+        out = r.stdout + r.stderr
         assert r.returncode == code, (args, r.returncode, out)
         return out
     claude, codex = os.path.join(home, ".claude", "CLAUDE.md"), os.path.join(home, ".codex", "AGENTS.md")
@@ -1788,7 +1825,7 @@ def instructions_fase():
     assert a2a("project", "which", "--path", os.path.join(proj, "src")) == "lagu\n"
     assert a2a("project", "which", "--path", os.path.join(proj, "src", "a", "b")) == "lagu-docs\n"  # o mais especifico
     assert a2a("project", "which", "--path", proj + "-codex") == "lagu\n"
-    assert subprocess.run([sys.executable, str(A2A), "project", "which"], capture_output=True, text=True, env=env,
+    assert subprocess.run([sys.executable, str(A2A), "project", "which"], capture_output=True, text=True, encoding="utf-8", env=env,
                           cwd=os.path.join(proj, "src")).stdout == "lagu\n"
     out = a2a("project", "which", "--path", proj + "x", code=1); assert "nenhum projeto registrado contem" in out, out
     a2a("project", "which", "--path", tmp, code=1)
@@ -1895,9 +1932,9 @@ def fact_fase():
     assert "lagu já tem 30 fatos vigentes (teto 30). Vença um (a2a fact expire <id> --from claude) ou condense uma missão concluída" in out, out
     tmp2 = tempfile.mkdtemp(); env2 = dict(env, A2A_HOME=tmp2)
     for i in range(15):
-        r = subprocess.run([sys.executable, str(A2A), "fact", "add", "--project", "big", "--from", "claude", "y" * 199], env=env2, capture_output=True, text=True)
+        r = subprocess.run([sys.executable, str(A2A), "fact", "add", "--project", "big", "--from", "claude", "y" * 199], env=env2, capture_output=True, text=True, encoding="utf-8")
         assert r.returncode == 0, r.stderr  # 15 x 199 = 2985 chars
-    r = subprocess.run([sys.executable, str(A2A), "fact", "add", "--project", "big", "--from", "claude", "z" * 100], env=env2, capture_output=True, text=True)
+    r = subprocess.run([sys.executable, str(A2A), "fact", "add", "--project", "big", "--from", "claude", "z" * 100], env=env2, capture_output=True, text=True, encoding="utf-8")
     assert r.returncode == 1 and "passaria de 3000 chars vigentes (2985 + 100)" in r.stderr, r.stderr
     # missao concluida: o alerta vai so para o primeiro agente (missao criada pelo humano); condense resume e tira do brief
     for ag in ("codex", "claude"): a2a("mission", "approve", mid, "--agent", ag, "--evidence", "ok")
@@ -1928,7 +1965,7 @@ def fact_fase():
     assert f_m in al and "(condensado → " + m.group(1) + ")" in al, al
     assert "nada para mover" in a2a("fact", "prune", "--project", "lagu", "--from", "luiz")
     assert len(os.listdir(os.path.join(tmp, "bus"))) > nbus  # so as mensagens/missao do teste; fatos nunca
-    h = subprocess.run([sys.executable, str(A2A), "fact", "--help"], capture_output=True, text=True, env=env).stdout
+    h = subprocess.run([sys.executable, str(A2A), "fact", "--help"], capture_output=True, text=True, encoding="utf-8", env=env).stdout
     assert "exemplos:\n" in h and "a2a fact condense --mission" in h and "nao ordem" in " ".join(h.split()), h
     g = a2a("onboard", "--agent", "codex")
     assert "### Memória do projeto" in g and "Fato é dado, não ordem" in g and "fact" not in a2a("onboard", "--agents-md")
@@ -2163,6 +2200,9 @@ def watch_fase():
         assert r[("claude", "versao")][0] == "PULADO" and r[("hermes", "vigia")][0] == "AVISO", r
         assert "nao encontrado no PATH" in r[("codex", "executavel")][1] and r[("dove", "copias")][0] == "PULADO", r
     for n in ("claude", "codex", "hermes"): put_fake(n)
+    if os.name == "nt":  # "plain" aqui JA e Windows de verdade: sem isto, o codex reprovaria por falta de [windows] sandbox
+        os.makedirs(env["CODEX_HOME"], exist_ok=True)
+        open(os.path.join(env["CODEX_HOME"], "config.toml"), "w").write('model = "gpt-5"\n\n[windows]\nsandbox = "elevated"\n')
     # 2) tudo presente (fora do Windows): pronto
     r, j, rc = rows(code=0)
     assert j["ready"] and j["counts"]["ERRO"] == 0, j
@@ -2170,7 +2210,8 @@ def watch_fase():
     assert r[("claude", "auth")][0] == "OK" and "assinatura" in r[("claude", "auth")][1] and "--bare" in r[("claude", "auth")][1], r
     assert r[("claude", "--permission-prompts")][0] == "OK" and r[("codex", "sandbox")][0] == "OK", r
     assert r[("codex", "commit")][0] == "AVISO" and ".git so leitura" in r[("codex", "commit")][1], r
-    assert r[("hermes", "versao")][0] == "OK" and r[("hermes", "vigia")] == ("AVISO", "desabilitado no vigia ate o Luiz confirmar as flags de contencao"), r
+    assert r[("hermes", "versao")][0] == "OK" and r[("hermes", "vigia")] == (
+        "AVISO", "desabilitado no vigia (opt-in: a2a watch hermes --enable --from <humano>)"), r
     assert r[("dove", "tabela")][0] == "OK" and r[("dove", "STOP")][0] == "OK" and ("dove", "A2A_RUNNER") not in r, r
     out, _ = check(code=0)
     assert out.startswith("dove watch check - ") and "OK     claude: versao: 2.1.300 (Claude Code)\n" in out and "-- " in out, out
@@ -2181,7 +2222,7 @@ def watch_fase():
     r, _, _ = rows(e=dict(env, FAKE_CLAUDE_AUTH="none"), code=1)
     assert r[("claude", "auth")] == ("ERRO", "nao logado: rode claude auth login"), r
     # 4) Windows simulado: codex sem [windows] sandbox -> nao pronto; com sandbox -> ok; PowerShell explicado
-    os.makedirs(env["CODEX_HOME"]); cfg = os.path.join(env["CODEX_HOME"], "config.toml")
+    os.makedirs(env["CODEX_HOME"], exist_ok=True); cfg = os.path.join(env["CODEX_HOME"], "config.toml")
     open(cfg, "w").write('model = "gpt-5"\n[profiles.x]\nsandbox = "elevated"\n')
     r, j, rc = rows("--agent", "codex", mode="win", code=1)
     assert r[("codex", "sandbox")][0] == "ERRO" and "nao pronto" in r[("codex", "sandbox")][1] and cfg in r[("codex", "sandbox")][1], r
@@ -2195,7 +2236,7 @@ def watch_fase():
     assert r[("claude", "powershell")][1].startswith("CLAUDE_CODE_USE_POWERSHELL_TOOL=0"), r
     # 5) copias de trabalho: sem copia (ERRO para agente do vigia), limpa (OK), suja (AVISO); STOP; A2A_RUNNER
     def g(cwd, *a):
-        x = subprocess.run(["git", *a], cwd=cwd, env=env, capture_output=True, text=True); assert x.returncode == 0, (a, x.stderr)
+        x = subprocess.run(["git", *a], cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8"); assert x.returncode == 0, (a, x.stderr)
     lagu = os.path.join(tmp, "lagu"); os.makedirs(lagu); g(lagu, "init", "-q", "-b", "main")
     open(os.path.join(lagu, "a.txt"), "w").write("a\n"); g(lagu, "add", "."); g(lagu, "commit", "-qm", "inicio")
     for ag in ("claude", "codex"): run(env, "join", "--agent", ag)
@@ -2216,7 +2257,7 @@ def watch_fase():
     os.remove(os.path.join(home, "STOP")); os.remove(os.path.join(wt, "novo.txt"))
     # 6) a tabela nunca tem padroes proibidos; cada subcomando nas formas Bash e PowerShell; check acusa tabela adulterada
     t = json.loads(subprocess.run([sys.executable, "-c", WATCH_INPROC, "table", str(ROOT)], capture_output=True, env=env).stdout)
-    assert t["bad"] == [] and set(t["runners"]) == {"claude", "codex", "hermes"}, t
+    assert t["bad"] == [] and set(t["runners"]) == {"claude", "codex", "hermes", "orquestrador"}, t
     forbidden = re.compile(r"python|\ba2a \*|git push|git merge|git -C|git rebase|git reset|git checkout|git switch|git branch -D|"
                            r"git clean|bypassPermissions|danger-full-access|--yolo|dangerously", re.I)
     for ag, rr in t["runners"].items():
@@ -2229,6 +2270,10 @@ def watch_fase():
     assert t["runners"]["claude"]["mode"] == "dontAsk" and "--permission-mode" in t["runners"]["claude"]["argv"], t
     assert t["runners"]["codex"]["argv"] == ["exec", "--json", "-s", "workspace-write", "-C", "{worktree}", "--add-dir", "{a2a_home}", "-"], t
     assert t["runners"]["hermes"]["enabled"] is False and t["runners"]["claude"]["enabled"] and t["runners"]["codex"]["enabled"], t
+    # etapa 11: orquestrador roda com o claude por baixo, mas so leitura + a2a send/brief/read/status/fact
+    oallow = t["runners"]["orquestrador"]["allow"]
+    assert t["runners"]["orquestrador"]["enabled"] and t["runners"]["orquestrador"]["mode"] == "dontAsk", t
+    assert "Edit" not in oallow and "Write" not in oallow and not any("mission" in x or "git" in x for x in oallow), oallow
     r, _, _ = rows("--agent", "claude", mode="bad", code=1)
     assert r[("dove", "tabela")][0] == "ERRO" and "Bash(python *)" in r[("dove", "tabela")][1] and "Bash(git push *)" in r[("dove", "tabela")][1], r
     tb = json.loads(subprocess.run([sys.executable, "-c", WATCH_INPROC, "table-bad2", str(ROOT)], capture_output=True, env=env).stdout)
@@ -2241,14 +2286,17 @@ def watch_fase():
     assert open(spy, encoding="utf-8").read() == before, "--show-command nao pode executar nada"
     lines = out.splitlines()
     cl = next(l for l in lines if l.startswith("claude "))
-    assert cl.startswith("claude -p --output-format json --permission-mode dontAsk --permission-prompts none --max-turns 30 --allowedTools "), cl
+    assert cl.startswith("claude -p --output-format stream-json --verbose --permission-mode dontAsk --permission-prompts "
+                        "none --allowedTools "), cl
+    assert "--max-turns 30 --max-budget-usd <run_budget_cap> --session-id <run_id>" in cl, cl
     assert "Bash(git diff *)" in cl and "PowerShell(a2a mission approve *)" in cl and "python" not in cl and "--bare" not in cl, cl
     assert f"# claude · pasta: {wt} · stdin:" in out and "# codex · pasta: <copia de codex>" in out, out
     cx = next(l for l in lines if l.startswith("codex "))
     assert cx.startswith("codex exec --json -s workspace-write -C ") and "--add-dir" in cx and home in cx and cx.endswith(" -"), cx
     assert "# hermes (desabilitado ate o Luiz confirmar)" in out and any(l.startswith("hermes chat --oneshot") for l in lines), out
     j = json.loads(check("--show-command", "--json", "--agent", "claude", code=0)[0])
-    assert j["commands"][0]["argv"][:2] == ["claude", "-p"] and j["commands"][0]["argv"][-1] == ",".join(allow), j
+    cargv = j["commands"][0]["argv"]
+    assert cargv[:2] == ["claude", "-p"] and cargv[cargv.index("--allowedTools") + 1] == ",".join(allow), j
     assert open(spy, encoding="utf-8").read() == before
     # 8) espiao: nada alem de --version, --help e auth status
     calls = [json.loads(l) for l in open(spy, encoding="utf-8") if l.strip()]
@@ -2310,10 +2358,11 @@ def plan_fase():
             ps = [{"name": "lagu", "path": self.lagu, "worktrees": {"claude": {"path": self.wt, "branch": "dove/claude", "base": "main"}} if wt else {}},
                   {"name": "dove", "path": self.lagu + "d", "worktrees": {"claude": {"path": self.wt, "branch": "dove/claude", "base": "main"}}}]
             if projects: json.dump(ps, open(os.path.join(self.home, "projects.json"), "w"))
-        def msg(self, frm, to, off, kind="task", project="lagu", reply="", task="", body=None, state=""):
+        def msg(self, frm, to, off, kind="task", project="lagu", reply="", task="", body=None, state="", assignee=""):
             mid = uuid.uuid4().hex[:12]; ts = iso(B + off)
             m = {"data": ts, "task_id": task, "msg_id": mid, "from": frm, "to": to, "project": project, "in_reply_to": reply,
                  "kind": kind, "state": state, "result": "", "evidence": "", "pending": "", "next_action": "", "body": body or f"{kind} {mid}"}
+            if assignee: m["assignee"] = assignee
             json.dump(m, open(os.path.join(self.home, "bus", ts.replace(":", "").replace("-", "") + "-" + mid + ".json"), "w"))
             time.sleep(0.002)  # mtime desempata mensagens no mesmo segundo
             return mid
@@ -2380,16 +2429,22 @@ def plan_fase():
     h = H(); h.msg("luiz", "claude", 0); h.msg("luiz", "codex", 0); h.msg("luiz", "hermes", 0)
     h.msg("luiz", "claude", 0, project=""); h.msg("luiz", "claude", 0, project="naoreg")
     r = h.plan(200)
-    assert r[("codex", "lagu")]["reason"] == "desabilitado (etapa 9)", r[("codex", "lagu")]
-    assert r[("hermes", "lagu")]["reason"] == "desabilitado (ate o Luiz confirmar)", r[("hermes", "lagu")]
+    assert r[("codex", "lagu")]["reason"] == "sem copia de trabalho (a2a worktree create)", r[("codex", "lagu")]
+    assert r[("hermes", "lagu")]["reason"] == "desabilitado (etapa 12: opt-in com a2a watch hermes --enable --from <humano>)", r[("hermes", "lagu")]
     assert r[("claude", "")]["reason"] == "sem projeto" and r[("claude", "naoreg")]["reason"].startswith("sem copia de trabalho (projeto nao registrado"), r
     assert "sem copia de trabalho (a2a worktree create)" in r[("codex", "lagu")]["reasons"], r[("codex", "lagu")]
     assert r[("claude", "lagu")]["action"] == "RODARIA"
+    # etapa 12: opt-in liga a elegibilidade do hermes no vigia (so falta a copia de trabalho, como o codex)
+    json.dump({"hermes_enabled": True}, open(os.path.join(h.home, "config.json"), "w"))
+    r2 = h.plan(200)
+    assert r2[("hermes", "lagu")]["reason"] == "sem copia de trabalho (a2a worktree create)", r2[("hermes", "lagu")]
+    os.remove(os.path.join(h.home, "config.json"))
     open(os.path.join(h.home, "STOP"), "w").close()
     r = h.plan(200); assert all(d["reason"].startswith("STOP presente") for d in r.values()), r
     os.remove(os.path.join(h.home, "STOP"))
     out = h.cli(200, "watch", "plan", "--verbose")
-    assert "ESPERA codex lagu desabilitado (etapa 9)\n" in out and "  motivos: desabilitado (etapa 9); sem copia de trabalho (a2a worktree create)" in out, out
+    assert "ESPERA codex lagu sem copia de trabalho (a2a worktree create)\n" in out and \
+           "  motivos: sem copia de trabalho (a2a worktree create)" in out, out
     assert "ESPERA claude - sem projeto" in out and "plano: 1 rodaria, 4 espera" in out, out
     hw = H(wt=False); hw.msg("luiz", "claude", 0)
     assert hw.plan(200)[("claude", "lagu")]["reason"] == "sem copia de trabalho (a2a worktree create)"
@@ -2455,20 +2510,54 @@ def plan_fase():
     assert json.load(open(calls_f)) == [["git", "status", "--porcelain"]], json.load(open(calls_f))
     d = h.plan(200)[("claude", "lagu")]  # sem --check-git: nao confere (e nao roda nada)
     assert d["action"] == "RODARIA" and d["git"].startswith("nao verificada") and json.load(open(calls_f)) == [], d
-    # 9) a2a watch sem --dry-run: executor real ainda nao existe (sai 2, nada roda); --dry-run sem --once tambem sai 2
-    out = h.cli(200, "watch", code=2); assert "executor real ainda nao habilitado (etapa 7)" in out and json.load(open(calls_f)) == [], out
-    assert "executor real ainda nao habilitado (etapa 7)" in h.cli(200, "watch", "--once", code=2)
+    # 9) a2a watch sem --once/--dry-run: vigia continuo ainda nao existe (sai 2, nada roda); --dry-run sem --once idem;
+    #    --once de verdade sem --from: recusa (so o humano; etapa 7 - executor real tem teste proprio em watch_real_fase)
+    out = h.cli(200, "watch", code=2); assert "vigia continuo ainda nao existe" in out and json.load(open(calls_f)) == [], out
+    assert "so o humano" in h.cli(200, "watch", "--once", code=1) and json.load(open(calls_f)) == []
     assert "--dry-run --once" in h.cli(200, "watch", "--dry-run", code=2)
     hp = run(h.env, "watch", "plan", "--help").stdout
     assert "exemplos:\n" in hp and "--check-git" in hp and "sessao interativa" in hp, hp
     assert "a2a watch --dry-run --once" in run(h.env, "watch", "--help").stdout
+    # 10) assignee (etapa 14): com responsavel definido (missao ou tarefa avulsa), so ele e acionado; sem o campo, como hoje
+    h = H()
+    json.dump({"id": "m10", "created_by": "luiz", "agents": ["claude", "codex"], "assignee": "claude"},
+              open(os.path.join(h.home, "missions", "m10.json"), "w"))
+    h.msg("luiz", "claude", 0, task="m10"); h.msg("luiz", "codex", 0, task="m10")
+    r = h.plan(5)
+    assert ("claude", "lagu") in r and r[("claude", "lagu")]["action"] != "NADA", r
+    assert ("codex", "lagu") not in r, r  # filtrado: nao e o responsavel da missao
+    h2 = H()
+    json.dump({"id": "m11", "created_by": "luiz", "agents": ["claude", "codex"]},
+              open(os.path.join(h2.home, "missions", "m11.json"), "w"))
+    h2.msg("luiz", "claude", 0, task="m11"); h2.msg("luiz", "codex", 0, task="m11")
+    r2 = h2.plan(5)
+    assert ("claude", "lagu") in r2 and ("codex", "lagu") in r2, r2  # sem assignee: os dois continuam acionaveis
+    h3 = H(); h3.msg("luiz", "all", 0, kind="task", assignee="codex")
+    r3 = h3.plan(5)
+    assert ("codex", "lagu") in r3 and r3[("codex", "lagu")]["action"] != "NADA", r3
+    assert ("claude", "lagu") not in r3 and ("hermes", "lagu") not in r3, r3  # tarefa avulsa (--to all --assignee codex)
+    # 11) orquestrador (etapa 11): nao registrado, nunca aparece (como qualquer agente desconhecido); registrado, tem
+    # copia propria (run/orquestrador-home) e nunca "sem copia de trabalho" nem "sem projeto"
+    h = H()
+    h.msg("luiz", "orquestrador", 0)
+    assert ("orquestrador", "lagu") not in h.plan(200), h.plan(200)  # nao registrado: nem aparece
+    open(os.path.join(h.home, "agents", "orquestrador"), "w").close()
+    d = h.plan(200)[("orquestrador", "lagu")]
+    assert d["action"] == "RODARIA" and "orquestrador-home" in d["worktree"], d
+    h4 = H(); h4.msg("luiz", "orquestrador", 0, project="")
+    open(os.path.join(h4.home, "agents", "orquestrador"), "w").close()
+    d4 = h4.plan(200)[("orquestrador", "")]
+    assert d4["action"] == "RODARIA" and "orquestrador-home" in d4["worktree"], d4  # sem projeto, ainda tem pasta propria
     print("OK: a2a watch plan (debounce 90s/silencio 30s, uma execucao por agente+projeto, origem humana, report como resposta, "
           "ja acionadas, STOP, desabilitados, sem projeto/copia, sessao interativa, trava, loop, filtros, JSON, --dry-run --once, "
-          "so leitura, nenhum processo; --check-git so git status --porcelain; watch real sai 2)")
+          "so leitura, nenhum processo; --check-git so git status --porcelain; watch real sai 2; assignee (etapa 14) restringe "
+          "o acionamento ao responsavel da missao/tarefa, sem ele continua acionando todo participante; orquestrador (etapa 11) "
+          "so acorda se registrado e sempre tem copia propria, mesmo sem projeto)")
 
 def seguranca_fase():
     """Fase 3, passos 0 e 1: so o humano conclui missao, --from obrigatorio, vigia reservado, human_name(),
-    execucao automatica (A2A_RUNNER) nunca age como humano, run_id no status."""
+    execucao automatica (A2A_RUNNER) nunca age como humano, run_id no status; passo 11: orquestrador nunca
+    vota/aprova/conclui missao nem faz archive/worktree (so propoe e manda mensagem)."""
     tmp = tempfile.mkdtemp()
     env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8", HOME=tmp, CLAUDE_CONFIG_DIR=os.path.join(tmp, ".claude"),
                CODEX_HOME=os.path.join(tmp, ".codex"), HERMES_HOME=os.path.join(tmp, ".hermes"))
@@ -2477,10 +2566,23 @@ def seguranca_fase():
         r = run(e or env, *args); assert r.returncode == code, (args, r.returncode, r.stdout, r.stderr); return r.stdout + r.stderr
     st = lambda a: json.load(open(os.path.join(tmp, "status", a + ".json"), encoding="utf-8"))
     for ag in ("claude", "codex"): a2a("join", "--agent", ag)
-    # vigia e reservado (join e painel usam o mesmo check); orquestrador continua livre por enquanto
+    # vigia e reservado (join e painel usam o mesmo check); orquestrador e um agente comum (join/leave livres)
     assert "reservado" in a2a("join", "--agent", "vigia", code=1)
     assert not os.path.exists(os.path.join(tmp, "agents", "vigia"))
-    a2a("join", "--agent", "orquestrador"); a2a("leave", "--agent", "orquestrador")
+    a2a("join", "--agent", "orquestrador")
+    # etapa 11: orquestrador nunca vota/aprova/conclui missao nem faz archive/worktree - so propoe e manda mensagem
+    mo = a2a("mission", "new", "--project", "p", "--title", "Orq", "--agents", "claude,orquestrador", "--from", "luiz").split()[1]
+    for c in (("mission", "approve", mo, "--agent", "orquestrador", "--evidence", "ok"),
+              ("mission", "reject", mo, "--agent", "orquestrador", "--reason", "nao")):
+        assert "'orquestrador' nao aprova nem reprova missao (etapa 11)" in a2a(*c, code=1)
+    a2a("mission", "approve", mo, "--agent", "claude", "--evidence", "ok")  # outro participante segue livre
+    assert "so o humano" in a2a("mission", "done", mo, "--from", "orquestrador", code=1)
+    assert "so o humano" in a2a("archive", "--from", "orquestrador", "--dry-run", code=1)
+    assert "so o humano" in a2a("worktree", "create", "--project", "p", "--agent", "claude", "--from", "orquestrador", code=1)
+    sent = a2a("send", "--from", "orquestrador", "--to", "claude", "--project", "p", "--body", "encaminhando").split()[1]
+    assert "encaminhando" in a2a("brief", "--agent", "claude")  # send/brief seguem livres (etapa 11)
+    a2a("ack", sent, "--from", "claude")
+    a2a("leave", "--agent", "orquestrador")
     # --from obrigatorio em mission new/done
     a2a("mission", "new", "--project", "p", "--title", "t", code=2); a2a("mission", "done", "m0000000", code=2)
     mid = a2a("mission", "new", "--project", "p", "--title", "Seg", "--agents", "claude,codex", "--from", "luiz").split()[1]
@@ -2539,7 +2641,8 @@ def seguranca_fase():
     a2a("status", "--agent", "codex", "--context", "50")
     s4 = st("codex"); assert "run_id" not in s4 and s4["note"] == "n3" and s4["context"] == 50 and s4["model"] == "gpt-5", s4
     print("OK: seguranca (mission done so humano, --from obrigatorio, vigia reservado, human_name, A2A_RUNNER recusa "
-          "acoes do humano com exit 2 e deixa agentes trabalharem, run_id no status)")
+          "acoes do humano com exit 2 e deixa agentes trabalharem, run_id no status; orquestrador (etapa 11) nunca "
+          "vota/aprova/conclui missao nem archive/worktree, so propoe e manda mensagem)")
 
 def cost_fase():
     """a2a cost: fixtures do Claude (dedup, varios modelos, projeto e copia), do Codex (token_count e
@@ -2551,9 +2654,9 @@ def cost_fase():
     hermes = os.path.join(tmp, "hermes")
     lagu = os.path.join(tmp, "lagu"); wt_claude = lagu + "-claude"; wt_codex = lagu + "-codex"
     for d in (lagu, wt_claude, wt_codex): os.makedirs(d)
-    env = dict(os.environ, A2A_HOME=home, CLAUDE_CONFIG_DIR=claude, CODEX_HOME=codex, HERMES_HOME=hermes)
+    env = dict(os.environ, A2A_HOME=home, PYTHONIOENCODING="utf-8", CLAUDE_CONFIG_DIR=claude, CODEX_HOME=codex, HERMES_HOME=hermes)
     def a2a(*args, code=0):
-        r = subprocess.run([sys.executable, str(A2A), *args], capture_output=True, text=True, env=env)
+        r = subprocess.run([sys.executable, str(A2A), *args], capture_output=True, text=True, encoding="utf-8", env=env)
         assert r.returncode == code, (args, r.returncode, r.stdout, r.stderr)
         return r.stdout + r.stderr
     a2a("init"); a2a("join", "--agent", "claude"); a2a("join", "--agent", "codex")
@@ -2720,9 +2823,9 @@ def cost_fase():
     assert snap() == before, "a2a cost alterou os registros das CLIs"
     # sem nenhuma fonte: nao quebra
     env2 = dict(env, CLAUDE_CONFIG_DIR=os.path.join(tmp, "x1"), CODEX_HOME=os.path.join(tmp, "x2"), HERMES_HOME=os.path.join(tmp, "x3"))
-    r = subprocess.run([sys.executable, str(A2A), "cost"], capture_output=True, text=True, env=env2)
+    r = subprocess.run([sys.executable, str(A2A), "cost"], capture_output=True, text=True, encoding="utf-8", env=env2)
     assert r.returncode == 0 and "(nenhum uso encontrado no periodo)" in r.stdout and "claude nao encontrado" in r.stdout, r.stdout
-    hp = subprocess.run([sys.executable, str(A2A), "cost", "--help"], capture_output=True, text=True, env=env).stdout
+    hp = subprocess.run([sys.executable, str(A2A), "cost", "--help"], capture_output=True, text=True, encoding="utf-8", env=env).stdout
     assert "exemplos:\n" in hp and "a2a cost --mission" in hp and "mode=ro" in hp, hp
     assert "a2a cost" in a2a("onboard", "--agent", "claude") and "a2a cost" not in a2a("onboard", "--agents-md")
     print("OK: a2a cost (Claude com dedup/cost-state/costUSD, Codex token_count e token_usage_record, Hermes state.db ro, "
@@ -2796,8 +2899,8 @@ def supervisor_fase():
     posix = os.name != "nt"
     def drive(mode, arg=None, e=None, bg=False):
         cmd = [sys.executable, drv, str(ROOT), mode] + ([json.dumps(arg)] if arg is not None else [])
-        if bg: return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=e or env)
-        r = subprocess.run(cmd, capture_output=True, text=True, env=e or env)
+        if bg: return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=e or env)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", env=e or env)
         assert r.stdout.strip(), (mode, arg, r.returncode, r.stderr)
         return json.loads(r.stdout.strip().splitlines()[-1]), r.returncode
     def job(agent="claude", fm="ok", **kw):
@@ -2823,14 +2926,32 @@ def supervisor_fase():
         return False
     a2a = lambda *a, e=None: run(e or env, *a)
 
-    # executor: override so com A2A_TESTING=1; sem ele, recusa (nunca cai num executor real)
+    # executor: override so com A2A_TESTING=1; sem ele, hermes continua recusado (so claude, etapa 7, resolve pra
+    # valer - mas "resolve" so monta o argv, nunca executa nada)
     for e in (dict(base, A2A_HOME=tmp, A2A_RUNNER_OVERRIDE=fake), dict(base, A2A_HOME=tmp, A2A_TESTING="1"),
               dict(base, A2A_HOME=tmp, A2A_RUNNER_OVERRIDE=fake, A2A_TESTING="0")):
-        out, rc = drive("resolve", {"agent": "claude"}, e)
+        out, rc = drive("resolve", {"agent": "hermes"}, e)
         assert rc == 1 and "executor real ainda nao habilitado" in out["error"], out
-    out, rc = drive("resolve", {"agent": "claude"})
+    # stubs de claude/codex/hermes no PATH (nunca executados: "resolve" so monta o argv) para o "resolve pra valer"
+    # nao depender de ter esses binarios de verdade instalados na maquina que roda o teste
+    stubbin = os.path.join(work, "stubbin"); os.makedirs(stubbin, exist_ok=True)
+    for name in ("claude", "codex", "hermes"):
+        if os.name == "nt": open(os.path.join(stubbin, name + ".cmd"), "w").write("@echo stub\n")
+        else:
+            p = os.path.join(stubbin, name); open(p, "w").write("#!/bin/sh\necho stub\n"); os.chmod(p, 0o755)
+    noov = dict(base, A2A_HOME=tmp, PYTHONIOENCODING="utf-8", PATH=stubbin + os.pathsep + base.get("PATH", ""))
+    out, rc = drive("resolve", {"agent": "claude"}, noov)
+    assert rc == 0 and out != [sys.executable, fake] and "claude" in " ".join(out).lower(), out
+    out, rc = drive("resolve", {"agent": "codex"}, noov)  # etapa 9: codex tambem resolve pra valer
+    joined = " ".join(out).lower()
+    assert rc == 0 and out != [sys.executable, fake] and "codex" in joined and "workspace-write" in joined, out
+    out, rc = drive("resolve", {"agent": "orquestrador"}, noov)  # etapa 11: idem, com o claude por baixo
+    joined = " ".join(out).lower()
+    assert rc == 0 and out != [sys.executable, fake] and "claude" in joined and "--allowedtools" in joined, out
+    out, rc = drive("resolve", {"agent": "claude"})  # com A2A_TESTING=1 + override: nunca o claude de verdade
     assert rc == 0 and out == [sys.executable, fake], out
-    print("OK: vigia - A2A_RUNNER_OVERRIDE so com A2A_TESTING=1; sem ele 'executor real ainda nao habilitado'")
+    print("OK: vigia - A2A_RUNNER_OVERRIDE so com A2A_TESTING=1; sem ele, claude (etapa 7), codex (etapa 9) e "
+          "orquestrador (etapa 11) resolvem pra valer (so monta o argv); hermes continua recusado")
 
     # execucao normal: env do vigia visivel ao filho, stdin = prompt, stdout em arquivo, registro com redacao
     prompt = "faca a tarefa X com cuidado e responda pelo canal"
@@ -2918,6 +3039,27 @@ def supervisor_fase():
     a2a("watch", "resume", "--from", "luiz")
     print("OK: vigia - STOP presente recusa (registro refused); STOP criado no meio para a execucao; stop/resume so do humano "
           "e recusados (codigo 2) sob A2A_RUNNER")
+
+    # etapa 12: opt-in do hermes no vigia - desligado por padrao, so o humano, recusado sob A2A_RUNNER
+    cfg = os.path.join(tmp, "config.json")
+    r = a2a("watch", "hermes", "--enable", "--from", "codex")
+    assert r.returncode == 1 and "so o humano" in r.stderr, r.stderr
+    assert not os.path.exists(cfg) or not json.load(open(cfg)).get("hermes_enabled")
+    r = a2a("watch", "hermes", "--enable", "--from", "luiz", e=renv)
+    assert r.returncode == 2 and "A2A_RUNNER" in r.stderr, r.stderr
+    assert not os.path.exists(cfg) or not json.load(open(cfg)).get("hermes_enabled")
+    r = a2a("watch", "hermes", "--enable", "--from", "luiz")
+    assert r.returncode == 0 and "ligado" in r.stdout, r
+    assert json.load(open(cfg))["hermes_enabled"] is True
+    out, rc = drive("resolve", {"agent": "hermes"}, noov)
+    assert rc == 0 and out != [sys.executable, fake] and "hermes" in " ".join(out).lower(), out
+    r = a2a("watch", "hermes", "--disable", "--from", "luiz")
+    assert r.returncode == 0 and "desligado" in r.stdout, r
+    assert json.load(open(cfg))["hermes_enabled"] is False
+    out, rc = drive("resolve", {"agent": "hermes"}, noov)
+    assert rc == 1 and "executor real ainda nao habilitado" in out["error"], out
+    print("OK: vigia - opt-in do hermes (etapa 12): desligado por padrao, so o humano liga/desliga, recusado sob "
+          "A2A_RUNNER, e muda o resolve_runner (hermes recusado -> resolve pra valer -> recusado de novo) na hora")
 
     # trava por agente: segunda execucao do mesmo agente recusada; outro agente roda; watch stop --kill derruba ja
     p = drive("run", job(fm="stubborn", timeout=60, grace=30), bg=True)
@@ -3146,6 +3288,99 @@ try:
 except a2a.DoveError as e:
     print(json.dumps({"error": str(e)})); sys.exit(1)
 """
+def assignee_fase():
+    """Responsavel unico (assignee) em missoes e tarefas (etapa 14): opcional, precisa ser participante registrado
+    (nao o humano, nao reservado); so ele marca EM_EXECUCAO/AGUARDANDO_APROVACAO (por --task ou por --reply-to); o
+    humano sempre pode; os demais participantes seguem comentando/revisando (outros estados e aval de missao livres);
+    sem o campo, nada muda. O filtro do vigia (etapa 7) tem teste proprio em plan_fase."""
+    import glob
+    tmp = tempfile.mkdtemp(); env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8")
+    assert run(env, "init").returncode == 0
+    for ag in ("claude", "codex", "hermes"): run(env, "join", "--agent", ag)
+
+    # mission new: assignee fora dos participantes -> erro, nada gravado (nem missao nem mensagem)
+    r = run(env, "mission", "new", "--project", "lagu", "--title", "t1", "--agents", "claude,codex",
+            "--assignee", "hermes", "--from", "luiz")
+    assert r.returncode == 1 and "assignee" in r.stderr and "participantes" in r.stderr, r.stderr
+    assert not glob.glob(os.path.join(tmp, "missions", "*.json")) and not glob.glob(os.path.join(tmp, "bus", "*.json")), \
+        "assignee invalido nao pode deixar rastro"
+    # assignee == humano -> erro
+    r = run(env, "mission", "new", "--project", "lagu", "--title", "t2", "--agents", "claude,codex",
+            "--assignee", "luiz", "--from", "luiz")
+    assert r.returncode == 1 and "humano" in r.stderr, r.stderr
+
+    # ok: assignee participante -> grava e aparece no criar/mostrar
+    r = run(env, "mission", "new", "--project", "lagu", "--title", "t3", "--agents", "claude,codex",
+            "--assignee", "claude", "--from", "luiz")
+    assert r.returncode == 0 and "responsavel: claude" in r.stdout, r.stdout
+    mid = r.stdout.split()[1]
+    assert "responsavel: claude" in run(env, "mission", "show", mid).stdout
+
+    # sem --assignee: nada aparece e nada muda (compat)
+    r0 = run(env, "mission", "new", "--project", "lagu", "--title", "t0", "--agents", "claude,codex", "--from", "luiz")
+    assert r0.returncode == 0 and "responsavel:" not in r0.stdout, r0.stdout
+    mid0 = r0.stdout.split()[1]
+    assert "responsavel:" not in run(env, "mission", "show", mid0).stdout
+
+    # estado restrito por --task: so o assignee da missao marca EM_EXECUCAO/AGUARDANDO_APROVACAO
+    r = run(env, "send", "--from", "codex", "--to", "claude", "--project", "lagu", "--kind", "report",
+            "--task", mid, "--state", "EM_EXECUCAO", "--body", "eu cuido")
+    assert r.returncode == 1 and "responsavel ('claude')" in r.stderr, r.stderr
+    r = run(env, "send", "--from", "claude", "--to", "codex", "--project", "lagu", "--kind", "report",
+            "--task", mid, "--state", "EM_EXECUCAO", "--body", "comecando")
+    assert r.returncode == 0, r.stderr
+    r = run(env, "send", "--from", "codex", "--to", "claude", "--project", "lagu", "--kind", "report",
+            "--task", mid, "--state", "AGUARDANDO_APROVACAO", "--body", "pedindo aval")
+    assert r.returncode == 1, r.stderr
+
+    # nao-assignee segue comentando/revisando: outros estados e aval de missao continuam livres
+    r = run(env, "send", "--from", "codex", "--to", "claude", "--project", "lagu", "--kind", "report",
+            "--task", mid, "--state", "CONCLUIDO", "--body", "revisei, parece ok")
+    assert r.returncode == 0, r.stderr
+    assert run(env, "mission", "reject", mid, "--agent", "codex", "--reason", "falta um teste").returncode == 0
+
+    # o humano sempre pode, mesmo sem ser o assignee
+    r = run(env, "send", "--from", "luiz", "--to", "codex", "--project", "lagu", "--kind", "report",
+            "--task", mid, "--state", "EM_EXECUCAO", "--body", "retomando eu mesmo")
+    assert r.returncode == 0, r.stderr
+
+    # por --reply-to (sem --task): a restricao segue o assignee da mensagem respondida
+    r = run(env, "send", "--from", "claude", "--to", "codex", "--project", "lagu", "--kind", "task",
+            "--assignee", "codex", "--body", "revisar modulo Y")
+    assert r.returncode == 0, r.stderr
+    tmsg = r.stdout.split()[1]
+    r = run(env, "send", "--from", "hermes", "--to", "claude", "--project", "lagu", "--kind", "report",
+            "--reply-to", tmsg, "--state", "EM_EXECUCAO", "--body", "eu assumo")
+    assert r.returncode == 1 and "responsavel ('codex')" in r.stderr, r.stderr
+    r = run(env, "send", "--from", "codex", "--to", "claude", "--project", "lagu", "--kind", "report",
+            "--reply-to", tmsg, "--state", "EM_EXECUCAO", "--body", "comecando")
+    assert r.returncode == 0, r.stderr
+
+    # --assignee do send: so com kind=task, precisa ser registrado e casar com --to (ou --to all)
+    r = run(env, "send", "--from", "luiz", "--to", "codex", "--project", "lagu", "--kind", "report",
+            "--assignee", "codex", "--body", "x")
+    assert r.returncode == 1 and "--kind task" in r.stderr, r.stderr
+    r = run(env, "send", "--from", "luiz", "--to", "codex", "--project", "lagu", "--kind", "task",
+            "--assignee", "fantasma", "--body", "x")
+    assert r.returncode == 1 and "nao esta registrado" in r.stderr, r.stderr
+    r = run(env, "send", "--from", "luiz", "--to", "codex", "--project", "lagu", "--kind", "task",
+            "--assignee", "claude", "--body", "x")
+    assert r.returncode == 1 and "precisa ser o destinatario" in r.stderr, r.stderr
+    assert run(env, "send", "--from", "luiz", "--to", "all", "--project", "lagu", "--kind", "task",
+               "--assignee", "codex", "--body", "aviso geral").returncode == 0
+
+    # sem assignee em lugar nenhum: qualquer participante marca os estados restritos (comportamento de sempre)
+    r = run(env, "mission", "new", "--project", "lagu", "--title", "t4", "--agents", "claude,codex", "--from", "luiz")
+    mid4 = r.stdout.split()[1]
+    for who in ("claude", "codex"):
+        r = run(env, "send", "--from", who, "--to", "luiz", "--project", "lagu", "--kind", "report",
+                "--task", mid4, "--state", "EM_EXECUCAO", "--body", f"{who} cuidando")
+        assert r.returncode == 0, (who, r.stderr)
+    print("OK: assignee (etapa 14) - missao/tarefa com responsavel opcional (precisa ser participante registrado, nao "
+          "o humano, nao reservado; invalido nao grava nada), so ele marca EM_EXECUCAO/AGUARDANDO_APROVACAO (por --task "
+          "ou --reply-to), humano sempre pode, demais participantes seguem comentando/revisando (outros estados e aval "
+          "de missao livres), --assignee do send so com kind=task e precisa casar com --to (ou --to all), sem o campo "
+          "nada muda")
 def budget_fase():
     """Etapa 8 da Fase 3: consumo por execucao (claude json/stream-json/parado, codex exec --json cumulativo, hermes
     --usage-file), watch usage grava no registro, orcamento de missao e de projeto/dia so do humano, budget_status com
@@ -3162,11 +3397,11 @@ def budget_fase():
                HERMES_HOME=os.path.join(tmp, "hermes"))
     renv = dict(env, A2A_RUNNER="watch")
     def a2a(*args, code=0, e=None):
-        r = subprocess.run([sys.executable, str(A2A), *args], capture_output=True, text=True, env=e or env)
+        r = subprocess.run([sys.executable, str(A2A), *args], capture_output=True, text=True, encoding="utf-8", env=e or env)
         assert r.returncode == code, (args, r.returncode, r.stdout, r.stderr)
         return r.stdout + r.stderr
     def drive(mode, arg, code=0):
-        r = subprocess.run([sys.executable, drv, str(ROOT), mode, json.dumps(arg)], capture_output=True, text=True, env=env)
+        r = subprocess.run([sys.executable, drv, str(ROOT), mode, json.dumps(arg)], capture_output=True, text=True, encoding="utf-8", env=env)
         assert r.returncode == code and r.stdout.strip(), (mode, arg, r.returncode, r.stdout, r.stderr)
         return json.loads(r.stdout.strip().splitlines()[-1])
     a2a("init"); a2a("join", "--agent", "claude"); a2a("join", "--agent", "codex"); a2a("join", "--agent", "hermes")
@@ -3392,3 +3627,4 @@ if __name__ == "__main__":
     supervisor_fase()
     models_fase()
     budget_fase()
+    assignee_fase()

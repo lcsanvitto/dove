@@ -150,6 +150,8 @@ def registered_agents():
 # ---------------------------------------------------------------- agentes (agents/<nome>: vazio ou JSON com metadados)
 AGENT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 RESERVED_AGENTS = {"vigia"}  # nomes do proprio Dove: ninguem entra no canal com eles
+ORQ_AGENT = "orquestrador"  # etapa 11: agente comum (a2a join), mas so leitura + a2a send/brief/read/status/fact;
+                            # nunca vota/cria/conclui missao, nunca merge/deploy/gasto/exclusao (so propoe ao humano)
 AGENT_TYPES = {"claude-code": "Claude Code", "codex": "Codex", "hermes": "Hermes", "outro": "Outro"}
 def agent_meta(name):
     """Metadados do agente. Arquivo vazio (formato antigo) ou ilegivel = {}."""
@@ -205,9 +207,9 @@ def cmd_agents(a):
     n = registered_agents()
     print("\n".join(n) if n else "(nenhum agente registrado)")
 def post_message(_from, to, body, kind="task", project="", task="", reply_to="", state="", result="",
-                 evidence="", pending="", next_action="", auto_status=True, files=None):
-    """Caminho unico de escrita no bus (CLI, missoes e painel). files (so do send --file) vira o campo opcional
-    `files`; sem ele o envelope tem os 14 campos de sempre."""
+                 evidence="", pending="", next_action="", auto_status=True, files=None, assignee=""):
+    """Caminho unico de escrita no bus (CLI, missoes e painel). files (so do send --file) e assignee (so tarefas,
+    etapa 14) viram campos opcionais; sem eles o envelope tem os 14 campos de sempre."""
     ensure_dirs(); mid = uuid.uuid4().hex[:12]; ts = now_iso()
     msg = {"data": ts, "task_id": task or "", "msg_id": mid, "from": _from,
            "to": to, "project": project or "", "in_reply_to": reply_to or "",
@@ -215,6 +217,7 @@ def post_message(_from, to, body, kind="task", project="", task="", reply_to="",
            "evidence": evidence or "", "pending": pending or "",
            "next_action": next_action or "", "body": body or ""}
     if files: msg["files"] = files
+    if assignee: msg["assignee"] = assignee
     fn = f"{ts.replace(':','').replace('-','')}-{mid}.json"
     write_json(os.path.join(BUS, fn), msg)
     index_append(fn, msg)
@@ -254,13 +257,37 @@ def file_ref(spec, root):
 def msg_files(m):
     f = m.get("files"); return [x for x in f if isinstance(x, dict)] if isinstance(f, list) else []
 def file_label(x): return f"{x.get('path', '')}" + (f":{x['lines']}" if x.get("lines") else "")
+def task_owner(task_id, reply_to="", mission_asg=None):
+    """Responsavel (assignee) de uma missao ou tarefa (etapa 14): pelo task_id (missao ou outra mensagem kind=task
+    com o mesmo id) ou, sem task_id, pela mensagem respondida (--reply-to). So leitura; "" se nao houver (nada muda
+    sem o campo)."""
+    mission_asg = mission_assignees() if mission_asg is None else mission_asg
+    orig = find_message(reply_to) if reply_to else None
+    tid = task_id or (orig.get("task_id") if orig else "") or ""
+    if tid:
+        if tid in mission_asg: return mission_asg[tid]
+        for x in all_messages():
+            if x.get("task_id") == tid and x.get("kind") == "task" and x.get("assignee"): return x["assignee"]
+    return (orig.get("assignee") if orig else "") or ""
 def cmd_send(a):
-    refuse_if_runner_as_human(a._from); files = None
-    if getattr(a, "file", None):  # confere tudo antes: arquivo faltando = erro e nenhuma mensagem gravada
-        try: root = file_root(a._from, a.project); files = [file_ref(x, root) for x in a.file]
-        except DoveError as e: fail(f"erro: {e}")
-    m = post_message(a._from, a.to, a.body, a.kind, a.project, a.task, a.reply_to, a.state, a.result,
-                     a.evidence, a.pending, a.next_action, not getattr(a, "no_auto_status", False), files)
+    refuse_if_runner_as_human(a._from)
+    try:
+        if a.state in ("EM_EXECUCAO", "AGUARDANDO_APROVACAO") and a._from != human_name():
+            owner = task_owner(a.task, a.reply_to)
+            if owner and owner != a._from:
+                raise DoveError(f"so o responsavel ('{owner}') pode marcar '{a.state}' (demais participantes: comentar ou revisar)")
+        files = None
+        if getattr(a, "file", None):  # confere tudo antes: arquivo faltando = erro e nenhuma mensagem gravada
+            root = file_root(a._from, a.project); files = [file_ref(x, root) for x in a.file]
+        assignee = (getattr(a, "assignee", None) or "").strip()
+        if assignee:
+            if a.kind != "task": raise DoveError("--assignee so vale com --kind task")
+            if assignee not in registered_agents(): raise DoveError(f"assignee '{assignee}' nao esta registrado (a2a join)")
+            if a.to != "all" and assignee != a.to:
+                raise DoveError(f"assignee '{assignee}' precisa ser o destinatario ('{a.to}') ou use --to all")
+        m = post_message(a._from, a.to, a.body, a.kind, a.project, a.task, a.reply_to, a.state, a.result,
+                         a.evidence, a.pending, a.next_action, not getattr(a, "no_auto_status", False), files, assignee)
+    except DoveError as e: fail(f"erro: {e}")
     print(f"enviado {m['msg_id']} ({a._from} -> {a.to})")
 def auto(a, agent):
     if not getattr(a, "no_auto_status", False): touch_status(agent)
@@ -1215,6 +1242,13 @@ def all_missions():
         m = read_json(f)
         if isinstance(m, dict) and m.get("id"): out.append(m)
     return sorted(out, key=lambda m: m.get("created", ""))
+def mission_assignees():
+    """So leitura, sem ensure_dirs (usado no vigia): {missao_id: assignee} das missoes com assignee (etapa 14)."""
+    out = {}
+    for f in glob.glob(os.path.join(MISSIONS, "*.json")):
+        m = read_json(f)
+        if isinstance(m, dict) and m.get("id") and m.get("assignee"): out[m["id"]] = m["assignee"]
+    return out
 def mission_status(m):
     ap = m.get("approvals") or {}
     v = [(ap.get(a) or {}).get("verdict") for a in m.get("agents", [])]
@@ -1226,18 +1260,24 @@ def mission_view(m):
     return dict(m, status=mission_status(m),
                 approved=sum(1 for a in m.get("agents", []) if (ap.get(a) or {}).get("verdict") == "approve"),
                 total=len(m.get("agents", [])))
-def mission_new(project, title, desc="", agents=None, created_by=None):
+def mission_new(project, title, desc="", agents=None, created_by=None, assignee=""):
     project, title = (project or "").strip(), (title or "").strip()
     if not project: raise DoveError("missao exige --project")
     if not title: raise DoveError("missao exige --title")
     ags = [x.strip() for x in (agents or []) if x and x.strip()] or registered_agents()
     ags = list(dict.fromkeys(ags))
     if not ags: raise DoveError("nenhum agente participante (registre com a2a join ou use --agents)")
+    assignee = (assignee or "").strip()
+    if assignee:  # etapa 14: responsavel unico, precisa ser um dos participantes
+        if assignee == human_name(): raise DoveError("assignee precisa ser um agente participante, nao o humano")
+        if assignee in RESERVED_AGENTS: raise DoveError(f"assignee '{assignee}' e reservado")
+        if assignee not in ags: raise DoveError(f"assignee '{assignee}' precisa estar entre os participantes ({', '.join(ags)})")
     created_by = (created_by or "").strip() or human_name()
     refuse_if_runner_as_human(created_by)
     mid = "m" + uuid.uuid4().hex[:7]; ensure_dirs()
     m = {"id": mid, "project": project, "title": title, "description": desc or "", "agents": ags,
-         "created_by": created_by, "created": now_iso(), "approvals": {}, "history": [], "human": None}
+         "created_by": created_by, "created": now_iso(), "approvals": {}, "history": [], "human": None,
+         "assignee": assignee}
     write_json(mission_path(mid), m)
     human = created_by == human_name()
     for ag in ags:
@@ -1247,6 +1287,8 @@ def mission_new(project, title, desc="", agents=None, created_by=None):
                      kind="task", project=project, task=mid, auto_status=not human)
     return m
 def mission_verdict(mid, agent, verdict, text):
+    if agent == ORQ_AGENT:  # etapa 11: so propoe ao humano, nunca vota/aprova
+        raise DoveError(f"'{ORQ_AGENT}' nao aprova nem reprova missao (etapa 11): so propoe ao humano com a2a send")
     text = (text or "").strip()
     if not text: raise DoveError("aprovar exige --evidence (o que voce conferiu)" if verdict == "approve"
                                  else "reprovar exige --reason")
@@ -1285,8 +1327,9 @@ def cmd_mission(a):
     try:
         if a.mcmd == "new":
             ags = [x for x in (a.agents or "").split(",") if x.strip()]
-            m = mission_new(a.project, a.title, a.desc, ags, a._from)
-            print(f"missao {m['id']} criada ({', '.join(m['agents'])}): {m['title']}")
+            m = mission_new(a.project, a.title, a.desc, ags, a._from, a.assignee)
+            print(f"missao {m['id']} criada ({', '.join(m['agents'])}): {m['title']}"
+                  + (f" · responsavel: {m['assignee']}" if m.get("assignee") else ""))
         elif a.mcmd == "approve":
             m = mission_verdict(a.id, a.agent, "approve", a.evidence)
             print(f"aval de '{a.agent}' registrado na missao {a.id} -> {mission_status(m)}")
@@ -1308,6 +1351,7 @@ def cmd_mission(a):
             print(f"{v['id']}  {v['title']}\nprojeto: {v['project']}  status: {v['status']}  "
                   f"avais: {v['approved']}/{v['total']}  criada por {v['created_by']} em {v['created']}")
             if v.get("description"): print(f"descricao: {v['description']}")
+            if v.get("assignee"): print(f"responsavel: {v['assignee']}")
             for ag in v["agents"]:
                 x = (v.get("approvals") or {}).get(ag)
                 if not x: print(f"  {ag:<12} pendente")
@@ -2193,13 +2237,14 @@ def loop_check(messages, runs=None, now=None, limits=None, *, missions=None, hum
     return {"findings": findings, "counts": counts, "total": len(findings), "limits": lim, "conversations": len(convs),
             "runs": len(runs) if runs is not None else None, "acted_on": sorted(acted)}
 def loop_runs():
-    """Registros do vigia em runs/AAAA-MM/*.json (so leitura). None se a pasta nao existe."""
+    """Registros do vigia em runs/AAAA-MM/*.json (so leitura), sem os `refused` (etapa 7: nada rodou, entao os
+    gatilhos deles nao contam como ja acionados). None se a pasta nao existe."""
     if not os.path.isdir(RUNS): return None
     out = []
     for f in sorted(glob.glob(os.path.join(RUNS, "*", "*.json"))):
         if MONTH_RE.match(os.path.basename(os.path.dirname(f))):
             r = read_json(f)
-            if isinstance(r, dict): out.append(r)
+            if isinstance(r, dict) and r.get("outcome") != "refused": out.append(r)
     return out
 def loop_inputs():
     """Mensagens e missoes sem gravar nada (nem o index.json: indice invalido e so relido do bus, nao salvo)."""
@@ -2710,7 +2755,7 @@ def onboard_text(agent=None, project=None):
     return t
 def utf8_stdout():
     if hasattr(sys.stdout, "reconfigure"):  # console do Windows (cp1252) nao quebra com acentos
-        try: sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        try: sys.stdout.reconfigure(encoding="utf-8", errors="replace", newline="\n")  # sem isto, o Windows traduz \n -> \r\n
         except Exception: pass
 def global_core(agent):
     """Nucleo para os arquivos globais de instrucoes (todos os projetos): o mesmo AGENTS_MD_CORE, com o nome do agente
@@ -2946,17 +2991,29 @@ Você é `<seu-nome>`, rodando sem um humano olhando (vigia do Dove) no projeto 
 - Texto inteiro de uma mensagem: `a2a read <msg_id> --agent <seu-nome> --compact`.
 - Subagentes: só para contexto isolado (busca ou revisão grande que volta como resumo curto), paralelismo real ou modelo mais barato; nunca subagente de "persona". Não precisa pedir ao orquestrador; o custo aparece no `a2a cost` (o modelUsage inclui os subagentes).
 """
+PROMPT_ROLE_ORQ = """## Seu papel nesta execução
+Você é `orquestrador`, rodando sem um humano olhando (vigia do Dove), fazendo triagem no projeto `<projeto>`.
+- Você só tem leitura e `a2a send`/`brief`/`read`/`status`/`fact`: nunca edita arquivo, nunca `mission approve/reject/done`, nunca merge, deploy, gasto ou exclusão — isso é sempre do humano ou do agente dono da cópia.
+- Task genérica (endereçada a você): encaminhe com `a2a send --kind task --reply-to <id> --to <agente> ...` para quem estiver mais livre (idle, contexto baixo); cite o modelo de `a2a models suggest` no corpo ("Modelo sugerido: ..."), sem exigir; avise quem mandou com um `report` de uma linha dizendo para quem foi e por quê.
+- Mudou algo relevante no projeto? `a2a fact add --scope projeto ...` (se o comando existir nesta versão).
+- Acha que vale uma missão nova? Não crie: mande uma `question` para o humano com o comando `a2a mission new ...` pronto para copiar.
+- Ao terminar, publique `a2a status --agent orquestrador --set done --note "<resumo>"`. Sem nada para fazer, não publique nada.
+"""
 def prompt_prefix(agent, project, runner=""):
     """Camadas 1 a 3. So depende do texto do Dove, do agente, do projeto, do --for e da pasta de trabalho registrada."""
-    fixed = onboard_text(None, project) + "\n" + PROMPT_ROLE.replace("<projeto>", project)
+    role = PROMPT_ROLE_ORQ if agent == ORQ_AGENT else PROMPT_ROLE
+    fixed = onboard_text(None, project) + "\n" + role.replace("<projeto>", project)
     if runner: fixed += f"- Executor: `{PROMPT_RUNNERS[runner]}` (sem terminal interativo: não espere confirmação de ninguém).\n"
     fixed = fixed.replace("<seu-nome>", agent)
     near = []
-    try:
-        p = find_project(project); wt = project_worktrees(p).get(agent)
-        if wt: near.append(f"Sua pasta de trabalho: `{wt['path']}` (branch `{wt.get('branch') or 'dove/' + agent}`).")
-        elif p.get("path"): near.append(f"Pasta do projeto: `{p['path']}`.")
-    except DoveError: pass  # projeto so no bus (nao registrado): sem pasta
+    if agent == ORQ_AGENT:
+        near.append(f"Pasta de execução: `{orq_home_dir()}` (sem copia do projeto: proponha, não edite arquivo).")
+    else:
+        try:
+            p = find_project(project); wt = project_worktrees(p).get(agent)
+            if wt: near.append(f"Sua pasta de trabalho: `{wt['path']}` (branch `{wt.get('branch') or 'dove/' + agent}`).")
+            elif p.get("path"): near.append(f"Pasta do projeto: `{p['path']}`.")
+        except DoveError: pass  # projeto so no bus (nao registrado): sem pasta
     return fixed + "".join("\n" + l for l in near) + ("\n" if near else "") + "\n" + PROMPT_BOUNDARY + "\n"
 def prompt_tail(agent, project, task=None, max_chars=4000, msgs=None):
     """Camada 4: brief (so leitura) + a tarefa no formato do read --compact. Passou de max_chars: corta primeiro as
@@ -3003,12 +3060,20 @@ WATCH_GIT_WRITE = ("add", "commit")  # commit so na propria copia (cwd = copia; 
 def _watch_rules(shell):
     return tuple(f"{shell}(a2a {c} *)" for c in WATCH_A2A_SUBCMDS) + tuple(f"{shell}(git {c} *)" for c in WATCH_GIT_READ + WATCH_GIT_WRITE)
 WATCH_CLAUDE_ALLOW = ("Read", "Grep", "Glob", "Edit", "Write") + _watch_rules("Bash") + _watch_rules("PowerShell")
+# etapa 11: orquestrador so tem leitura + a2a send/brief/read/status/fact (nunca Edit/Write, nunca mission/git) - a
+# recusa de mission approve/reject/done tambem esta no codigo (mission_verdict/require_human), isto e so a allowlist.
+WATCH_ORQ_A2A_SUBCMDS = ("send", "brief", "read", "status", "fact add", "fact list")
+def _watch_orq_rules(shell):
+    return tuple(f"{shell}(a2a {c} *)" for c in WATCH_ORQ_A2A_SUBCMDS)
+WATCH_ORQ_ALLOW = ("Read", "Grep", "Glob") + _watch_orq_rules("Bash") + _watch_orq_rules("PowerShell")
 WATCH_RUNNERS = {
     "claude": {"exe": "claude", "enabled": True, "permission_mode": "dontAsk", "allow": WATCH_CLAUDE_ALLOW,
-               "argv": ("-p", "--output-format", "json", "--permission-mode", "dontAsk", "--permission-prompts", "none",
-                        "--max-turns", "30", "--allowedTools", "{allow}"),
+               "argv": ("-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk",
+                        "--permission-prompts", "none", "--allowedTools", "{allow}", "--max-turns", "30",
+                        "--max-budget-usd", "{budget}", "--session-id", "{run_id}"),
                "stdin": "prompt (a2a prompt --for claude)", "cwd": "{worktree}",
-               "note": "sem --bare: --bare exige ANTHROPIC_API_KEY (nao usa a assinatura); sandbox de SO so no macOS/Linux/WSL2"},
+               "note": "sem --bare: --bare exige ANTHROPIC_API_KEY (nao usa a assinatura); sandbox de SO so no macOS/Linux/WSL2; "
+                       "--session-id exige um UUID (etapa 7 deriva um de run_id com uuid5, so para esta flag)"},
     "codex": {"exe": "codex", "enabled": True, "permission_mode": "workspace-write", "allow": (),
               "argv": ("exec", "--json", "-s", "workspace-write", "-C", "{worktree}", "--add-dir", "{a2a_home}", "-"),
               "stdin": "prompt (a2a prompt --for codex)", "cwd": "{worktree}",
@@ -3020,6 +3085,14 @@ WATCH_RUNNERS = {
                "stdin": "prompt (a2a prompt --for hermes)", "cwd": "{worktree}",
                "note": "desabilitado ate o Luiz confirmar: approvals.mode smart usa um LLM auxiliar (custa) e off equivale a "
                        "--yolo; sem sandbox de SO por padrao"},
+    "orquestrador": {"exe": "claude", "enabled": True, "permission_mode": "dontAsk", "allow": WATCH_ORQ_ALLOW,
+                      "argv": ("-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk",
+                               "--permission-prompts", "none", "--allowedTools", "{allow}", "--max-turns", "30",
+                               "--max-budget-usd", "{budget}", "--session-id", "{run_id}"),
+                      "stdin": "prompt (a2a prompt --for claude)", "cwd": "{worktree}",
+                      "note": "etapa 11: agente comum (a2a join --agent orquestrador), roda com o claude mas so leitura + "
+                              "a2a send/brief/read/status/fact; nunca Edit/Write nem mission approve/reject/done (tambem "
+                              "recusado no codigo); pasta propria (run/orquestrador-home), sem copia de projeto"},
 }
 WATCH_FORBIDDEN = re.compile(r"python|\ba2a \*|git push|git merge|git -C|git rebase|git reset|git checkout|git switch|"
                              r"git branch -D|git clean|bypassPermissions|danger-full-access|--yolo|dangerously|--bare", re.I)
@@ -3032,11 +3105,18 @@ def watch_forbidden():
         for s in (r["exe"], r["permission_mode"], *r["argv"], *r["allow"]):
             if WATCH_FORBIDDEN.search(s): bad.append(f"{ag}: {s}")
     return bad
-def watch_argv(agent, worktree="", a2a_home="", run_dir=""):
-    """argv exato que o vigia usaria (o prompt vai pelo stdin)."""
+def watch_prompt_runner(agent):
+    """nome do executor para a camada fixa do prompt (a2a prompt --for): o exe real do agente na tabela do vigia, nao
+    o nome do agente (etapa 11: orquestrador roda com o claude por baixo, mas o nome dele nao esta em PROMPT_RUNNERS)."""
+    exe = (WATCH_RUNNERS.get(agent) or {}).get("exe", agent)
+    return exe if exe in PROMPT_RUNNERS else ""
+def watch_argv(agent, worktree="", a2a_home="", run_dir="", run_id="", budget=None):
+    """argv exato que o vigia usaria (o prompt vai pelo stdin). run_id/budget: so usados pelo claude (--session-id,
+    --max-budget-usd); sem eles (simulacao), mostram um texto-placeholder, como {worktree} sem copia registrada."""
     r = WATCH_RUNNERS[agent]
     sub = {"{allow}": ",".join(r["allow"]), "{worktree}": worktree or f"<copia de {agent}>",
-           "{a2a_home}": a2a_home or HOME, "{run_dir}": run_dir or os.path.join(HOME, "runs", "<run_id>")}
+           "{a2a_home}": a2a_home or HOME, "{run_dir}": run_dir or os.path.join(HOME, "runs", "<run_id>"),
+           "{run_id}": run_id or "<run_id>", "{budget}": f"{budget:.2f}" if isinstance(budget, (int, float)) else "<run_budget_cap>"}
     out = [r["exe"]]
     for x in r["argv"]:
         for k, v in sub.items(): x = x.replace(k, v)
@@ -3072,7 +3152,7 @@ def hermes_config_path():
 def _watch_exe(agent, out, which):
     exe = WATCH_RUNNERS[agent]["exe"]; w = which(exe)
     if not w:
-        lvl = "PULADO" if not WATCH_RUNNERS[agent]["enabled"] else "ERRO"
+        lvl = "PULADO" if not agent_enabled(agent) else "ERRO"
         out.append((lvl, "executavel", f"{exe} nao encontrado no PATH" + ("" if lvl == "ERRO" else " (desabilitado no vigia)")))
         return None
     shim = " (shim .cmd/.bat do npm: o vigia chamaria via cmd.exe)" if w.lower().endswith((".cmd", ".bat")) else ""
@@ -3137,9 +3217,14 @@ def watch_check_hermes(which):
         m = re.search(r"^approvals:\s*\n(?:[ \t]+.*\n)*?[ \t]+mode:\s*['\"]?(\w+)", txt + "\n", re.M)
         if m: out.append(("OK", "aprovacoes", f"approvals.mode = {m.group(1)} ({p})"))
         else: out.append(("PULADO", "aprovacoes", f"approvals.mode nao encontrado em {p}"))
-    out.append(("AVISO", "vigia", "desabilitado no vigia ate o Luiz confirmar as flags de contencao"))
+    if hermes_enabled():
+        out.append(("AVISO", "vigia", "ligado por opt-in explicito (a2a watch hermes --enable --from <humano>); risco "
+                    "aceito pelo Luiz em 2026-10-19 ('quero arriscar'); sem sandbox de SO"))
+    else:
+        out.append(("AVISO", "vigia", "desabilitado no vigia (opt-in: a2a watch hermes --enable --from <humano>)"))
     return out
-WATCH_AGENT_CHECKS = {"claude": watch_check_claude, "codex": watch_check_codex, "hermes": watch_check_hermes}
+WATCH_AGENT_CHECKS = {"claude": watch_check_claude, "codex": watch_check_codex, "hermes": watch_check_hermes,
+                      "orquestrador": watch_check_claude}  # etapa 11: mesmo binario do claude por baixo
 def watch_check_dove(project=None, agent=None):
     out = []
     bad = watch_forbidden()
@@ -3173,7 +3258,10 @@ def watch_checks(project=None, agent=None, which=None):
     import shutil
     which = which or shutil.which
     rows = []
-    for ag in ([agent] if agent else list(WATCH_RUNNERS)):
+    # etapa 11: orquestrador so entra na lista sem --agent se estiver registrado (a2a join); diferente de
+    # claude/codex/hermes, que o check sempre confere, registrados ou nao (comportamento de antes preservado)
+    agents = [agent] if agent else [a for a in WATCH_RUNNERS if a != ORQ_AGENT or a in registered_agents()]
+    for ag in agents:
         for lvl, chk, det in WATCH_AGENT_CHECKS[ag](which): rows.append({"level": lvl, "agent": ag, "check": chk, "detail": det})
     for lvl, chk, det in watch_check_dove(project, agent): rows.append({"level": lvl, "agent": "dove", "check": chk, "detail": det})
     return rows
@@ -3190,7 +3278,8 @@ def watch_commands(project=None, agent=None):
         try: wts = project_worktrees(find_project(project))
         except DoveError: wts = {}
     res = []
-    for ag in ([agent] if agent else list(WATCH_RUNNERS)):
+    agents = [agent] if agent else [a for a in WATCH_RUNNERS if a != ORQ_AGENT or a in registered_agents()]
+    for ag in agents:
         r = WATCH_RUNNERS[ag]; wt = (wts.get(ag) or {}).get("path", "")
         res.append({"agent": ag, "enabled": r["enabled"], "cwd": wt or f"<copia de {ag}>", "argv": watch_argv(ag, wt),
                     "stdin": r["stdin"], "permission_mode": r["permission_mode"], "allow": list(r["allow"]), "note": r["note"]})
@@ -3202,15 +3291,31 @@ WATCH_DEBOUNCE = 90  # s: roda so se o gatilho pendente mais velho tem pelo meno
 WATCH_QUIET = 30     # s: ...e nenhum gatilho novo para o agente chegou neste intervalo (tudo vira uma execucao)
 WATCH_BUSY = 600     # s: status renovado ha menos disto e sem run_id = sessao interativa aberta (nao acorda)
 WATCH_TRIGGER_KINDS = ("task", "question", "correction")  # report so quando responde a mensagem do proprio agente
-WATCH_PENDING = {"codex": "etapa 9"}  # habilitados na tabela, mas o vigia so os acorda a partir desta etapa
+WATCH_PENDING = {}  # agentes habilitados na tabela mas que o vigia ainda nao pode acordar (nenhum: codex liberado na etapa 9)
 def watch_stop_path(): return STOP_FILE  # STOP_FILE e RUN_DIR vem do supervisor (etapa 6), mais abaixo
 def watch_lock_path(agent): return os.path.join(RUN_DIR, agent + ".json")
+def orq_home_dir():
+    """Pasta propria do orquestrador (etapa 11): sem copia de projeto, sem git, so leitura + a2a send/brief/read/status/fact."""
+    return os.path.join(RUN_DIR, "orquestrador-home")
+def hermes_enabled(): return bool(load_config().get("hermes_enabled"))
+def hermes_opt_in(by, on):
+    """Liga/desliga o opt-in do hermes no vigia (etapa 12): so o humano, nunca sob A2A_RUNNER (require_human).
+    Risco aceito pelo Luiz em 2026-10-19 ("quero arriscar"); sem sandbox de SO, por isso desligado por padrao."""
+    require_human(by)
+    save_config(hermes_enabled=bool(on))
+    return bool(on)
+def agent_enabled(agent):
+    """enabled efetivo de um agente no vigia: hermes depende do opt-in do humano (etapa 12, hermes_enabled()); os
+    demais usam a tabela estatica (WATCH_RUNNERS[agente]["enabled"])."""
+    return hermes_enabled() if agent == "hermes" else bool(WATCH_RUNNERS.get(agent, {}).get("enabled"))
 def _secs(s):
     s = int(max(0, s)); return f"{s}s" if s < 60 else f"{s // 60}m" if s < 3600 else f"{s // 3600}h"
 def watch_disabled(agent):
     r = WATCH_RUNNERS.get(agent)
     if not r: return "sem executor no vigia"
-    if not r["enabled"]: return "desabilitado (ate o Luiz confirmar)"
+    if not agent_enabled(agent):
+        return ("desabilitado (etapa 12: opt-in com a2a watch hermes --enable --from <humano>)" if agent == "hermes"
+                else "desabilitado (ate o Luiz confirmar)")
     if agent in WATCH_PENDING: return f"desabilitado ({WATCH_PENDING[agent]})"
     return ""
 def watch_git_dirty(path):
@@ -3238,15 +3343,17 @@ def watch_plan(now=None, project=None, agent=None, check_git=False):
     conversa que nasceu do humano (ou de missao criada por ele). Um agente+projeto = uma execucao com todos os gatilhos."""
     now = time.time() if now is None else now
     msgs, missions = loop_inputs(); hn = human_name(); runs = loop_runs()
+    mission_asg = mission_assignees()  # etapa 14: so o responsavel (quando definido) e acionado, nao todo participante
     acted = set()
     for r in runs or []:
         if isinstance(r, dict) and isinstance(r.get("trigger_ids"), list): acted.update(x for x in r["trigger_ids"] if isinstance(x, str))
     by_id = {m["msg_id"]: m for m in msgs}
-    conv = {}  # msg_id -> (raiz, mensagens da conversa, nasceu do humano)
+    conv, owner = {}, {}  # msg_id -> (raiz, mensagens da conversa, nasceu do humano); msg_id -> responsavel ("" = todos)
     for root, ms in loop_conversations(msgs):
         tids = {m.get("task_id") for m in ms if m.get("task_id")}
         human = root.get("from") == hn or any(missions.get(t) == hn for t in tids)
-        for m in ms: conv[m["msg_id"]] = (root, ms, human)
+        ow = next((mission_asg[t] for t in tids if t in mission_asg), "") or root.get("assignee") or ""
+        for m in ms: conv[m["msg_id"]] = (root, ms, human); owner[m["msg_id"]] = ow
     found = [f for f in loop_check(msgs, runs, now=now, missions=missions, human=hn)["findings"] if f["kind"] != "teto"]
     found += [f for f in loop_check(msgs, runs, now=now, missions=missions, human=hn, since=1)["findings"] if f["kind"] == "teto"]
     stop = os.path.exists(watch_stop_path())
@@ -3256,6 +3363,7 @@ def watch_plan(now=None, project=None, agent=None, check_git=False):
         seen, groups = load_seen(ag), {}
         for m in msgs:
             if not visible_for(m, ag) or m["msg_id"] in seen or m["msg_id"] in acted or m.get("from") in RESERVED_AGENTS: continue
+            if owner.get(m["msg_id"]) and owner[m["msg_id"]] != ag: continue  # etapa 14: so o responsavel e acionado
             k = m.get("kind")
             if k == "report":
                 if (by_id.get(m.get("in_reply_to") or "") or {}).get("from") != ag: continue
@@ -3289,13 +3397,16 @@ def _watch_decide(ag, pj, cands, conv, found, stop, projects, now, hn, check_git
     dis = watch_disabled(ag)
     if dis: rs.append(dis)
     wt = ""
-    if not pj: rs.append("sem projeto")
+    if ag == ORQ_AGENT:  # etapa 11: pasta propria (nunca copia de projeto), sempre disponivel
+        wt = orq_home_dir(); os.makedirs(wt, exist_ok=True)
+        d["git"] = "sem copia de projeto (pasta propria do orquestrador, etapa 11)"
+    elif not pj: rs.append("sem projeto")
     elif pj not in projects: rs.append("sem copia de trabalho (projeto nao registrado: a2a project add)")
     else:
         wt = (project_worktrees(projects[pj]).get(ag) or {}).get("path", "")
         if not wt: rs.append("sem copia de trabalho (a2a worktree create)")
         elif not os.path.isdir(wt): rs.append(f"sem copia de trabalho (pasta nao existe: {wt})")
-    if wt and os.path.isdir(wt):
+    if wt and os.path.isdir(wt) and ag != ORQ_AGENT:
         if check_git:
             dirty, err = watch_git_dirty(wt)
             if err: d["git"] = f"git status falhou: {err}"; rs.append(f"copia: {d['git']}")
@@ -3320,7 +3431,7 @@ def _watch_decide(ag, pj, cands, conv, found, stop, projects, now, hn, check_git
     d.update(worktree=wt, reasons=rs)
     if rs: return dict(d, action="ESPERA", reason=rs[0])
     task = next((m for m in trig if m.get("kind") == "task"), trig[0])
-    prefix = prompt_prefix(ag, pj, ag if ag in PROMPT_RUNNERS else "")
+    prefix = prompt_prefix(ag, pj, watch_prompt_runner(ag))
     text = prefix + prompt_tail(ag, pj, task, msgs=msgs)
     return dict(d, action="RODARIA", reason="", argv=watch_argv(ag, wt), cwd=wt, stdin=WATCH_RUNNERS[ag]["stdin"],
                 prompt={"task": task["msg_id"], "chars": len(text), "tokens_est": -(-len(text) // 4),
@@ -3368,9 +3479,11 @@ def cmd_watch(a):
     if a.wcmd == "plan": return cmd_watch_plan(a)
     if a.wcmd is None:
         if a.dry_run and a.once: return cmd_watch_plan(a)  # alias de a2a watch plan
-        if a.dry_run: print("erro: --dry-run continuo chega com o executor (etapa 7); use a2a watch --dry-run --once "
-                            "(ou a2a watch plan)", file=sys.stderr); sys.exit(2)
-        print("executor real ainda nao habilitado (etapa 7); simulacao: a2a watch plan (ou a2a watch --dry-run --once)",
+        if a.dry_run:
+            print("erro: --dry-run continuo ainda nao existe; use a2a watch --dry-run --once (ou a2a watch plan)",
+                  file=sys.stderr); sys.exit(2)
+        if a.once: return cmd_watch_once(a)  # etapa 7: executor real, so com o claude, iniciado a mao
+        print("erro: vigia continuo ainda nao existe; use a2a watch --once (ou a2a watch plan)",
               file=sys.stderr); sys.exit(2)
     if a.wcmd != "check": return watch_supervisor(a)
     if a.show_command:
@@ -4043,18 +4156,30 @@ def stop_tree(tree, proc, grace=RUN_GRACE):
     except subprocess.TimeoutExpired: pass
 
 # ---- executor: qual programa roda para o agente
-def real_runner_argv(agent):
-    """Etapa 7 liga aqui a tabela revisada WATCH_RUNNERS (watch_argv, so os enabled). Ate la, nenhum executor real roda."""
-    raise DoveError(f"executor real ainda nao habilitado para {agent} (o vigia so roda o executor de teste nesta etapa)")
-def resolve_runner(agent):
-    """argv do executor do agente. Nesta etapa so o gancho de teste: A2A_RUNNER_OVERRIDE (caminho de um script),
-    lido SO com A2A_TESTING=1; senao recusa."""
+def real_runner_argv(agent, worktree="", run_id="", budget=None):
+    """Etapa 7: argv real a partir de WATCH_RUNNERS (watch_argv), so para o agente habilitado e nao pendente
+    (watch_disabled); o resto recusa, como antes. No Windows, um shim .cmd/.bat do npm (ex.: claude.cmd) precisa
+    passar pelo cmd.exe: CreateProcess nao executa .cmd/.bat diretamente (so .exe/.com)."""
+    import shutil
+    dis = watch_disabled(agent)
+    if agent not in WATCH_RUNNERS or dis:
+        raise DoveError(f"executor real ainda nao habilitado para {agent}" + (f" ({dis})" if dis else ""))
+    exe = shutil.which(WATCH_RUNNERS[agent]["exe"])
+    if not exe: raise DoveError(f"{WATCH_RUNNERS[agent]['exe']} nao encontrado no PATH")
+    argv = watch_argv(agent, worktree, run_id=run_id, budget=budget)
+    argv[0] = exe
+    if is_windows() and exe.lower().endswith((".cmd", ".bat")):
+        return [os.environ.get("ComSpec", "cmd.exe"), "/d", "/s", "/c", watch_quote(argv)]
+    return argv
+def resolve_runner(agent, worktree="", run_id="", budget=None):
+    """argv do executor do agente: com A2A_RUNNER_OVERRIDE (caminho de um script) e A2A_TESTING=1, o gancho de
+    teste (nunca cai no executor real); senao o executor real (etapa 7, so os habilitados)."""
     over = os.environ.get("A2A_RUNNER_OVERRIDE", "")
     if over and os.environ.get("A2A_TESTING") == "1":
         path = os.path.abspath(os.path.expanduser(over))
         if not os.path.isfile(path): raise DoveError(f"A2A_RUNNER_OVERRIDE nao e um arquivo: {path}")
         return [sys.executable, path] if path.lower().endswith(".py") else [path]
-    return real_runner_argv(agent)
+    return real_runner_argv(agent, worktree, run_id, budget)
 
 # ---- uma execucao
 class RunResult:
@@ -4065,21 +4190,25 @@ class RunResult:
         self.run_id, self.agent, self.outcome = record["run_id"], record["agent"], record["outcome"]
         self.exit_code, self.reason = record["exit_code"], record["reason"]
     def __repr__(self): return f"RunResult({self.run_id} {self.agent} {self.outcome} code={self.exit_code})"
-def run_agent(agent, project, argv, cwd, stdin_text="", timeout=900, env_extra=None, trigger_ids=(), grace=RUN_GRACE):
+def run_agent(agent, project, argv, cwd, stdin_text="", timeout=900, env_extra=None, trigger_ids=(), grace=RUN_GRACE,
+              run_id=None, mission="", usage_file=""):
     """Roda argv em cwd como execucao do vigia para `agent`: env A2A_RUNNER=watch e A2A_RUN_ID, o prompt pelo stdin,
-    stdout/stderr direto em runs/AAAA-MM/<run_id>.out|.err (sem guardar em memoria). Recusa com STOP ou com outra
-    execucao do mesmo agente (run/<agente>.json); para com timeout ou se STOP aparecer (conferido a cada 1s).
-    Sempre grava runs/AAAA-MM/<run_id>.json e solta a trava no finally."""
+    stdout/stderr direto em runs/AAAA-MM/<run_id>.out|.err (sem guardar em memoria). Recusa com STOP, com o
+    orcamento esgotado (etapa 7: run_budget_cap de project/mission <= 0) ou com outra execucao do mesmo agente
+    (run/<agente>.json); para com timeout ou se STOP aparecer (conferido a cada 1s). run_id: reusa o id do
+    chamador (etapa 7, para casar com o --session-id do argv) em vez de gerar um novo. mission/usage_file: so
+    gravados no registro (etapa 7/12; usage_file e o arquivo de uso do hermes). Sempre grava
+    runs/AAAA-MM/<run_id>.json e solta a trava no finally."""
     check_agent_name(agent)
-    t0 = time.time(); run_id = new_run_id(t0)
+    t0 = time.time(); run_id = run_id or new_run_id(t0)
     d = os.path.join(RUNS_DIR, time.strftime("%Y-%m", time.gmtime(t0))); os.makedirs(d, exist_ok=True)
     base = os.path.join(d, run_id); rec_p, out_p, err_p = base + ".json", base + ".out", base + ".err"
     prompt = stdin_text or ""
-    rec = {"v": 1, "run_id": run_id, "agent": agent, "project": project or "", "cwd": cwd,
+    rec = {"v": 1, "run_id": run_id, "agent": agent, "project": project or "", "mission": mission or "", "cwd": cwd,
            "argv": redact_argv(argv, prompt), "stdin": {"sha256": prompt_hash(prompt), "len": len(prompt)},
            "env_extra": sorted(env_extra or {}), "trigger_ids": list(trigger_ids or []), "host": HOST,
            "started": epoch_iso(t0), "ended": None, "duration_s": None, "timeout_s": timeout, "pid": None,
-           "exit_code": None, "outcome": "running", "reason": "",
+           "exit_code": None, "outcome": "running", "reason": "", "usage_file": usage_file or "",
            "stdout": os.path.relpath(out_p, HOME), "stderr": os.path.relpath(err_p, HOME), "stderr_tail": "", "usage": None}
     def finish(outcome, reason="", code=None):
         t1 = time.time()
@@ -4089,6 +4218,9 @@ def run_agent(agent, project, argv, cwd, stdin_text="", timeout=900, env_extra=N
         return RunResult(rec, rec_p, out_p, err_p)
     if os.path.exists(STOP_FILE):
         return finish("refused", f"{STOP_FILE} existe: nenhuma execucao nova (a2a watch resume --from {human_name()})")
+    if project or mission:
+        cap = run_budget_cap(project or None, mission or None, now=t0)
+        if cap <= 0: return finish("refused", "orcamento esgotado: nenhum valor disponivel para a proxima execucao")
     lock_p = os.path.join(RUN_DIR, agent + ".json")
     linfo = lock_info(kind="run", agent=agent, run_id=run_id, project=project or "")
     ok, cur = lock_acquire(lock_p, linfo)
@@ -4210,9 +4342,13 @@ def run_records(last=20, agent=None):
         if last and len(out) >= last: break
     return out
 def watch_supervisor(a):
-    """a2a watch stop|resume|runs|status (o check fica no cmd_watch)."""
+    """a2a watch stop|resume|runs|status|hermes (o check fica no cmd_watch)."""
     try:
-        if a.wcmd == "stop":
+        if a.wcmd == "hermes":
+            on = hermes_opt_in(a._from, a.enable)
+            print(f"opt-in do hermes no vigia: {'ligado' if on else 'desligado'} (por {a._from})"
+                  + ("" if on else " — o vigia continua recusando o hermes"))
+        elif a.wcmd == "stop":
             killed = watch_stop(a._from, a.kill)
             print(f"STOP criado ({STOP_FILE}): nenhuma execucao nova; as em curso param em ate 1s + {RUN_GRACE:g}s"
                   + ("" if a.kill else " (use --kill para encerrar ja)"))
@@ -4257,6 +4393,61 @@ def watch_supervisor(a):
             for _, i, stale in runs:
                 print(f"  {i.get('agent', '?'):<10} run {i.get('run_id', '?')} projeto {i.get('project') or '-'} "
                       f"pid {i.get('child_pid', '-')} ha {fmt_age(i.get('ts'))} ({'trava velha' if stale else 'rodando'})")
+    except DoveError as e: fail(f"erro: {e}")
+
+# ---- vigia real: claude (etapa 7) e codex (etapa 9) da Fase 3; a2a watch --once, iniciado a mao
+def watch_mission_for(task, missions):
+    """id da missao do gatilho escolhido (task_id dele), so se ela existir; senao ''."""
+    tid = (task or {}).get("task_id") or ""
+    return tid if tid in missions else ""
+def watch_job_for(d, msgs, missions):
+    """Job de run_agent (RunResult) a partir de uma decisao RODARIA do watch_plan: o mesmo prompt que a decisao usou
+    para o hash/tamanho, um run_id proprio (o --session-id do claude e um uuid5 derivado dele, nunca o run_id em si:
+    a flag exige um UUID), o orcamento da proxima execucao (run_budget_cap) e a missao do gatilho escolhido."""
+    task = find_message(d["prompt"]["task"])
+    mission = watch_mission_for(task, missions)
+    prefix = prompt_prefix(d["agent"], d["project"], watch_prompt_runner(d["agent"]))
+    text = prefix + prompt_tail(d["agent"], d["project"], task, msgs=msgs)
+    run_id = new_run_id()
+    session_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "dove-run:" + run_id))
+    cap = run_budget_cap(d["project"] or None, mission or None)
+    argv = resolve_runner(d["agent"], worktree=d["worktree"], run_id=session_id, budget=cap)
+    return {"agent": d["agent"], "project": d["project"], "argv": argv, "cwd": d["worktree"], "stdin_text": text,
+            "trigger_ids": d["triggers"], "run_id": run_id, "mission": mission}
+WATCH_ONCE_TAGS = {"ok": "rodou ", "error": "falhou", "timeout": "timeout", "stopped": "parou ", "refused": "recusou"}
+def watch_once_line(d, r):
+    out = f"{WATCH_ONCE_TAGS.get(r.outcome, r.outcome):<7} {r.agent} {d.get('project') or '-':<10} run {r.run_id}"
+    if r.exit_code is not None: out += f" codigo {r.exit_code}"
+    if r.reason: out += f" · {r.reason}"
+    return out
+def cmd_watch_once(a):
+    """a2a watch --once (sem --dry-run): roda de verdade as decisoes RODARIA do plano (hoje, claude e codex; hermes
+    continua recusado, etapa 12 opt-in). So o humano (--from), nunca sob A2A_RUNNER (require_human); um vigia por
+    maquina (WatchLock); sequencial (max_parallel=1: uma execucao de cada vez, mesmo com mais de um agente
+    habilitado). Por execucao: grava o consumo (watch_usage, ignorado
+    se a saida nao tiver uso reconhecivel) e, so entao, a pergunta unica de orcamento (budget_alert_notify)."""
+    try:
+        require_human(a._from)
+        with WatchLock():
+            now = time.time()
+            msgs, missions = loop_inputs()
+            ds = [d for d in watch_plan(now, a.project, a.agent, check_git=True) if d["action"] == "RODARIA"]
+            if not ds:
+                print("nada para rodar agora (a2a watch plan mostra o motivo de cada agente)"); return
+            jobs = [watch_job_for(d, msgs, missions) for d in ds]
+            results = run_jobs(jobs, max_parallel=1)
+            print(f"dove watch --once · {len(ds)} execucao(oes) - {now_iso()}")
+            alvos = set()
+            for d, j, r in zip(ds, jobs, results):
+                if isinstance(r, Exception): print(f"erro    {d['agent']} {d.get('project') or '-'}: {r}"); continue
+                print(watch_once_line(d, r))
+                if r.outcome == "ok":
+                    try: watch_usage(r.run_id)
+                    except DoveError: pass
+                alvos.add((d.get("project") or "", j.get("mission") or ""))
+            for proj, mission in alvos:
+                try: budget_alert_notify(project=proj or None, mission=mission or None, now=time.time())
+                except DoveError: pass
     except DoveError as e: fail(f"erro: {e}")
 
 # ---------------------------------------------------------------- consumo por execucao e orcamento (etapa 8 da Fase 3)
@@ -4605,6 +4796,31 @@ def budget_alerts(project=None, agent=None, now=None, missions=None, days=True):
         except DoveError: continue
         if st["has_budget"] and (st["warn"] or st["exceeded"]): out.append(budget_alert_line(st))
     return out
+BUDGET_ALERTS_LOG = os.path.join(HOME, "budget_alerts.json")  # chaves de alvo ja avisadas (etapa 7): nunca repete
+def budget_alert_key(st): return f"{st['scope']}:{st['id']}:{st['from']}"  # from = inicio da janela: distingue o dia/a missao
+def load_budget_alerts_log():
+    d = read_json(BUDGET_ALERTS_LOG, {}); d = d if isinstance(d, dict) else {}
+    if not isinstance(d.get("notified"), list): d["notified"] = []
+    return d
+def budget_alert_notify(project=None, mission=None, now=None, by="vigia"):
+    """Pergunta unica (de `by` para o humano) por alvo de orcamento (missao ou projeto/dia) em alerta/esgotado e
+    ainda nao avisado; chave = escopo+id+inicio da janela (nunca repete, mesmo quando a % sobe). Grava o aviso em
+    ~/.a2a/budget_alerts.json. Devolve as chaves novas avisadas nesta chamada (vazio = nada novo)."""
+    targets = [("missao", load_mission(mission))] if mission else budget_targets(project)
+    sent = []
+    os.makedirs(HOME, exist_ok=True)
+    with FileLock(BUDGET_ALERTS_LOG):
+        log = load_budget_alerts_log(); seen = set(log["notified"])
+        for kind, x in targets:
+            try: st = budget_status(mission=x, now=now) if kind == "missao" else budget_status(project=x, now=now)
+            except DoveError: continue
+            if not st["has_budget"] or not (st["warn"] or st["exceeded"]): continue
+            key = budget_alert_key(st)
+            if key in seen: continue
+            post_message(by, human_name(), budget_alert_line(st), kind="question", project=st.get("project") or "", auto_status=False)
+            seen.add(key); sent.append(key)
+        if sent: log["notified"] = sorted(seen); write_json(BUDGET_ALERTS_LOG, log)
+    return sent
 def cost_budget_lines(project=None, mission=None, now=None):
     if mission: targets = [("missao", load_mission(mission))]
     else: targets = budget_targets(project)
@@ -4693,6 +4909,8 @@ def build_parser():
     s.add_argument("--file", action="append", metavar="CAMINHO[:L1-L2]",
                    help="cita um arquivo (repetivel): grava caminho relativo, sha (6 hex) e linhas no campo files, sem o "
                         "conteudo. Base: a pasta do agente no --project registrado (whereami), senao a pasta atual")
+    s.add_argument("--assignee", help="responsavel unico da tarefa (so com --kind task, etapa 14): precisa ser o "
+                   "destinatario (--to) ou, com --to all, um agente registrado; so ele marca EM_EXECUCAO/AGUARDANDO_APROVACAO")
     s.add_argument("--no-auto-status", dest="no_auto_status", action="store_true",
                    help="nao atualiza o status do remetente"); s.set_defaults(func=cmd_send)
     i = sub.add_parser("inbox"); i.add_argument("--agent", required=True); i.add_argument("--project")
@@ -4775,6 +4993,8 @@ def build_parser():
     ms = mi.add_subparsers(dest="mcmd", required=True)
     x = ms.add_parser("new"); x.add_argument("--project", required=True); x.add_argument("--title", required=True)
     x.add_argument("--desc", default=""); x.add_argument("--agents", help="a,b,c (padrao: todos os registrados)")
+    x.add_argument("--assignee", help="responsavel unico (etapa 14): precisa estar em --agents; so ele marca "
+                   "EM_EXECUCAO/AGUARDANDO_APROVACAO; os demais participantes so comentam ou revisam (aval continua livre)")
     x.add_argument("--from", dest="_from", required=True, help="quem cria (o humano ou um agente)")
     x = ms.add_parser("approve", **ex('a2a mission approve m3f9a2c1 --agent claude --evidence "rodei os testes de contrato: 48 ok"')); x.add_argument("id"); x.add_argument("--agent", required=True)
     x.add_argument("--evidence", required=True)
@@ -4873,15 +5093,17 @@ def build_parser():
     pm.add_argument("--max-tail-chars", dest="max_tail_chars", type=int, default=4000,
                     help="tamanho maximo da parte variavel (padrao 4000; 0 = sem corte)")
     pm.set_defaults(func=cmd_prompt)
-    wa = sub.add_parser("watch", help="vigia (Fase 3): pre-checagem, plano em simulacao, kill switch STOP, travas e registros",
-        description="watch check: pre-checagem so de leitura (veja a2a watch check --help). watch plan: o que o vigia rodaria "
-        "agora, em simulacao (nada e gravado nem executado); `a2a watch --dry-run --once` e o mesmo. Sem --dry-run o executor "
-        "real ainda nao existe (etapa 7): sai com codigo 2. Supervisor do vigia: cada execucao de agente roda com trava por agente (~/.a2a/run/<agente>.json), "
-        "timeout e controle da arvore de processos (Job Object no Windows, grupo de processos no POSIX), e deixa um registro "
-        "em ~/.a2a/runs/AAAA-MM/<run_id>.json (+ .out/.err). ~/.a2a/STOP e o kill switch: com ele nenhuma execucao nova "
-        "comeca e as em curso param em ate 1s (pedido educado, 5s de espera, depois a arvore inteira e morta). "
-        "O supervisor ainda nao roda executor real (claude/codex/hermes): so o executor de teste.", **ex(
-        "a2a watch plan", "a2a watch --dry-run --once --verbose",
+    wa = sub.add_parser("watch", help="vigia (Fase 3): pre-checagem, plano em simulacao, executor real (claude e codex), kill switch STOP",
+        description="watch check: pre-checagem so de leitura (veja a2a watch check --help). watch plan (ou a2a watch --dry-run "
+        "--once): o que o vigia rodaria agora, em simulacao (nada e gravado nem executado). a2a watch --once --from <humano>: "
+        "roda de verdade as decisoes RODARIA do plano (etapas 7/9: claude e codex; hermes continua recusado, etapa 12 opt-in). Sem "
+        "--once, o vigia continuo ainda nao existe: sai com codigo 2. Cada execucao roda com trava por agente "
+        "(~/.a2a/run/<agente>.json), timeout, controle da arvore de processos (Job Object no Windows, grupo de processos no "
+        "POSIX) e orcamento (recusa se o restante for 0); deixa um registro em ~/.a2a/runs/AAAA-MM/<run_id>.json (+ .out/.err), "
+        "grava o consumo (a2a watch usage) e, so uma vez por alvo, uma pergunta ao humano quando o orcamento chega a 80%. "
+        "~/.a2a/STOP e o kill switch: com ele nenhuma execucao nova comeca e as em curso param em ate 1s (pedido educado, "
+        "5s de espera, depois a arvore inteira e morta).", **ex(
+        "a2a watch plan", "a2a watch --dry-run --once --verbose", "a2a watch --once --from luiz",
         "a2a watch check --project lagu", "a2a watch stop --from luiz", "a2a watch stop --from luiz --kill", "a2a watch resume --from luiz",
         "a2a watch status", "a2a watch runs --last 5", "a2a watch runs --agent codex --json",
         "a2a watch usage 20261019T153000Z-a1b2c3"))
@@ -4893,7 +5115,8 @@ def build_parser():
         x.add_argument("--check-git", dest="check_git", action="store_true",
                        help="confere se a copia esta limpa com `git status --porcelain` (unico processo que o plano roda)")
     wa.add_argument("--dry-run", dest="dry_run", action="store_true", help="com --once: o mesmo que a2a watch plan")
-    wa.add_argument("--once", action="store_true", help="processa a fila uma vez e sai (por enquanto so com --dry-run)")
+    wa.add_argument("--once", action="store_true", help="processa a fila uma vez e sai; sem --dry-run, roda de verdade (precisa de --from)")
+    wa.add_argument("--from", dest="_from", help="o humano (--once de verdade e so dele; ignorado com --dry-run)")
     plan_args(wa)
     was = wa.add_subparsers(dest="wcmd")
     x = was.add_parser("plan", help="o que o vigia rodaria agora, em simulacao: nada e gravado nem executado",
@@ -4901,7 +5124,7 @@ def build_parser():
         "task/question/correction (report so quando responde a uma mensagem dele), sem ack, sem as proprias e sem as ja acionadas "
         f"(trigger_ids em ~/.a2a/runs/). So conversas que nasceram do humano (ou de missao criada por ele), ate {LOOP_MAX_HOPS} "
         "saltos automaticos sem mensagem do humano. Todos os gatilhos de um agente+projeto viram uma execucao. Espera (o primeiro "
-        "motivo vale; --verbose mostra todos): STOP; agente desabilitado (hermes; codex ate a etapa 9); sem projeto; sem copia de "
+        "motivo vale; --verbose mostra todos): STOP; agente desabilitado (hermes, ate opt-in da etapa 12); sem projeto; sem copia de "
         "trabalho; copia suja (so com --check-git); sessao interativa (status renovado ha menos de "
         f"{WATCH_BUSY // 60} min sem run_id); ja rodando (~/.a2a/run/<agente>.json); achado de loop; debounce (gatilho mais velho "
         f"com {WATCH_DEBOUNCE}s e nenhum novo nos ultimos {WATCH_QUIET}s). RODARIA traz os gatilhos, a copia, o argv exato e o "
@@ -4913,7 +5136,8 @@ def build_parser():
         description="Confere se o vigia poderia rodar cada agente, sem chamar nenhum modelo: so roda `--version`, `--help` e "
         "`claude auth status`, com timeout curto. Por agente: executavel no PATH, versao; claude: login (assinatura x chave "
         "de API e o efeito no --bare), --permission-prompts no --help, CLAUDE_CODE_USE_POWERSHELL_TOOL; codex: [windows] "
-        "sandbox no config.toml (no Windows); hermes: versao e approvals.mode, sempre desabilitado no vigia. Dove: tabela sem "
+        "sandbox no config.toml (no Windows); hermes: versao e approvals.mode, desabilitado no vigia ate o opt-in explicito "
+        "do humano (etapa 12: a2a watch hermes --enable). Dove: tabela sem "
         "padroes proibidos, ~/.a2a/STOP, A2A_RUNNER e, com --project, a copia de trabalho de cada agente registrado (limpa). "
         "Niveis: OK, AVISO, ERRO, PULADO; sai 1 se houver ERRO. --show-command so imprime o comando exato do vigia.", **ex(
         "a2a watch check", "a2a watch check --project lagu", "a2a watch check --project lagu --agent codex --json",
@@ -4923,6 +5147,14 @@ def build_parser():
     x.add_argument("--json", action="store_true", help="resultado em uma linha de JSON")
     x.add_argument("--show-command", dest="show_command", action="store_true",
                    help="imprime o argv exato que o vigia usaria (com a allowlist), sem rodar nada")
+    x = was.add_parser("hermes", help="liga/desliga o opt-in do hermes no vigia (etapa 12, risco aceito pelo Luiz; so o humano)",
+        description="Grava hermes_enabled em ~/.a2a/config.json. So o humano (require_human: nunca sob A2A_RUNNER, nem um "
+        "agente nao pode se auto-habilitar). Risco aceito pelo Luiz em 2026-10-19 ('quero arriscar'); sem sandbox de SO "
+        "(approvals.mode do hermes so reduz o risco), por isso desligado por padrao.", **ex(
+        "a2a watch hermes --enable --from luiz", "a2a watch hermes --disable --from luiz"))
+    g = x.add_mutually_exclusive_group(required=True)
+    g.add_argument("--enable", action="store_true"); g.add_argument("--disable", action="store_true")
+    x.add_argument("--from", dest="_from", required=True, help="o humano (acao so do humano)")
     x = was.add_parser("stop", help="cria ~/.a2a/STOP: nada novo comeca e as execucoes em curso param (so o humano)")
     x.add_argument("--from", dest="_from", required=True, help="o humano (acao so do humano)")
     x.add_argument("--kill", action="store_true", help="tambem mata ja a arvore de processos das execucoes em curso")
