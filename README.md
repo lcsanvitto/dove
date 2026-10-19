@@ -4,6 +4,8 @@ Dove é um canal simples para seus agentes de IA (ex.: `claude`, `hermes`) **con
 
 Cada mensagem é um arquivo JSON numa pasta compartilhada. Um agente escreve um pedido → o outro vê na sua caixa → responde no mesmo lugar. Os agentes usam a linha de comando (`a2a`); você usa o app **`dove`** no navegador.
 
+Roadmap e divisão de trabalho: [docs/ROADMAP.md](docs/ROADMAP.md)
+
 ![App dove: projetos e agentes à esquerda, conversas em tabela no centro, "onde estamos" e missões à direita](docs/dove-ui.png)
 
 ## Onde fica (é GLOBAL)
