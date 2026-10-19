@@ -157,7 +157,7 @@ Imprime um relatório para colar (cada linha `OK`, `AVISO` ou `ERRO`): versão, 
 
 ### Segurança do app
 O app só escuta em `127.0.0.1` por padrão e protege toda escrita:
-- **Token por sessão:** a cada início o servidor gera um token aleatório (`secrets.token_urlsafe`) e o injeta na página. Todo `POST` e os `GET` que leem o disco (`/api/scan`, `/api/fs/list`, `/api/project/info`, `/api/doctor`, `/api/onboard`) exigem o cabeçalho `X-Dove-Token` igual.
+- **Token por sessão:** a cada início o servidor gera um token aleatório (`secrets.token_urlsafe`) e o injeta na página. Todo `POST` e os `GET` que leem o disco (`/api/scan`, `/api/fs/list`, `/api/project/info`, `/api/doctor`, `/api/onboard`, `/api/git/status`, `/api/git/diff`) exigem o cabeçalho `X-Dove-Token` igual.
 - **Abrir pasta** só abre a pasta de um projeto registrado (pelo nome), nunca um caminho qualquer.
 - **Host:** qualquer requisição com `Host` diferente de `127.0.0.1:PORTA` / `localhost:PORTA` recebe 403 (bloqueia DNS rebinding).
 - **Origin:** um `POST` com `Origin` de outro site recebe 403.
@@ -180,6 +180,41 @@ O app só escuta em `127.0.0.1` por padrão e protege toda escrita:
 | `POST /api/project/add` · `/remove` · `/pin` · `/open` | gerencia projetos; `open` abre a pasta de um projeto registrado |
 | `POST /api/agent/add` · `/api/agent/remove` | registra (`name`, `type`, `model`, `note`) e devolve as instruções / remove agente e status (mensagens ficam) |
 | `POST /api/mission/new` · `/api/mission/done` | cria missão / confirma a conclusão (humano) |
+
+## Git e cópias de trabalho por agente (CLI/API)
+Cada agente pode ter a **própria cópia de trabalho** (`git worktree`) de um projeto, para não pisar no trabalho do outro. A cópia fica numa pasta irmã, `<pasta-do-projeto>-<agente>` (ex.: `C:\Users\Dell\Cowork\Codigo\lagu-claude`), na branch `dove/<agente>`. O agente trabalha e faz commits só nela; **quem junta é você**.
+
+```
+a2a worktree create --project lagu --agent claude --from luiz [--base main]   # cria lagu-claude na branch dove/claude
+a2a worktree list [--project lagu]                                            # branch, +à frente/-atrás da base, se está limpa
+a2a worktree merge  --project lagu --agent claude --from luiz   # traz dove/claude para a branch da pasta principal (--no-ff)
+a2a worktree sync   --project lagu --agent claude --from luiz   # atualiza a cópia com a base (--no-ff)
+a2a worktree remove --project lagu --agent claude --from luiz   # remove a pasta (a branch fica)
+a2a git status --project lagu [--agent claude]                  # branch, upstream, alterados, últimos commits, cópias
+a2a whereami --agent claude --project lagu                      # pasta onde o agente deve trabalhar (cópia ou projeto)
+```
+- `create`: o agente precisa estar registrado. Se a branch `dove/<agente>` já existe, ela é reaproveitada; se a pasta existe e não é essa cópia, dá erro. A base padrão é a branch atual da pasta principal. A cópia fica gravada em `projects.json` (`worktrees: {agente: {path, branch, base}}`).
+- `a2a onboard --agent claude --project lagu` passa a dizer a pasta de trabalho do agente; a seção do `AGENTS.md` manda o agente rodar `a2a whereami`.
+- Toda ação git/cópia do humano vira um `report` de `luiz` para `all` no canal (ex.: "luiz fez merge de dove/claude em main (abc1234)"), sem criar status para o humano.
+
+**Regras de segurança (valem para CLI e API):**
+- Só roda em projetos registrados ou nas cópias registradas dos agentes — nunca num caminho vindo do cliente. Tudo usa o `git` do PATH com lista de argumentos (sem shell), `GIT_TERMINAL_PROMPT=0` e timeout (fetch/pull/push/commit 180s, resto 30s).
+- Só o humano faz commit/push/pull/merge/criar e remover cópia pelo Dove (painel com token, ou CLI com `--from luiz`). Agentes fazem o próprio git dentro da cópia; o Dove não dá push por eles.
+- Nunca `--force`, `reset --hard`, `rebase`, `clean` nem apagar branch. O único push é `git push -u origin <branch-atual>`.
+- Push para `main`/`master` (ou a branch padrão do remoto) exige `confirm_branch` igual ao nome da branch.
+- Pull é `--ff-only`. Merge é `--no-ff`; em conflito roda `git merge --abort`, devolve os arquivos em conflito e a árvore fica limpa. Pull/merge/sync recusam se a pasta de destino tem alterações não commitadas.
+- Remover cópia só se ela está limpa e a branch não tem commits fora da base (merges de "sync" não contam); senão recusa e nada é apagado.
+- Falhas comuns viram mensagem clara: login (`rode git push uma vez no terminal desse projeto`), push rejeitado (`faça Pull antes`), sem upstream, sem identidade.
+
+| Rota (todas exigem `X-Dove-Token`) | O que faz |
+|---|---|
+| `GET /api/git/status?project=P[&agent=A]` | branch, upstream, `ahead`/`behind`, `detached`, `files` (porcelain: `path`, `x`, `y`, `from`, `untracked`), últimos 10 commits, `remote`/`host`, `default_branch`, `protected`, `branches` e, na pasta principal, `worktrees` (ahead/behind vs base, `unmerged`, `dirty`, último commit) |
+| `GET /api/git/diff?project=P[&agent=A]&path=F[&staged=1]` | diff de um arquivo que está no status (novos: conteúdo inteiro); até 200 KB (`truncated`) |
+| `POST /api/git/commit` | `{project, agent?, message, paths?}` → `git add` + `git commit -m` (padrão: todos os alterados, inclusive novos e apagados); devolve `hash` |
+| `POST /api/git/fetch` · `/api/git/pull` · `/api/git/push` | `{project, agent?, confirm_branch?}`; pull `--ff-only`; push da branch atual (na principal exige `confirm_branch`; sem ele a resposta traz `needs_confirm`) |
+| `POST /api/worktree/create` | `{project, agent, base?}` |
+| `POST /api/worktree/merge` · `/sync` · `/remove` | `{project, agent}`; conflito → 400 com `conflicts`, `aborted`, `clean`; recusas trazem `dirty` ou `unmerged` |
+| `POST /api/project/open` | aceita `agent` para abrir a pasta da cópia registrada |
 
 ## Projetos
 ```
@@ -251,6 +286,10 @@ Mostra tarefas abertas (`task` sem resposta `CONCLUIDO`/`CANCELADO`, ligada por 
 | `mission done ID [--from luiz]` | confirmação final do humano (só com aval de todos) |
 | `mission list [--project P]` · `mission show ID` | lista / detalha missões |
 | `summary [--project P]` | "onde estamos": tarefas abertas, bloqueios, contexto alto, missões |
+| `worktree list [--project P]` | cópias de trabalho dos agentes |
+| `worktree create\|merge\|sync\|remove --project P --agent A --from luiz` | cria / traz para sua branch / atualiza / remove a cópia do agente (só o humano) |
+| `git status --project P [--agent A]` | status git do projeto ou da cópia do agente |
+| `whereami --agent A --project P` | pasta onde o agente trabalha nesse projeto |
 | `onboard --agent X [--project P]` | imprime as instruções do canal para o agente X |
 | `onboard --agents-md [--project P]` | imprime a seção genérica para o `AGENTS.md` |
 

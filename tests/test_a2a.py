@@ -719,8 +719,271 @@ def fase2():
     assert "400 em POST /api/project/open" in err, err  # erros do usuario aparecem na janela do dove
     print("OK: API nova (ping/versao, no-store, token+Host+Origin nas rotas novas, fs/list, project/open+info, agent add/remove, paginacao)")
 
+def git_fase():
+    """Fase 2: git no painel (status/diff/commit/fetch/pull/push) e uma copia (worktree) por agente. Git de verdade."""
+    tmp = tempfile.mkdtemp(); home = os.path.join(tmp, "home")
+    gcfg = os.path.join(tmp, "gitconfig")
+    open(gcfg, "w").write("[user]\n\tname = Teste\n\temail = teste@example.com\n[init]\n\tdefaultBranch = main\n"
+                          "[commit]\n\tgpgsign = false\n[push]\n\tnegotiate = false\n")
+    gitvars = {"GIT_CONFIG_GLOBAL": gcfg, "GIT_CONFIG_NOSYSTEM": "1"}
+    env = dict(os.environ, A2A_HOME=home, PYTHONIOENCODING="utf-8", DOVE_NO_BROWSER="1", DOVE_FAKE_OPEN="1", **gitvars)
+    os.environ.update(gitvars)
+    sys.path.insert(0, str(ROOT)); os.environ["A2A_HOME"] = home
+    import importlib; a2a = importlib.import_module("a2a")
+    for k, v in (("HOME", home), ("BUS", os.path.join(home, "bus")), ("CURSOR", os.path.join(home, "cursor")),
+                 ("AGENTS", os.path.join(home, "agents")), ("STATUS", os.path.join(home, "status")),
+                 ("MISSIONS", os.path.join(home, "missions")), ("PROJECTS", os.path.join(home, "projects.json")),
+                 ("CONFIG", os.path.join(home, "config.json"))):
+        setattr(a2a, k, v)
+    def g(cwd, *args, check=True):
+        r = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, text=True)
+        if check: assert r.returncode == 0, (args, r.stdout, r.stderr)
+        return r.stdout.strip()
+    def write(p, t): open(p, "w", encoding="utf-8").write(t)
+    code = os.path.join(tmp, "Codigo"); os.makedirs(code)
+    remote = os.path.join(code, "lagu.git"); g(code, "init", "-q", "--bare", "-b", "main", remote)
+    lagu = os.path.join(code, "lagu"); g(code, "clone", "-q", remote, lagu)
+    for f, t in (("a.txt", "a1\n"), ("b.txt", "b1\n"), ("conf.txt", "linha=1\n")): write(os.path.join(lagu, f), t)
+    g(lagu, "add", "."); g(lagu, "commit", "-qm", "inicio"); g(lagu, "push", "-q", "-u", "origin", "main")
+    other = os.path.join(tmp, "outro"); g(tmp, "clone", "-q", remote, other)
+    run(env, "init")
+    for ag in ("claude", "codex", "hermes"): run(env, "join", "--agent", ag)
+    assert run(env, "project", "add", "lagu", lagu).returncode == 0
+    msgs = lambda: [json.load(open(f, encoding="utf-8")) for f in sorted(pathlib.Path(home, "bus").glob("*.json"))]
+    port = free_port(); p, T = start_panel(env, port)
+    q = urllib.request.quote
+    G = lambda path: req(port, "GET", path, None, T)
+    P = lambda path, body: req(port, "POST", path, body, T)
+    try:
+        # ---- seguranca: toda rota nova exige token e Host
+        gets = ["/api/git/status?project=lagu", "/api/git/diff?project=lagu&path=a.txt"]
+        posts = ["/api/git/commit", "/api/git/fetch", "/api/git/pull", "/api/git/push", "/api/worktree/create",
+                 "/api/worktree/merge", "/api/worktree/sync", "/api/worktree/remove"]
+        for path in gets:
+            assert req(port, "GET", path)[0] == 403, path
+            assert req(port, "GET", path, None, {"X-Dove-Token": "x"})[0] == 403, path
+            assert req(port, "GET", path, None, T, host="evil.example")[0] == 403, path
+        for path in posts:
+            body = {"project": "lagu", "agent": "claude", "message": "x", "confirm_branch": "main"}
+            assert req(port, "POST", path, body)[0] == 403, path
+            assert req(port, "POST", path, body, T, host="evil.example")[0] == 403, path
+            assert req(port, "POST", path, body, dict(T, Origin="http://evil.example"))[0] == 403, path
+            code, j = P(path, {"project": "fantasma", "agent": "claude", "message": "x"})
+            assert code == 400 and "nao encontrado" in j["error"], (path, j)
+            code, j = P(path, {"project": lagu, "message": "x"})           # caminho no lugar do nome: rejeitado
+            assert code == 400 and "nao encontrado" in j["error"], (path, j)
+        code, j = G(f"/api/git/status?project={q(lagu)}"); assert code == 400, j
+        code, j = G("/api/git/status?project=lagu&agent=claude"); assert code == 400 and "copia" in j["error"], j
+        print("OK: git/worktree: token + Host + Origin em todas as rotas novas; projeto nao registrado/caminho rejeitado")
+
+        # ---- status
+        code, s = G("/api/git/status?project=lagu")
+        assert code == 200 and s["branch"] == "main" and s["upstream"] == "origin/main" and (s["ahead"], s["behind"]) == (0, 0), s
+        assert s["files"] == [] and s["default_branch"] == "main" and s["protected"] and not s["detached"], s
+        assert s["commits"][0]["subject"] == "inicio" and s["commits"][0]["author"] == "Teste" and s["commits"][0]["date"], s["commits"]
+        assert "main" in s["branches"] and s["path"] == lagu, s
+        write(os.path.join(lagu, "a.txt"), "a1\na2 nova linha\n"); write(os.path.join(lagu, "novo arquivo.txt"), "conteudo novo\n")
+        os.makedirs(os.path.join(lagu, "pasta")); write(os.path.join(lagu, "pasta", "x.txt"), "x\n")
+        code, s = G("/api/git/status?project=lagu")
+        fs = {f["path"]: f for f in s["files"]}
+        assert set(fs) == {"a.txt", "novo arquivo.txt", "pasta/x.txt"}, fs
+        assert fs["a.txt"]["y"] == "M" and fs["novo arquivo.txt"]["untracked"] and fs["novo arquivo.txt"]["x"] == "?", fs
+        # ---- diff
+        code, d = G("/api/git/diff?project=lagu&path=a.txt")
+        assert code == 200 and "+a2 nova linha" in d["text"] and not d["truncated"] and not d["untracked"], d
+        code, d = G("/api/git/diff?project=lagu&path=" + q("novo arquivo.txt"))
+        assert code == 200 and d["untracked"] and "+conteudo novo" in d["text"], d
+        for bad in ("../etc/passwd", "c.txt", lagu + "/a.txt", ""):
+            code, j = G("/api/git/diff?project=lagu&path=" + q(bad)); assert code == 400 and "alterados" in j["error"], (bad, j)
+        real_max = a2a.DIFF_MAX
+        try:
+            a2a.DIFF_MAX = 10; d = a2a.git_diff("lagu", "", "a.txt"); assert d["truncated"] and len(d["text"].encode()) <= 10, d
+        finally:
+            a2a.DIFF_MAX = real_max
+        print("OK: git status (branch, upstream, arquivos, commits, padrao) e diff (modificado, novo, caminho fora do status, limite)")
+
+        # ---- commit
+        code, j = P("/api/git/commit", {"project": "lagu", "message": "   ", "paths": ["a.txt"]}); assert code == 400 and "mensagem" in j["error"], j
+        code, j = P("/api/git/commit", {"project": "lagu", "message": "x", "paths": ["b.txt"]}); assert code == 400 and "alterados" in j["error"], j
+        code, j = P("/api/git/commit", {"project": "lagu", "message": "x", "paths": []}); assert code == 400, j
+        code, j = P("/api/git/commit", {"project": "lagu", "message": "Muda a e cria novo", "paths": ["a.txt", "novo arquivo.txt"]})
+        assert code == 200 and j["files"] == 2 and j["branch"] == "main" and j["hash"] == g(lagu, "rev-parse", "--short", "HEAD"), j
+        assert g(lagu, "log", "-1", "--format=%B") == "Muda a e cria novo"  # mensagem como digitada, sem trailers
+        code, s = G("/api/git/status?project=lagu")
+        assert [f["path"] for f in s["files"]] == ["pasta/x.txt"] and s["ahead"] == 1 and s["behind"] == 0, s
+        os.remove(os.path.join(lagu, "b.txt"))
+        code, j = P("/api/git/commit", {"project": "lagu", "message": "resto (com remocao)"})  # padrao: tudo, inclusive novos e apagados
+        assert code == 200 and j["files"] == 2, j
+        assert G("/api/git/status?project=lagu")[1]["files"] == [] and not os.path.exists(os.path.join(lagu, "b.txt"))
+        assert "b.txt" not in g(lagu, "ls-files")
+        code, j = P("/api/git/commit", {"project": "lagu", "message": "nada"}); assert code == 400 and "nada para commitar" in j["error"], j
+        print("OK: commit (arquivos escolhidos, padrao = todos com novos/apagados, mensagem vazia, arquivo fora da lista, nada a commitar)")
+
+        # ---- push: feature livre; main exige confirm_branch; nunca --force
+        assert a2a.push_argv("main") == ["push", "-u", "origin", "main"]
+        g(lagu, "checkout", "-q", "-b", "feat/x"); write(os.path.join(lagu, "f.txt"), "f\n")
+        P("/api/git/commit", {"project": "lagu", "message": "feature"})
+        code, j = P("/api/git/push", {"project": "lagu"})
+        assert code == 200 and j["branch"] == "feat/x", j
+        assert "refs/heads/feat/x" in g(lagu, "ls-remote", "origin")
+        assert G("/api/git/status?project=lagu")[1]["upstream"] == "origin/feat/x"
+        g(lagu, "checkout", "-q", "main")
+        code, j = P("/api/git/push", {"project": "lagu"}); assert code == 400 and j["needs_confirm"] == "main", j
+        code, j = P("/api/git/push", {"project": "lagu", "confirm_branch": "Main"}); assert code == 400, j
+        assert g(remote, "rev-parse", "main") != g(lagu, "rev-parse", "main")
+        code, j = P("/api/git/push", {"project": "lagu", "confirm_branch": "main"}); assert code == 200, j
+        assert g(remote, "rev-parse", "main") == g(lagu, "rev-parse", "main")
+        # rejeitado (remoto andou): mensagem "faca Pull antes"; push nunca forca
+        g(other, "pull", "-q"); write(os.path.join(other, "o.txt"), "o\n"); g(other, "add", "."); g(other, "commit", "-qm", "do outro")
+        g(other, "push", "-q")
+        write(os.path.join(lagu, "l.txt"), "l\n"); P("/api/git/commit", {"project": "lagu", "message": "local"})
+        code, j = P("/api/git/push", {"project": "lagu", "confirm_branch": "main"})
+        assert code == 400 and "Pull antes" in j["error"], j
+        print("OK: push (feature sem confirmar, main exige confirm_branch exato, rejeitado -> faca Pull antes)")
+
+        # ---- fetch / pull --ff-only
+        code, j = P("/api/git/fetch", {"project": "lagu"}); assert code == 200, j
+        code, s = G("/api/git/status?project=lagu"); assert (s["ahead"], s["behind"]) == (1, 1), s
+        code, j = P("/api/git/pull", {"project": "lagu"}); assert code == 400 and "divergiram" in j["error"], j  # ff-only nao faz merge
+        assert g(lagu, "status", "--porcelain") == "" and not os.path.exists(os.path.join(lagu, ".git", "MERGE_HEAD"))
+        g(lagu, "checkout", "-q", "feat/x")  # volta main ao remoto sem reset: apaga o commit local criando main de novo a partir do remoto
+        g(lagu, "branch", "-q", "-m", "main", "main-local"); g(lagu, "checkout", "-q", "-b", "main", "origin/main~1")
+        g(lagu, "branch", "-q", "--set-upstream-to=origin/main", "main")
+        write(os.path.join(lagu, "a.txt"), "sujo\n")
+        code, j = P("/api/git/pull", {"project": "lagu"}); assert code == 400 and "commit antes" in j["error"] and j["dirty"] == ["a.txt"], j
+        g(lagu, "checkout", "--", "a.txt")
+        code, j = P("/api/git/pull", {"project": "lagu"})
+        assert code == 200 and j["updated"] and g(lagu, "rev-parse", "HEAD") == g(remote, "rev-parse", "main"), j
+        g(lagu, "branch", "-q", "-D", "main-local")
+        print("OK: fetch, pull --ff-only (avanca; recusa com alteracoes; divergente nao faz merge)")
+
+        # ---- copias (worktree) por agente
+        code, j = P("/api/worktree/create", {"project": "lagu", "agent": "ninguem"}); assert code == 400 and "registrado" in j["error"], j
+        code, j = P("/api/worktree/create", {"project": "lagu", "agent": "claude", "base": "nao-existe"}); assert code == 400 and "nao existe" in j["error"], j
+        code, j = P("/api/worktree/create", {"project": "lagu", "agent": "claude", "base": "--force"}); assert code == 400, j
+        code, j = P("/api/worktree/create", {"project": "lagu", "agent": "claude"})
+        wc = os.path.join(os.path.dirname(lagu), "lagu-claude")
+        assert code == 200 and j["worktree"]["path"] == wc and j["worktree"]["branch"] == "dove/claude" and j["worktree"]["base"] == "main", j
+        assert not j["worktree"]["reused"] and os.path.isdir(wc) and g(wc, "branch", "--show-current") == "dove/claude"
+        code, j = P("/api/worktree/create", {"project": "lagu", "agent": "claude"}); assert code == 400 and "ja tem" in j["error"], j
+        g(lagu, "branch", "dove/codex")  # branch ja existe: reaproveita
+        r = run(env, "worktree", "create", "--project", "lagu", "--agent", "codex", "--from", "codex")
+        assert r.returncode == 1 and "so o humano" in r.stderr, r.stderr
+        r = run(env, "worktree", "create", "--project", "lagu", "--agent", "codex", "--from", "luiz"); assert r.returncode == 0, r.stderr
+        wx = os.path.join(os.path.dirname(lagu), "lagu-codex")
+        assert "branch existente" in r.stdout and g(wx, "branch", "--show-current") == "dove/codex"
+        pj = json.load(open(os.path.join(home, "projects.json"), encoding="utf-8"))[0]
+        assert set(pj["worktrees"]) == {"claude", "codex"} and pj["worktrees"]["codex"]["path"] == wx, pj
+        os.makedirs(os.path.join(os.path.dirname(lagu), "lagu-hermes"))  # pasta ocupada por outra coisa
+        code, j = P("/api/worktree/create", {"project": "lagu", "agent": "hermes"}); assert code == 400 and "ja existe" in j["error"], j
+        os.rmdir(os.path.join(os.path.dirname(lagu), "lagu-hermes"))
+        lst = run(env, "worktree", "list", "--project", "lagu").stdout
+        assert "claude" in lst and "dove/codex" in lst and wx in lst and "limpa" in lst, lst
+        assert run(env, "whereami", "--agent", "claude", "--project", "lagu").stdout.strip() == wc
+        assert run(env, "whereami", "--agent", "hermes", "--project", "lagu").stdout.strip() == lagu
+        ob = run(env, "onboard", "--agent", "claude", "--project", "lagu").stdout
+        assert f"Sua pasta de trabalho neste projeto: `{wc}` (branch `dove/claude`)" in ob and "o Luiz traz seu trabalho pelo painel" in ob, ob
+        assert "Sua pasta de trabalho" not in run(env, "onboard", "--agent", "hermes", "--project", "lagu").stdout
+        gen = run(env, "onboard", "--agents-md", "--project", "lagu").stdout
+        assert "`a2a whereami --agent <seu-nome> --project lagu`" in gen and "Sua pasta" not in gen, gen
+        code, j = req(port, "GET", "/api/onboard?agent=claude&project=lagu", None, T); assert wc in j["text"], j
+        code, j = P("/api/project/open", {"name": "lagu", "agent": "claude"}); assert code == 200 and j["path"] == wc, j
+        code, j = P("/api/project/open", {"name": "lagu", "agent": "hermes"}); assert code == 400, j
+        # trabalho dos agentes: claude commita algo novo; codex mexe na mesma linha que o main vai mexer
+        write(os.path.join(wc, "c.txt"), "do claude\n"); g(wc, "add", "."); g(wc, "commit", "-qm", "claude: c.txt")
+        write(os.path.join(wx, "conf.txt"), "linha=codex\n"); g(wx, "commit", "-qam", "codex: conf")
+        write(os.path.join(wx, "rascunho.txt"), "wip\n")  # sujo (nao rastreado)
+        code, s = G("/api/git/status?project=lagu")
+        w1, w2 = s["worktrees"]["claude"], s["worktrees"]["codex"]
+        assert (w1["ahead"], w1["behind"], w1["dirty"], w1["unmerged"]) == (1, 0, 0, 1) and w1["last"]["subject"] == "claude: c.txt", w1
+        assert w2["dirty"] == 1 and w2["ahead"] == 1 and w2["exists"] and w2["path"] == wx, w2
+        code, s = G("/api/git/status?project=lagu&agent=claude")
+        assert code == 200 and s["branch"] == "dove/claude" and s["path"] == wc and s["worktrees"] == {}, s
+        print("OK: worktree create (pasta <proj>-<agente>, dove/<agente>, reaproveita branch, pasta ocupada, so humano), list, resumo, whereami, onboard")
+
+        # ---- merge (Trazer para minha branch)
+        write(os.path.join(lagu, "a.txt"), "sujo\n")
+        code, j = P("/api/worktree/merge", {"project": "lagu", "agent": "claude"}); assert code == 400 and "commit antes" in j["error"], j
+        g(lagu, "checkout", "--", "a.txt")
+        code, j = P("/api/worktree/merge", {"project": "lagu", "agent": "claude"})
+        assert code == 200 and j["merged"] and j["branch"] == "main" and os.path.exists(os.path.join(lagu, "c.txt")), j
+        assert g(lagu, "log", "-1", "--format=%s") == "Merge dove/claude (via Dove)" and len(g(lagu, "log", "-1", "--format=%P").split()) == 2
+        code, j = P("/api/worktree/merge", {"project": "lagu", "agent": "claude"}); assert code == 200 and not j["merged"], j
+        write(os.path.join(lagu, "conf.txt"), "linha=main\n"); g(lagu, "commit", "-qam", "main: conf")
+        head = g(lagu, "rev-parse", "HEAD")
+        code, j = P("/api/worktree/merge", {"project": "lagu", "agent": "codex"})
+        assert code == 400 and j["conflicts"] == ["conf.txt"] and j["aborted"] and j["clean"] and "conflito" in j["error"], j
+        assert g(lagu, "status", "--porcelain") == "" and g(lagu, "rev-parse", "HEAD") == head
+        assert not os.path.exists(os.path.join(lagu, ".git", "MERGE_HEAD"))
+        # ---- sync (Atualizar copia)
+        code, j = P("/api/worktree/sync", {"project": "lagu", "agent": "codex"})
+        assert code == 400 and "nao commitados" not in j["error"] and j["conflicts"] == ["conf.txt"], j  # untracked nao bloqueia; conflito aborta
+        assert g(wx, "status", "--porcelain") == "?? rascunho.txt"
+        write(os.path.join(wc, "c.txt"), "editando\n")
+        code, j = P("/api/worktree/sync", {"project": "lagu", "agent": "claude"}); assert code == 400 and "nao commitados" in j["error"], j
+        g(wc, "checkout", "--", "c.txt")
+        code, j = P("/api/worktree/sync", {"project": "lagu", "agent": "claude"})
+        assert code == 200 and j["merged"] and open(os.path.join(wc, "conf.txt")).read() == "linha=main\n", j
+        print("OK: merge --no-ff (limpo; recusa com main sujo; conflito -> abortado, main limpo, arquivos listados) e sync")
+
+        # ---- remove
+        code, j = P("/api/worktree/remove", {"project": "lagu", "agent": "codex"})
+        assert code == 400 and j["dirty"] == ["rascunho.txt"] and os.path.isdir(wx), j
+        os.remove(os.path.join(wx, "rascunho.txt"))
+        code, j = P("/api/worktree/remove", {"project": "lagu", "agent": "codex"})
+        assert code == 400 and j["unmerged"] == 1 and "mantenha" in j["error"] and os.path.isdir(wx), j
+        code, s = G("/api/git/status?project=lagu")
+        assert s["worktrees"]["claude"]["unmerged"] == 0 and s["worktrees"]["claude"]["ahead"] == 1, s["worktrees"]["claude"]  # so o merge do sync
+        code, j = P("/api/worktree/remove", {"project": "lagu", "agent": "claude"})
+        assert code == 200 and not os.path.exists(wc) and g(lagu, "rev-parse", "--verify", "dove/claude"), j
+        assert "claude" not in json.load(open(os.path.join(home, "projects.json"), encoding="utf-8"))[0]["worktrees"]
+        code, j = P("/api/worktree/remove", {"project": "lagu", "agent": "claude"}); assert code == 400, j
+        r = run(env, "worktree", "remove", "--project", "lagu", "--agent", "codex", "--from", "luiz")
+        assert r.returncode == 1 and "nao estao em main" in r.stderr, r.stderr
+        print("OK: remove (recusa suja / com commits fora da base; limpa+juntada remove a pasta e mantem a branch)")
+
+        # ---- canal: reports do luiz; luiz sem status
+        bodies = [m["body"] for m in msgs() if m["from"] == "luiz" and m["to"] == "all" and m["kind"] == "report" and m["project"] == "lagu"]
+        for needle in ("fez commit em main", "fez push de feat/x", "fez push de main", "fez pull em main", "criou a copia de trabalho de claude",
+                       "fez merge de dove/claude em main", "atualizou a copia de claude", "removeu a copia de trabalho de claude"):
+            assert any(needle in b for b in bodies), (needle, bodies)
+        assert not any("codex" in b and "merge de" in b for b in bodies), bodies  # conflito nao gera "fez merge"
+        assert not os.path.exists(os.path.join(home, "status", "luiz.json"))
+        print("OK: cada acao do humano vira report luiz -> all no canal; luiz continua sem status")
+    finally:
+        p.terminate(); p.communicate(timeout=5)
+
+    # ---- nenhuma acao monta argv proibido (--force, reset, rebase, clean, branch -D)
+    calls, real = [], a2a.run_git
+    def spy(cwd, args, **kw): calls.append(list(args)); return real(cwd, args, **kw)
+    try:
+        a2a.run_git = spy
+        write(os.path.join(lagu, "z.txt"), "z\n"); a2a.git_commit("lagu", "", "z", None)
+        a2a.git_fetch("lagu")
+        try: a2a.git_push("lagu", "", "main")
+        except a2a.DoveError: pass
+        try: a2a.git_pull("lagu")
+        except a2a.DoveError: pass
+        try: a2a.worktree_merge("lagu", "codex")
+        except a2a.DoveError: pass
+        try: a2a.worktree_sync("lagu", "codex")
+        except a2a.DoveError: pass
+        try: a2a.worktree_remove("lagu", "codex")
+        except a2a.DoveError: pass
+        a2a.git_status("lagu"); a2a.git_diff
+    finally:
+        a2a.run_git = real
+    flat = [x for c in calls for x in c]
+    assert calls and any(c[:1] == ["push"] for c in calls), calls
+    for bad in ("--force", "-f", "--force-with-lease", "--hard", "rebase", "clean", "-D", "--delete"):
+        assert bad not in flat, (bad, [c for c in calls if bad in c])
+    assert all(c == ["push", "-u", "origin", "main"] for c in calls if c[0] == "push"), calls
+    assert not any(c[0] == "reset" for c in calls)
+    print(f"OK: {len(calls)} comandos git montados, nenhum com --force/reset/rebase/clean/branch -D")
+
 if __name__ == "__main__":
     main()
     fase1()
     robustez()
     fase2()
+    git_fase()

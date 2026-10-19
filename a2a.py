@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """a2a (Dove) - canal de mensagens agente-a-agente, local e global."""
-import argparse, glob, hmac, json, os, re, secrets, sys, time, traceback, uuid
+import argparse, glob, hmac, json, os, re, secrets, subprocess, sys, threading, time, traceback, uuid
 from datetime import datetime, timezone
 
 DOVE_VERSION = "0.6.0"
@@ -20,7 +20,9 @@ HUMAN = "luiz"          # humano padrao (painel e missoes)
 CTX_HIGH = 80           # contexto >= isto: preparar handoff
 CLOSED = ("CONCLUIDO", "CANCELADO")
 
-class DoveError(Exception): pass
+class DoveError(Exception):
+    """Erro do usuario (400). `data` vai junto no JSON (ex.: arquivos em conflito)."""
+    def __init__(self, msg, data=None): super().__init__(msg); self.data = data or {}
 
 def now_iso(): return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 def ensure_dirs():
@@ -568,10 +570,15 @@ def project_info(name):
         info.update(is_repo=True, branch=g["branch"], remote=g["remote"], host=g["host"],
                     last_activity_iso=g["last_activity_iso"])
     return info
-def project_open(name):
-    """Abre a pasta de um projeto REGISTRADO no gerenciador de arquivos (nunca um caminho arbitrario)."""
-    path = find_project(name).get("path") or ""
-    if not os.path.isdir(path): raise DoveError(f"a pasta do projeto nao existe mais: {path}")
+def project_open(name, agent=""):
+    """Abre a pasta de um projeto REGISTRADO (ou da copia de trabalho registrada de um agente) no gerenciador
+    de arquivos - nunca um caminho arbitrario."""
+    p = find_project(name); path = p.get("path") or ""
+    if agent:
+        wt = project_worktrees(p).get(agent)
+        if not wt: raise DoveError(f"'{agent}' nao tem copia de trabalho em '{p['name']}'")
+        path = wt["path"]
+    if not os.path.isdir(path): raise DoveError(f"a pasta {'da copia' if agent else 'do projeto'} nao existe mais: {path}")
     if os.environ.get("DOVE_FAKE_OPEN") == "1": return path  # testes: nao abre nada
     try:
         if is_windows(): os.startfile(path)  # type: ignore[attr-defined]
@@ -581,6 +588,432 @@ def project_open(name):
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e: raise DoveError(f"nao consegui abrir a pasta {path}: {e}")
     return path
+
+# ---------------------------------------------------------------- git (acoes do humano pelo painel) e copias por agente
+# Regras: so em projetos registrados ou nas copias registradas dos agentes; nunca --force, reset --hard, rebase,
+# clean ou apagar branch. Pull e --ff-only; merge e --no-ff e conflito vira merge --abort (arvore limpa).
+GIT_TIMEOUT, GIT_NET_TIMEOUT = 30, 180   # fetch/pull/push (e commit, por causa de hooks) usam o longo
+DIFF_MAX, FILES_MAX, OUT_TAIL = 200 * 1024, 3000, 4000
+_repo_locks, _repo_locks_guard = {}, threading.Lock()
+def repo_lock(path):
+    """Uma acao de escrita por repositorio por vez (o painel e multi-thread)."""
+    k = norm_path(path)
+    with _repo_locks_guard: return _repo_locks.setdefault(k, threading.Lock())
+def git_env():
+    return dict(os.environ, GIT_TERMINAL_PROMPT="0", LC_ALL="C", LANGUAGE="C", GIT_PAGER="cat",
+                GIT_MERGE_AUTOEDIT="no", GIT_OPTIONAL_LOCKS="0", GIT_EDITOR=":")
+def git_argv(args): return ["git", "-c", "core.quotepath=false", "-c", "color.ui=false", *args]
+def run_git(cwd, args, timeout=GIT_TIMEOUT, input_bytes=None, literal=False):
+    """Roda git (lista de argumentos, nunca shell) em cwd. Devolve (codigo, stdout, stderr) em UTF-8."""
+    env = git_env()
+    if literal: env["GIT_LITERAL_PATHSPECS"] = "1"  # nomes com * ? [ : nao viram padrao
+    try:
+        r = subprocess.run(git_argv(args), cwd=cwd, env=env, capture_output=True, timeout=timeout,
+                           input=input_bytes, stdin=None if input_bytes is not None else subprocess.DEVNULL)
+    except FileNotFoundError: raise DoveError("git nao encontrado no PATH - instale o Git (no Windows: winget install Git.Git) e abra o dove de novo")
+    except subprocess.TimeoutExpired: raise DoveError(f"git {args[0]} demorou mais de {timeout}s e foi interrompido")
+    except OSError as e: raise DoveError(f"nao consegui rodar o git em {cwd}: {e}")
+    dec = lambda b: (b or b"").decode("utf-8", "replace")
+    return r.returncode, dec(r.stdout), dec(r.stderr)
+def git_ok(cwd, args, **kw):
+    """Roda e exige sucesso: erro do git vira DoveError com a mensagem dele."""
+    rc, out, err = run_git(cwd, args, **kw)
+    if rc != 0: raise DoveError(git_hint(err or out) or f"git {args[0]} falhou: {tail(err or out, 600)}")
+    return out
+def tail(t, n=OUT_TAIL): t = (t or "").strip(); return t if len(t) <= n else "..." + t[-n:]
+def git_hint(text):
+    """Mensagem clara para as falhas comuns (auth, rejeitado, sem upstream, sem identidade)."""
+    t = (text or "").lower()
+    if any(x in t for x in ("authentication failed", "could not read username", "terminal prompts disabled",
+                            "permission denied (publickey)", "could not read password", "invalid username or password")):
+        return "o git precisa de login: rode `git push` uma vez no terminal desse projeto (faca login), depois tente de novo"
+    if "[rejected]" in t or "non-fast-forward" in t or "fetch first" in t or "updates were rejected" in t:
+        return "o remoto tem commits que voce ainda nao tem: faca Pull antes"
+    if "no tracking information" in t or "no upstream" in t:
+        return "esta branch ainda nao tem upstream: faca Push primeiro (ele configura o upstream)"
+    if "not possible to fast-forward" in t or "diverging branches" in t:
+        return "sua branch e o remoto divergiram: o Pull so avanca sem merge (--ff-only). Resolva no terminal (git pull) ou fale com o agente"
+    if "please tell me who you are" in t or "unable to auto-detect email" in t:
+        return 'o git nao sabe seu nome/e-mail: rode no terminal git config --global user.name "Seu Nome" e git config --global user.email voce@exemplo.com'
+    if "does not appear to be a git repository" in t or "no such remote" in t:
+        return "este repositorio nao tem remote 'origin'"
+    if "could not resolve host" in t or "unable to access" in t:
+        return "sem acesso ao remoto (rede/VPN?): " + tail(text, 300)
+    return ""
+def git_toplevel(path):
+    if not os.path.isdir(path): raise DoveError(f"a pasta nao existe: {path}")
+    rc, out, err = run_git(path, ["rev-parse", "--show-toplevel"])
+    if rc != 0: raise DoveError(f"nao e um repositorio git: {path}")
+    return os.path.normpath(out.strip())
+def git_common_dir(path):
+    rc, out, _ = run_git(path, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    return norm_path(out.strip()) if rc == 0 else ""
+def project_worktrees(p):
+    w = p.get("worktrees")
+    return {k: v for k, v in w.items() if isinstance(v, dict) and v.get("path")} if isinstance(w, dict) else {}
+def git_target(project, agent=""):
+    """Resolve onde o git roda: a pasta do projeto registrado ou a copia registrada do agente. Nada vem do cliente."""
+    p = find_project(project); main = git_toplevel(p.get("path") or "")
+    agent = (agent or "").strip()
+    if not agent: return {"project": p["name"], "agent": "", "path": main, "main": main, "meta": p}
+    wt = project_worktrees(p).get(agent)
+    if not wt: raise DoveError(f"'{agent}' nao tem copia de trabalho em '{p['name']}'")
+    path = git_toplevel(wt["path"])
+    if git_common_dir(path) != git_common_dir(main):
+        raise DoveError(f"{path} nao e uma copia (worktree) do repositorio de '{p['name']}'")
+    return {"project": p["name"], "agent": agent, "path": path, "main": main, "meta": p, "wt": wt}
+def current_branch(cwd):
+    rc, out, _ = run_git(cwd, ["symbolic-ref", "--short", "-q", "HEAD"])
+    return out.strip() if rc == 0 else ""
+def head_hash(cwd, short=True):
+    rc, out, _ = run_git(cwd, ["rev-parse", "-q", "--verify"] + (["--short"] if short else []) + ["HEAD"])
+    return out.strip() if rc == 0 else ""
+def branch_exists(cwd, b):
+    return bool(b) and run_git(cwd, ["show-ref", "--verify", "--quiet", "refs/heads/" + b])[0] == 0
+def check_branch_name(cwd, b):
+    b = (b or "").strip()
+    if not b or b.startswith("-") or run_git(cwd, ["check-ref-format", "--branch", b])[0] != 0:
+        raise DoveError(f"nome de branch invalido: '{b}'")
+    return b
+def default_branch(cwd):
+    rc, out, _ = run_git(cwd, ["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"])
+    if rc == 0 and out.strip().startswith("origin/"): return out.strip()[7:]
+    for b in ("main", "master"):
+        if branch_exists(cwd, b) or run_git(cwd, ["show-ref", "--verify", "--quiet", "refs/remotes/origin/" + b])[0] == 0:
+            return b
+    return ""
+def is_protected(cwd, branch):
+    return branch in ("main", "master") or (bool(branch) and branch == default_branch(cwd))
+def parse_porcelain(out):
+    """git status --porcelain=v1 -z -> [{path, x, y, from}] (renomeado: 'XY novo\\0antigo\\0')."""
+    items, parts, i = [], out.split("\0"), 0
+    while i < len(parts):
+        e = parts[i]; i += 1
+        if len(e) < 4: continue
+        x, y, path = e[0], e[1], e[3:]
+        f = {"path": path, "x": x, "y": y, "from": ""}
+        if x in "RC" and i < len(parts): f["from"] = parts[i]; i += 1
+        f["untracked"] = x == "?"; items.append(f)
+    return items
+def git_files(cwd):
+    rc, out, err = run_git(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+    if rc != 0: raise DoveError(f"git status falhou: {tail(err, 400)}")
+    return parse_porcelain(out)
+def tracked_dirty(files): return [f for f in files if not f["untracked"]]
+def ahead_behind(cwd, left, right):
+    """git rev-list --left-right --count left...right -> (so em left, so em right)."""
+    rc, out, _ = run_git(cwd, ["rev-list", "--left-right", "--count", f"{left}...{right}"])
+    try: a, b = out.split(); return int(a), int(b)
+    except ValueError: return None, None
+def last_commits(cwd, n=10, rev="HEAD"):
+    rc, out, _ = run_git(cwd, ["log", f"-{n}", "--format=%H%x1f%h%x1f%s%x1f%an%x1f%aI%x1f%ar%x1e", rev, "--"])
+    if rc != 0: return []
+    out_ = []
+    for rec in out.split("\x1e"):
+        f = rec.strip("\n").split("\x1f")
+        if len(f) == 6: out_.append({"hash": f[0], "short": f[1], "subject": f[2], "author": f[3], "date": f[4], "rel": f[5]})
+    return out_
+def worktree_summary(main, agent, wt):
+    path, branch, base = wt.get("path", ""), wt.get("branch") or f"dove/{agent}", wt.get("base", "")
+    s = {"agent": agent, "path": path, "branch": branch, "base": base, "exists": os.path.isdir(path),
+         "ahead": None, "behind": None, "unmerged": None, "dirty": None, "last": None, "created": wt.get("created", "")}
+    if branch_exists(main, branch) and branch_exists(main, base):
+        s["behind"], s["ahead"] = ahead_behind(main, base, branch)
+        s["unmerged"] = unmerged_commits(main, base, branch) if s["ahead"] else 0  # 0 = nada a perder ao remover
+    lc = last_commits(main, 1, "refs/heads/" + branch) if branch_exists(main, branch) else []
+    s["last"] = lc[0] if lc else None
+    if s["exists"]:
+        try: s["dirty"] = len(git_files(path)); s["current"] = current_branch(path)
+        except DoveError: s["exists"] = False
+    return s
+def git_status(project, agent=""):
+    t = git_target(project, agent); cwd = t["path"]
+    branch = current_branch(cwd); head = head_hash(cwd)
+    rc, up, _ = run_git(cwd, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+    up = up.strip() if rc == 0 else ""
+    behind = ahead = None
+    if up and head: behind, ahead = ahead_behind(cwd, "@{u}", "HEAD")
+    files = git_files(cwd); trunc = len(files) > FILES_MAX
+    rc, url, _ = run_git(cwd, ["remote", "get-url", "origin"]); url = url.strip() if rc == 0 else ""
+    rc, br, _ = run_git(cwd, ["for-each-ref", "--format=%(refname:short)", "--count=300", "refs/heads"])
+    dflt = default_branch(cwd)
+    res = {"project": t["project"], "agent": t["agent"], "path": cwd, "branch": branch, "head": head,
+           "detached": not branch and bool(head), "empty": not head, "upstream": up, "ahead": ahead, "behind": behind,
+           "files": files[:FILES_MAX], "files_total": len(files), "files_truncated": trunc,
+           "commits": last_commits(cwd, 10) if head else [], "remote": url, "host": remote_host(url),
+           "default_branch": dflt, "protected": is_protected(cwd, branch) if branch else False,
+           "branches": [x for x in br.splitlines() if x] if rc == 0 else [], "worktrees": {}}
+    if not t["agent"]:
+        res["worktrees"] = {a: worktree_summary(cwd, a, w) for a, w in sorted(project_worktrees(t["meta"]).items())}
+    return res
+def safe_join(root, rel):
+    full = os.path.realpath(os.path.join(root, rel))
+    r = os.path.realpath(root)
+    if os.path.commonpath([full, r]) != r: raise DoveError("caminho fora do repositorio")
+    return full
+def git_diff(project, agent="", path="", staged=False):
+    t = git_target(project, agent); cwd = t["path"]
+    f = next((x for x in git_files(cwd) if path and path in (x["path"], x["from"])), None)
+    if not f: raise DoveError(f"'{path}' nao esta entre os arquivos alterados")
+    res = {"path": f["path"], "from": f["from"], "x": f["x"], "y": f["y"], "untracked": f["untracked"],
+           "binary": False, "truncated": False, "text": ""}
+    if f["untracked"]:
+        full = safe_join(cwd, f["path"])
+        if os.path.isdir(full): res["text"] = "(pasta)"; return res
+        try:
+            with open(full, "rb") as fh: raw = fh.read(DIFF_MAX + 1)
+        except OSError as e: raise DoveError(f"nao consegui ler {f['path']}: {e}")
+        if b"\0" in raw[:8000]: res["binary"] = True; return res
+        res["truncated"] = len(raw) > DIFF_MAX
+        body = raw[:DIFF_MAX].decode("utf-8", "replace")
+        res["text"] = f"arquivo novo (nao rastreado): {f['path']}\n" + "".join("+" + l for l in body.splitlines(True))
+        return res
+    paths = [f["path"]] + ([f["from"]] if f["from"] else [])
+    base = ["diff", "--no-color", "--no-ext-diff", "-M"]
+    if staged: args = base + ["--cached"]
+    elif head_hash(cwd): args = base + ["HEAD"]
+    else: args = base + ["--cached"]  # repo sem commits: tudo que esta no index
+    rc, out, err = run_git(cwd, args + ["--"] + paths, literal=True)
+    if rc != 0: raise DoveError(f"git diff falhou: {tail(err, 400)}")
+    if "\nBinary files " in "\n" + out or out.startswith("Binary files"): res["binary"] = True
+    b = out.encode("utf-8")
+    if len(b) > DIFF_MAX: res["truncated"] = True; out = b[:DIFF_MAX].decode("utf-8", "ignore")
+    res["text"] = out
+    return res
+def bus_report(project, body):
+    """Toda acao git/worktree do humano vira um report de luiz para todos (historico). Humano nao ganha status."""
+    try: post_message(human_name(), "all", body, kind="report", project=project, auto_status=False)
+    except Exception as e: log_err(f"aviso: acao feita, mas nao registrei no canal: {e}")
+def _where(t): return t["project"] + (f" (copia de {t['agent']})" if t["agent"] else "")
+def git_commit(project, agent="", message="", paths=None):
+    message = (message or "").strip()
+    if not message: raise DoveError("escreva a mensagem do commit")
+    t = git_target(project, agent); cwd = t["path"]
+    with repo_lock(t["main"]):
+        files = git_files(cwd)
+        if not files: raise DoveError("nada para commitar: nenhum arquivo alterado")
+        byp = {}
+        for f in files:
+            byp[f["path"]] = f
+            if f["from"]: byp[f["from"]] = f
+        if paths is None: chosen = files
+        else:
+            if not isinstance(paths, list) or not paths: raise DoveError("escolha pelo menos um arquivo")
+            bad = [p for p in paths if not isinstance(p, str) or p not in byp]
+            if bad: raise DoveError(f"arquivo nao esta entre os alterados: {bad[0]}")
+            chosen = list({id(byp[p]): byp[p] for p in paths}.values())
+        spec = []
+        for f in chosen: spec += [f["path"]] + ([f["from"]] if f["from"] else [])
+        nul = ("\0".join(spec) + "\0").encode("utf-8")
+        git_ok(cwd, ["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"], input_bytes=nul, literal=True)
+        rc, out, err = run_git(cwd, ["commit", "-m", message, "--pathspec-from-file=-", "--pathspec-file-nul"],
+                               timeout=GIT_NET_TIMEOUT, input_bytes=nul, literal=True)
+        if rc != 0: raise DoveError(git_hint(err + out) or f"commit falhou: {tail(err or out, 800)}")
+        h = head_hash(cwd); br = current_branch(cwd) or "HEAD"
+    bus_report(t["project"], f"{human_name()} fez commit em {br} de {_where(t)}: {short(message, 80)} ({h}, {len(chosen)} arquivo(s))")
+    return {"hash": h, "branch": br, "files": len(chosen), "output": tail(out)}
+def push_argv(branch):
+    """Unico push que o Dove faz: a branch atual para origin, com upstream. Nunca --force nem outros refspecs."""
+    return ["push", "-u", "origin", branch]
+def git_fetch(project, agent=""):
+    t = git_target(project, agent)
+    with repo_lock(t["main"]):
+        rc, out, err = run_git(t["path"], ["fetch", "origin"], timeout=GIT_NET_TIMEOUT)
+    if rc != 0: raise DoveError(git_hint(err) or f"fetch falhou: {tail(err, 800)}")
+    return {"output": tail(out + err) or "ja estava atualizado"}
+def git_pull(project, agent=""):
+    t = git_target(project, agent); cwd = t["path"]
+    with repo_lock(t["main"]):
+        br = current_branch(cwd)
+        if not br: raise DoveError("HEAD destacado (detached): mude para uma branch antes do Pull")
+        d = tracked_dirty(git_files(cwd))
+        if d: raise DoveError(f"ha {len(d)} arquivo(s) com alteracoes nao commitadas: faca commit antes do Pull", {"dirty": [f["path"] for f in d[:50]]})
+        before = head_hash(cwd)
+        rc, out, err = run_git(cwd, ["pull", "--ff-only", "--no-rebase", "--no-edit"], timeout=GIT_NET_TIMEOUT)
+        if rc != 0: raise DoveError(git_hint(err + out) or f"pull falhou: {tail(err or out, 800)}")
+        after = head_hash(cwd)
+    if before != after: bus_report(t["project"], f"{human_name()} fez pull em {br} de {_where(t)} ({before or '-'} -> {after})")
+    return {"output": tail(out + err), "updated": before != after, "hash": after, "branch": br}
+def git_push(project, agent="", confirm_branch=""):
+    t = git_target(project, agent); cwd = t["path"]
+    with repo_lock(t["main"]):
+        br = current_branch(cwd)
+        if not br: raise DoveError("HEAD destacado (detached): nao ha branch para enviar")
+        if not head_hash(cwd): raise DoveError("a branch ainda nao tem commits")
+        if is_protected(cwd, br) and (confirm_branch or "").strip() != br:
+            raise DoveError(f"push direto para '{br}' exige confirmacao: digite o nome da branch ({br})", {"needs_confirm": br})
+        rc, out, err = run_git(cwd, push_argv(br), timeout=GIT_NET_TIMEOUT)
+        if rc != 0: raise DoveError(git_hint(err + out) or f"push falhou: {tail(err or out, 800)}", {"output": tail(err + out)})
+        h = head_hash(cwd)
+    bus_report(t["project"], f"{human_name()} fez push de {br} para origin em {_where(t)} ({h})")
+    return {"output": tail(out + err), "branch": br, "hash": h}
+
+# ---- copias de trabalho (git worktree) por agente: <pasta-do-projeto>-<agente>, branch dove/<agente>
+def worktree_path(p, agent):
+    return os.path.normpath((p.get("path") or "").rstrip("\\/") + "-" + agent)
+def _worktree_list(main):
+    """git worktree list --porcelain -> {path normalizado: branch}."""
+    rc, out, _ = run_git(main, ["worktree", "list", "--porcelain"])
+    res, cur = {}, None
+    for line in out.splitlines():
+        if line.startswith("worktree "): cur = norm_path(line[9:].strip()); res[cur] = ""
+        elif line.startswith("branch ") and cur: res[cur] = line[7:].strip().replace("refs/heads/", "", 1)
+    return res
+def _save_worktree(name, agent, data):
+    with FileLock(PROJECTS):
+        ps = load_projects(); hit = next((x for x in ps if x["name"] == name), None)
+        if not hit: raise DoveError(f"projeto '{name}' nao encontrado")
+        w = hit.get("worktrees") if isinstance(hit.get("worktrees"), dict) else {}
+        if data is None: w.pop(agent, None)
+        else: w[agent] = data
+        hit["worktrees"] = w; write_json(PROJECTS, ps)
+def worktree_create(project, agent, base=""):
+    agent, p = (agent or "").strip(), find_project(project)
+    if agent not in registered_agents(): raise DoveError(f"agente '{agent}' nao esta registrado (use + Agente ou a2a join)")
+    main = git_toplevel(p.get("path") or "")
+    if agent in project_worktrees(p): raise DoveError(f"'{agent}' ja tem copia de trabalho em '{p['name']}': {project_worktrees(p)[agent]['path']}")
+    path, branch = worktree_path(p, agent), f"dove/{agent}"
+    with repo_lock(main):
+        base = (base or "").strip() or current_branch(main)
+        if not base: raise DoveError("a pasta principal esta em HEAD destacado: escolha a branch base")
+        base = check_branch_name(main, base)
+        if not branch_exists(main, base): raise DoveError(f"a branch base '{base}' nao existe")
+        if os.path.exists(path):
+            if _worktree_list(main).get(norm_path(path)) != branch:
+                raise DoveError(f"a pasta {path} ja existe e nao e a copia de {agent} (branch {branch}) - mova ou renomeie essa pasta")
+            out, reused, adopted = "copia ja existia: so registrei", True, True
+        else:
+            reused, adopted = branch_exists(main, branch), False
+            args = ["worktree", "add", path, branch] if reused else ["worktree", "add", "-b", branch, path, base]
+            out = git_ok(main, args)
+        wt = {"path": path, "branch": branch, "base": base, "created": now_iso()}
+        _save_worktree(p["name"], agent, wt)
+    bus_report(p["name"], f"{human_name()} criou a copia de trabalho de {agent} em {p['name']}: {path} "
+                          f"(branch {branch}{' ja existente' if reused else ' a partir de ' + base}). "
+                          f"{agent}: trabalhe e faca commits so nessa pasta; nao faca push nem merge.")
+    return dict(wt, agent=agent, reused=reused, adopted=adopted, output=tail(out))
+def _merge(cwd, rev, msg):
+    """merge --no-ff; conflito -> merge --abort e DoveError com os arquivos (arvore volta limpa)."""
+    before = head_hash(cwd)
+    rc, out, err = run_git(cwd, ["merge", "--no-ff", "--no-edit", "-m", msg, rev], timeout=GIT_NET_TIMEOUT)
+    if rc == 0:
+        after = head_hash(cwd); return {"hash": after, "merged": before != after, "output": tail(out + err)}
+    in_merge = run_git(cwd, ["rev-parse", "-q", "--verify", "MERGE_HEAD"])[0] == 0
+    _, cf, _ = run_git(cwd, ["diff", "--name-only", "--diff-filter=U", "-z"])
+    conflicts = [x for x in cf.split("\0") if x]
+    if in_merge or conflicts:
+        rc2, _, err2 = run_git(cwd, ["merge", "--abort"])
+        clean = not tracked_dirty(git_files(cwd))
+        raise DoveError(f"conflito em {len(conflicts)} arquivo(s): {', '.join(conflicts[:10])}"
+                        + ("" if len(conflicts) <= 10 else ", ...") + ". Nada mudou: o merge foi desfeito"
+                        + ("" if rc2 == 0 and clean else f" (ATENCAO: merge --abort falhou: {tail(err2, 200)})")
+                        + ". Peca ao agente para usar \"Atualizar copia\" e resolver, ou resolva no terminal.",
+                        {"conflicts": conflicts, "aborted": rc2 == 0, "clean": clean})
+    raise DoveError(git_hint(err + out) or f"merge falhou: {tail(err or out, 800)}")
+def _wt_target(project, agent):
+    t = git_target(project, agent)
+    return t, t["wt"].get("branch") or f"dove/{agent}", t["wt"].get("base") or ""
+def worktree_merge(project, agent):
+    """'Trazer para minha branch': na pasta PRINCIPAL, merge --no-ff de dove/<agente>."""
+    t, branch, _ = _wt_target(project, agent); main = t["main"]
+    with repo_lock(main):
+        cur = current_branch(main)
+        if not cur: raise DoveError("a pasta principal esta em HEAD destacado: mude para uma branch antes")
+        d = tracked_dirty(git_files(main))
+        if d: raise DoveError(f"a pasta principal tem {len(d)} arquivo(s) nao commitados: faca commit antes de trazer o trabalho", {"dirty": [f["path"] for f in d[:50]]})
+        r = _merge(main, branch, f"Merge {branch} (via Dove)")
+    if r["merged"]: bus_report(t["project"], f"{human_name()} fez merge de {branch} em {cur} ({r['hash']}) no projeto {t['project']}")
+    return dict(r, branch=cur, source=branch)
+def worktree_sync(project, agent):
+    """'Atualizar copia': na copia do agente, merge --no-ff da branch base."""
+    t, branch, base = _wt_target(project, agent); cwd = t["path"]
+    if not base: raise DoveError("copia sem branch base registrada")
+    with repo_lock(t["main"]):
+        d = tracked_dirty(git_files(cwd))
+        if d: raise DoveError(f"a copia de {agent} tem {len(d)} arquivo(s) nao commitados: peca ao agente para commitar antes", {"dirty": [f["path"] for f in d[:50]]})
+        r = _merge(cwd, base, f"Atualiza {branch} com {base} (via Dove)")
+    if r["merged"]: bus_report(t["project"], f"{human_name()} atualizou a copia de {agent} ({branch}) com {base} ({r['hash']}) no projeto {t['project']}")
+    return dict(r, branch=branch, source=base)
+def unmerged_commits(main, base, branch):
+    """Commits de branch fora de base. Se juntar branch em base nao mudaria nada (ex.: so merges de
+    "Atualizar copia"), conta 0. Sem git merge-tree --write-tree (git < 2.38) fica a contagem simples."""
+    rc, out, _ = run_git(main, ["rev-list", "--count", f"{base}..{branch}"])
+    try: n = int(out.strip()) if rc == 0 else 1
+    except ValueError: n = 1
+    if n:
+        rc, tree, _ = run_git(main, ["merge-tree", "--write-tree", base, branch])
+        rc2, btree, _ = run_git(main, ["rev-parse", f"{base}^{{tree}}"])
+        if rc == 0 and rc2 == 0 and tree.split() and tree.split()[0] == btree.strip(): return 0
+    return n
+def worktree_remove(project, agent):
+    p = find_project(project); wt = project_worktrees(p).get(agent)
+    if not wt: raise DoveError(f"'{agent}' nao tem copia de trabalho em '{p['name']}'")
+    main = git_toplevel(p.get("path") or ""); path, branch, base = wt["path"], wt.get("branch") or f"dove/{agent}", wt.get("base") or ""
+    with repo_lock(main):
+        if os.path.isdir(path):
+            files = git_files(git_target(project, agent)["path"])
+            if files: raise DoveError(f"a copia de {agent} tem {len(files)} alteracao(oes) nao commitada(s) - nada foi removido", {"dirty": [f["path"] for f in files[:50]]})
+        if branch_exists(main, branch) and base and branch_exists(main, base):
+            n = unmerged_commits(main, base, branch)
+            if n: raise DoveError(f"{branch} tem {n} commit(s) que ainda nao estao em {base} - traga para sua branch antes "
+                                  "(ou mantenha a copia). Nada foi removido.", {"unmerged": n})
+        if os.path.isdir(path): out = git_ok(main, ["worktree", "remove", path])
+        else: out = git_ok(main, ["worktree", "prune"])  # pasta ja sumiu: so limpa o registro do git
+        _save_worktree(p["name"], agent, None)
+    bus_report(p["name"], f"{human_name()} removeu a copia de trabalho de {agent} em {p['name']} ({path}); a branch {branch} foi mantida")
+    return {"path": path, "branch": branch, "output": tail(out)}
+def whereami(agent, project):
+    p = find_project(project); wt = project_worktrees(p).get((agent or "").strip())
+    return wt["path"] if wt else p.get("path") or ""
+def require_human(who):
+    if (who or "").strip() != human_name():
+        raise DoveError(f"so o humano ({human_name()}) faz isso: use --from {human_name()} (agentes trabalham na propria copia e nao fazem merge/push pelo Dove)")
+def cmd_worktree(a):
+    try:
+        if a.wcmd == "list":
+            ps = [find_project(a.project)] if a.project else load_projects()
+            n = 0
+            for p in ps:
+                for ag, w in sorted(project_worktrees(p).items()):
+                    n += 1; s = {}
+                    try: s = worktree_summary(git_toplevel(p["path"]), ag, w)
+                    except DoveError: pass
+                    ab = f"+{s['ahead']}/-{s['behind']} vs {w.get('base')}" if s.get("ahead") is not None else "-"
+                    dirty = f"{s['dirty']} alterado(s)" if s.get("dirty") else ("limpa" if s.get("dirty") == 0 else "pasta sumiu")
+                    print(f"{p['name']:<14} {ag:<10} {w.get('branch', ''):<16} {ab:<20} {dirty:<14} {w['path']}")
+            if not n: print("(nenhuma copia de trabalho)")
+            return
+        if a.wcmd == "create":
+            require_human(a._from); r = worktree_create(a.project, a.agent, a.base or "")
+            how = "registrada (a pasta ja era a copia)" if r["adopted"] else "criada" + (" com a branch existente" if r["reused"] else "")
+            print(f"copia de {a.agent} {how}: {r['path']} (branch {r['branch']}, base {r['base']})")
+        elif a.wcmd == "remove":
+            require_human(a._from); r = worktree_remove(a.project, a.agent)
+            print(f"copia de {a.agent} removida ({r['path']}); branch {r['branch']} mantida")
+        elif a.wcmd == "merge":
+            require_human(a._from); r = worktree_merge(a.project, a.agent)
+            print(f"merge de {r['source']} em {r['branch']}: {r['hash']}" if r["merged"] else f"nada novo em {r['source']}")
+        elif a.wcmd == "sync":
+            require_human(a._from); r = worktree_sync(a.project, a.agent)
+            print(f"copia atualizada com {r['source']}: {r['hash']}" if r["merged"] else f"copia ja estava em dia com {r['source']}")
+    except DoveError as e:
+        for f in e.data.get("conflicts", []): print(f"  conflito: {f}", file=sys.stderr)
+        fail(f"erro: {e}")
+def cmd_git(a):
+    try:
+        s = git_status(a.project, a.agent or "")
+        ab = f" +{s['ahead']}/-{s['behind']}" if s["ahead"] is not None else ""
+        print(f"{s['path']}\nbranch: {s['branch'] or '(detached ' + s['head'] + ')'}"
+              + (f" -> {s['upstream']}{ab}" if s["upstream"] else " (sem upstream)") + f"  remoto: {s['host'] or '-'}  padrao: {s['default_branch'] or '-'}")
+        print(f"alterados: {s['files_total']}")
+        for f in s["files"][:200]: print(f"  {f['x']}{f['y']} {f['path']}" + (f" (de {f['from']})" if f["from"] else ""))
+        for c in s["commits"][:5]: print(f"  {c['short']} {c['subject']} ({c['author']}, {c['rel']})")
+        for ag, w in s["worktrees"].items():
+            print(f"copia {ag}: {w['path']} {w['branch']} +{w['ahead']}/-{w['behind']} vs {w['base']}, {w['dirty']} alterado(s)")
+    except DoveError as e: fail(f"erro: {e}")
+def cmd_whereami(a):
+    try: print(whereami(a.agent, a.project))
+    except DoveError as e: fail(f"erro: {e}")
 
 def cmd_project(a):
     try:
@@ -768,7 +1201,7 @@ def cmd_summary(a):
     for d in s["recent_done"]: print(f"  - [{d['when']}] {d['who']}: {short(d['text'], 80)}")
 
 # ---------------------------------------------------------------- painel web (app dove)
-TOKEN_GETS = ("/api/scan", "/api/doctor", "/api/fs/list", "/api/project/info", "/api/onboard")
+TOKEN_GETS = ("/api/scan", "/api/doctor", "/api/fs/list", "/api/project/info", "/api/onboard", "/api/git/status", "/api/git/diff")
 FALLBACK_HTML = """<!doctype html><meta charset="utf-8"><title>Dove</title>
 <p>Dove: ui/index.html nao encontrado ao lado do a2a.py. Atualize o repo (git pull).</p>"""
 def messages_page(msgs, project=None, limit=300, before=""):
@@ -829,7 +1262,19 @@ def api_post(path, d, human):
         if not s("name").strip(): raise DoveError("informe o nome do projeto")
         project_remove(s("name").strip()); return {}
     if path == "/api/project/pin": return {"project": project_pin(s("name"), bool(d.get("pinned", True)))}
-    if path == "/api/project/open": return {"path": project_open(s("name"))}
+    if path == "/api/project/open": return {"path": project_open(s("name"), s("agent").strip())}
+    # git e copias: so o humano, pelo painel (token). Projeto/agente resolvidos no servidor, nunca caminhos do cliente.
+    pj, ag = s("project").strip(), s("agent").strip()
+    if path == "/api/git/commit":
+        paths = d.get("paths") if "paths" in d and d.get("paths") is not None else None
+        return git_commit(pj, ag, s("message"), paths)
+    if path == "/api/git/fetch": return git_fetch(pj, ag)
+    if path == "/api/git/pull": return git_pull(pj, ag)
+    if path == "/api/git/push": return git_push(pj, ag, s("confirm_branch"))
+    if path == "/api/worktree/create": return {"worktree": worktree_create(pj, ag, s("base"))}
+    if path == "/api/worktree/merge": return worktree_merge(pj, ag)
+    if path == "/api/worktree/sync": return worktree_sync(pj, ag)
+    if path == "/api/worktree/remove": return worktree_remove(pj, ag)
     if path == "/api/agent/add":
         m = agent_join(s("name"), s("type"), s("model"), s("note"), must_be_new=True)
         return {"agent": m, "onboard": onboard_text(m["name"], s("project").strip() or "<projeto>")}
@@ -879,6 +1324,12 @@ def doctor_checks(port=8765, self_port=None):
         os.remove(t)
         return ("OK", f"{HOME} (gravavel)")
     chk("A2A_HOME", home)
+    def git_chk():
+        w = shutil.which("git")
+        if not w: return ("AVISO", "git nao encontrado no PATH - as abas Git e Copias dos agentes nao funcionam")
+        rc, out, err = run_git(HOME if os.path.isdir(HOME) else ".", ["--version"])
+        return ("OK", f"{out.strip() or err.strip()} ({w})")
+    chk("git", git_chk)
     def dirs():
         out = []
         for d in (BUS, AGENTS, STATUS, MISSIONS):
@@ -995,7 +1446,7 @@ def cmd_panel(a):
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError): pass  # navegador desistiu
             except DoveError as e:
                 log_err(f"400 em {self.command} {urlparse(self.path).path}: {e}")
-                if not self.replied: self.reply(400, {"ok": False, "error": str(e)})
+                if not self.replied: self.reply(400, dict(e.data, ok=False, error=str(e)))
             except Exception as e:
                 log_err(f"erro em {self.command} {self.path}:\n" + traceback.format_exc().rstrip())
                 if not self.replied:
@@ -1034,6 +1485,10 @@ def cmd_panel(a):
                 c = doctor_checks(a.port, a.port); self.reply(200, {"ok": True, "checks": c, "text": doctor_text(c)})
             elif u.path == "/api/fs/list": self.reply(200, dict(fs_list(q.get("path", "")), ok=True))
             elif u.path == "/api/project/info": self.reply(200, {"ok": True, "info": project_info(q.get("name", ""))})
+            elif u.path == "/api/git/status": self.reply(200, dict(git_status(q.get("project", ""), q.get("agent", "")), ok=True))
+            elif u.path == "/api/git/diff":
+                self.reply(200, dict(git_diff(q.get("project", ""), q.get("agent", ""), q.get("path", ""),
+                                              q.get("staged") in ("1", "true")), ok=True))
             elif u.path == "/api/onboard":
                 ag, pj = q.get("agent", "").strip(), q.get("project", "").strip()
                 if ag and ag not in registered_agents(): raise DoveError(f"agente '{ag}' nao encontrado")
@@ -1109,6 +1564,7 @@ Este projeto é trabalhado por vários agentes ao mesmo tempo, que se coordenam 
 Ao começar uma sessão:
 1. `a2a inbox --agent <seu-nome>` — veja se há pedidos para você.
 2. `a2a status --agent <seu-nome> --set working --note "<o que vai fazer>" --project <projeto>`
+3. Se o Luiz criou uma cópia de trabalho para você, rode `a2a whereami --agent <seu-nome> --project <projeto>` e trabalhe nessa pasta.
 
 Durante o trabalho:
 - Pedir algo a outro agente: `a2a send --from <seu-nome> --to <agente> --project <projeto> --kind task --body "..."`
@@ -1133,8 +1589,17 @@ def onboard_text(agent=None, project=None):
     t = ONBOARD_TEMPLATE
     if project: t = t.replace("<projeto>", project)
     if agent:
-        t = "\n".join(f"**Seu nome no canal:** `{agent}`." if l.startswith("**Seu nome no canal:**") else l
-                      for l in t.split("\n")).replace("<seu-nome>", agent)
+        wt = None
+        if project:
+            try: wt = project_worktrees(find_project(project)).get(agent)
+            except DoveError: wt = None
+        def name_line(l):
+            if not l.startswith("**Seu nome no canal:**"): return l
+            l = f"**Seu nome no canal:** `{agent}`."
+            if wt: l += (f"\n\nSua pasta de trabalho neste projeto: `{wt['path']}` (branch `{wt.get('branch') or 'dove/' + agent}`). "
+                         "Trabalhe e faça commits só nela; não faça push nem merge — o Luiz traz seu trabalho pelo painel.")
+            return l
+        t = "\n".join(name_line(l) for l in t.split("\n")).replace("<seu-nome>", agent)
     return t
 def cmd_onboard(a):
     if hasattr(sys.stdout, "reconfigure"):  # console do Windows (cp1252) nao quebra com acentos
@@ -1214,6 +1679,21 @@ def build_parser():
     sm = sub.add_parser("summary", help="onde estamos: tarefas abertas, bloqueios, missoes")
     sm.add_argument("--project"); sm.add_argument("--stale-minutes", dest="stale_minutes", type=float, default=30)
     sm.set_defaults(func=cmd_summary)
+    wk = sub.add_parser("worktree", help="copias de trabalho (git worktree) por agente")
+    ws = wk.add_subparsers(dest="wcmd", required=True)
+    x = ws.add_parser("list"); x.add_argument("--project")
+    for nm, hl in (("create", "cria <pasta>-<agente> na branch dove/<agente>"), ("remove", "remove a copia (so limpa e sem commits pendentes)"),
+                   ("merge", "traz dove/<agente> para a branch da pasta principal (--no-ff)"), ("sync", "atualiza a copia com a branch base (--no-ff)")):
+        x = ws.add_parser(nm, help=hl); x.add_argument("--project", required=True); x.add_argument("--agent", required=True)
+        x.add_argument("--from", dest="_from", required=True, help="o humano (acao so do humano)")
+        if nm == "create": x.add_argument("--base", help="branch base (padrao: a branch atual da pasta principal)")
+    wk.set_defaults(func=cmd_worktree)
+    gt = sub.add_parser("git", help="git do projeto (status)")
+    gs = gt.add_subparsers(dest="gcmd", required=True)
+    x = gs.add_parser("status"); x.add_argument("--project", required=True); x.add_argument("--agent")
+    gt.set_defaults(func=cmd_git)
+    x = sub.add_parser("whereami", help="pasta onde o agente deve trabalhar neste projeto")
+    x.add_argument("--agent", required=True); x.add_argument("--project", required=True); x.set_defaults(func=cmd_whereami)
     o = sub.add_parser("onboard", help="imprime as instrucoes do canal para um agente ou para o AGENTS.md")
     og = o.add_mutually_exclusive_group(required=True)
     og.add_argument("--agent"); og.add_argument("--agents-md", dest="agents_md", action="store_true")
