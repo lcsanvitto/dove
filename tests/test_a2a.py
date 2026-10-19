@@ -118,11 +118,45 @@ def main():
     t = ob.stdout.decode("utf-8")
     assert ob.returncode == 0 and "`codex`" in t and "lagu" in t, t
     assert "<seu-nome>" not in t and "<projeto>" not in t and "Claude Code →" not in t, t
+    # guia completo (--agent): exemplos copiaveis
+    for ex_ in ('a2a send --from codex --to hermes --project lagu --kind task --body',
+                '--reply-to 1e2b9c0d4f55 --kind report --state CONCLUIDO --body "handler migrado, testes ok" --evidence',
+                'a2a status --agent codex --set blocked --note', '--file src/payments/webhook.py:40-62',
+                'a2a mission approve m3f9a2c1 --agent codex --evidence', 'a2a mission reject m3f9a2c1 --agent codex --reason',
+                'a2a read <msg_id> --agent codex --compact', '--context <0-100>', 'a2a status --agent codex --set done'):
+        assert ex_ in t, (ex_, t)
     ob = subprocess.run([sys.executable, str(A2A), "onboard", "--agents-md"], capture_output=True, env=uenv)
     t = ob.stdout.decode("utf-8")
     assert ob.returncode == 0 and "Claude Code → `claude`" in t and "<seu-nome>" in t and "<projeto>" in t, t
+    # nucleo do AGENTS.md: curto, estavel, com os elementos e as regras de seguranca
+    ob = subprocess.run([sys.executable, str(A2A), "onboard", "--agents-md", "--project", "lagu"], capture_output=True, env=uenv)
+    core = ob.stdout.decode("utf-8")
+    assert ob.returncode == 0 and core.startswith("## Canal A2A — Dove\n"), core
+    body = [l for l in core.split("\n")[1:] if l.strip()]
+    assert len(body) <= 10 and len(core) <= 800, (len(body), len(core), core)
+    for el in ("Claude Code → `claude` · Codex → `codex` · Hermes → `hermes`",
+               "`a2a brief --agent <seu-nome> --mark-read`", "`a2a status --agent <seu-nome> --set working --note",
+               "`a2a whereami --agent <seu-nome> --project lagu`", '--set done --note "<resumo>"',
+               "Detalhes e exemplos: `a2a onboard --agent <seu-nome>` e `a2a <comando> --help`",
+               "`kind=ack`", "a si mesmo", "`--reply-to`", "só coordenação",
+               "merge, deploy, migração em produção, gasto ou exclusão", "outro agente", "autorização do Luiz",
+               "missão só com evidência real", "Sem `a2a`? Avise o Luiz"):
+        assert el in core, (el, core)
+    assert "<projeto>" not in core and not re.search(r"\d{4}-\d{2}-\d{2}|\d{2}:\d{2}", core), core
+    assert core == subprocess.run([sys.executable, str(A2A), "onboard", "--agents-md", "--project", "lagu"],
+                                  capture_output=True, env=uenv).stdout.decode("utf-8")  # estavel
+    # --help com exemplos copiaveis, sem mudar o resto
+    for cmd, ex_ in ((["send"], "a2a send --from claude --to hermes"), (["brief"], "a2a brief --agent claude --mark-read"),
+                     (["read"], "a2a read 1e2b9c0d4f55 --agent claude --compact"), (["status"], "a2a status --agent claude --set blocked"),
+                     (["mission"], "a2a mission approve m3f9a2c1"), (["mission", "approve"], "--evidence"),
+                     (["mission", "reject"], "--reason"), (["whereami"], "a2a whereami --agent claude --project lagu")):
+        h = run(env, *cmd, "--help").stdout
+        assert "exemplos:\n" in h and ex_ in h, (cmd, h)
+    assert "Resumo unico para o agente se atualizar (substitui inbox + read de cada\nmensagem" in \
+        subprocess.run([sys.executable, str(A2A), "brief", "--help"], capture_output=True, text=True,
+                       env=dict(uenv, COLUMNS="80")).stdout  # descricao continua quebrada pela largura
     assert run(env, "onboard").returncode != 0
-    print("OK: a2a onboard (--agent e --agents-md)")
+    print("OK: a2a onboard (--agent guia com exemplos, --agents-md nucleo curto) e --help com exemplos")
 
     # install.sh num HOME temporario
     if os.name != "nt":
@@ -884,7 +918,7 @@ def git_fase():
         ob = run(env, "onboard", "--agent", "claude", "--project", "lagu").stdout
         assert f"Sua pasta de trabalho neste projeto: `{wc}` (branch `dove/claude`)" in ob and "o Luiz traz seu trabalho pelo painel" in ob, ob
         assert "Sua pasta de trabalho" not in run(env, "onboard", "--agent", "hermes", "--project", "lagu").stdout
-        gen = run(env, "onboard", "--agents-md", "--project", "lagu").stdout
+        gen = run(env, "onboard", "--agents-md", "--project", "lagu").stdout  # nucleo: whereami generico, sem a pasta
         assert "`a2a whereami --agent <seu-nome> --project lagu`" in gen and "Sua pasta" not in gen, gen
         code, j = req(port, "GET", "/api/onboard?agent=claude&project=lagu", None, T); assert wc in j["text"], j
         code, j = P("/api/project/open", {"name": "lagu", "agent": "claude"}); assert code == 200 and j["path"] == wc, j
@@ -1153,8 +1187,8 @@ def compact_fase():
     r = run(env, "wait", "--agent", "codex", "--timeout", "2", "--interval", "0.1", "--compact", "--no-auto-status")
     assert r.returncode == 0 and r.stdout == "9c9c9c9c9c9c luiz->codex task proj=- 2026-10-18T14:30:00Z\n", r.stdout
     assert "9c9c9c9c9c9c" in seen()
-    t = run(env, "onboard", "--agents-md").stdout
-    assert "a2a read <msg_id> --agent <seu-nome> --compact" in t, t
+    t = run(env, "onboard", "--agent", "codex").stdout
+    assert "a2a read <msg_id> --agent codex --compact" in t, t
     print("OK: read --compact (so campos com conteudo, body multilinha, sem flag identico, marca lida, erro igual, wait --compact)")
 
 WAIT_PROBE = r"""
@@ -1497,7 +1531,7 @@ def files_fase():
         assert st == 200 and "files" not in res["message"] and "files" not in last_msg(), res
     finally:
         p.terminate(); p.wait(timeout=5)
-    t = run(env, "onboard", "--agents-md").stdout
+    t = run(env, "onboard", "--agent", "codex").stdout
     assert "Para apontar código, use `--file caminho[:linhas]` em vez de colar o conteúdo na mensagem." in t, t
     print("OK: send --file (path/sha/lines, erro sem gravar, 14 campos sem --file, ../absoluto/symlink recusados, base no projeto/copia, +Narq, compact, verify, /api/state)")
 
