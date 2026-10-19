@@ -26,6 +26,12 @@ CLOSED = ("CONCLUIDO", "CANCELADO")
 class DoveError(Exception):
     """Erro do usuario (400). `data` vai junto no JSON (ex.: arquivos em conflito)."""
     def __init__(self, msg, data=None): super().__init__(msg); self.data = data or {}
+RUNNER_MSG = "acao reservada ao humano; recusada em execucao automatica (A2A_RUNNER)"
+class RunnerRefused(DoveError):
+    """Acao do humano pedida por uma execucao automatica (env A2A_RUNNER): a CLI sai com codigo 2."""
+def runner_active(): return bool(os.environ.get("A2A_RUNNER"))  # so o env DESTE processo conta
+def refuse_if_runner():
+    if runner_active(): raise RunnerRefused(RUNNER_MSG)
 
 def now_iso(): return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 def ensure_dirs():
@@ -72,7 +78,8 @@ class FileLock:
     def __exit__(self, *x):
         try: os.remove(self.p)
         except OSError: pass
-def fail(msg): print(msg, file=sys.stderr); sys.exit(1)
+def fail(msg):  # chamado dentro de um except: recusa por A2A_RUNNER sai com 2, o resto com 1
+    print(msg, file=sys.stderr); sys.exit(2 if isinstance(sys.exc_info()[1], RunnerRefused) else 1)
 
 def seen_path(a): return os.path.join(CURSOR, a + ".json")
 def load_seen(a):
@@ -142,6 +149,7 @@ def registered_agents():
 
 # ---------------------------------------------------------------- agentes (agents/<nome>: vazio ou JSON com metadados)
 AGENT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+RESERVED_AGENTS = {"vigia"}  # nomes do proprio Dove: ninguem entra no canal com eles
 AGENT_TYPES = {"claude-code": "Claude Code", "codex": "Codex", "hermes": "Hermes", "outro": "Outro"}
 def agent_meta(name):
     """Metadados do agente. Arquivo vazio (formato antigo) ou ilegivel = {}."""
@@ -154,6 +162,7 @@ def check_agent_name(name):
         raise DoveError(f"nome de agente invalido: '{name}' - use letras minusculas, numeros, - ou _ (ate 32), "
                         "comecando com letra ou numero")
     if name == human_name(): raise DoveError(f"'{name}' e o humano do canal - escolha outro nome")
+    if name in RESERVED_AGENTS: raise DoveError(f"'{name}' e um nome reservado do Dove - escolha outro nome")
     return name
 def agent_join(name, type_="", model="", note="", must_be_new=False):
     """Registra (ou atualiza) o agente. Metadados novos se juntam aos existentes."""
@@ -246,7 +255,7 @@ def msg_files(m):
     f = m.get("files"); return [x for x in f if isinstance(x, dict)] if isinstance(f, list) else []
 def file_label(x): return f"{x.get('path', '')}" + (f":{x['lines']}" if x.get("lines") else "")
 def cmd_send(a):
-    files = None
+    refuse_if_runner_as_human(a._from); files = None
     if getattr(a, "file", None):  # confere tudo antes: arquivo faltando = erro e nenhuma mensagem gravada
         try: root = file_root(a._from, a.project); files = [file_ref(x, root) for x in a.file]
         except DoveError as e: fail(f"erro: {e}")
@@ -324,6 +333,7 @@ def cmd_wait(a):
         if deadline and time.time() > deadline: print("(timeout)"); sys.exit(2)
         time.sleep(a.interval)
 def cmd_ack(a):
+    refuse_if_runner_as_human(a._from)
     orig = next((m for m in all_messages() if m["msg_id"] == a.msg_id), None)
     if not orig: print("original nao encontrada", file=sys.stderr); sys.exit(1)
     if orig["kind"] == "ack": print("nao se responde ack de ack (anti-loop)"); return
@@ -346,7 +356,11 @@ def fmt_age(ts):
     if s < 86400: return f"{int(s // 3600)}h"
     return f"{int(s // 86400)}d"
 def write_status(st):
+    """Toda gravacao de status: com A2A_RUN_ID guarda run_id/runner da execucao automatica; sem, apaga os dois."""
     st.update(updated=now_iso(), ts=time.time())
+    run_id = os.environ.get("A2A_RUN_ID")
+    if run_id: st.update(run_id=run_id, runner=os.environ.get("A2A_RUNNER", ""))
+    else: st.pop("run_id", None); st.pop("runner", None)
     write_json(status_path(st["agent"]), st)
 def touch_status(agent, state=None, project=None, note=None):
     """Auto-status: com state grava o estado; sem state so renova o ts (heartbeat)."""
@@ -429,6 +443,9 @@ def save_config(**kv):
     with FileLock(CONFIG):
         c = load_config(); c.update(kv); write_json(CONFIG, c)
 def human_name(): return load_config().get("human") or HUMAN
+def refuse_if_runner_as_human(who):
+    """Execucao automatica (A2A_RUNNER) nunca fala como o humano (send/ack/mission new --from <humano>)."""
+    if (who or "").strip() == human_name(): refuse_if_runner()
 def load_projects():
     p = read_json(PROJECTS, [])
     return [x for x in p if isinstance(x, dict) and x.get("name")] if isinstance(p, list) else []
@@ -919,7 +936,7 @@ def git_diff(project, agent="", path="", staged=False):
     res["text"] = out
     return res
 def bus_report(project, body):
-    """Toda acao git/worktree do humano vira um report de luiz para todos (historico). Humano nao ganha status."""
+    """Toda acao git/worktree do humano vira um report do humano para todos (historico). Humano nao ganha status."""
     try: post_message(human_name(), "all", body, kind="report", project=project, auto_status=False)
     except Exception as e: log_err(f"aviso: acao feita, mas nao registrei no canal: {e}")
 def _where(t): return t["project"] + (f" (copia de {t['agent']})" if t["agent"] else "")
@@ -1104,6 +1121,7 @@ def whereami(agent, project):
     p = find_project(project); wt = project_worktrees(p).get((agent or "").strip())
     return wt["path"] if wt else p.get("path") or ""
 def require_human(who):
+    refuse_if_runner()  # execucao automatica nunca age como humano, nem com --from <humano>
     if (who or "").strip() != human_name():
         raise DoveError(f"so o humano ({human_name()}) faz isso: use --from {human_name()} (agentes trabalham na propria copia e nao fazem merge/push pelo Dove)")
 def cmd_worktree(a):
@@ -1208,14 +1226,15 @@ def mission_view(m):
     return dict(m, status=mission_status(m),
                 approved=sum(1 for a in m.get("agents", []) if (ap.get(a) or {}).get("verdict") == "approve"),
                 total=len(m.get("agents", [])))
-def mission_new(project, title, desc="", agents=None, created_by=HUMAN):
+def mission_new(project, title, desc="", agents=None, created_by=None):
     project, title = (project or "").strip(), (title or "").strip()
     if not project: raise DoveError("missao exige --project")
     if not title: raise DoveError("missao exige --title")
     ags = [x.strip() for x in (agents or []) if x and x.strip()] or registered_agents()
     ags = list(dict.fromkeys(ags))
     if not ags: raise DoveError("nenhum agente participante (registre com a2a join ou use --agents)")
-    created_by = (created_by or HUMAN).strip() or HUMAN
+    created_by = (created_by or "").strip() or human_name()
+    refuse_if_runner_as_human(created_by)
     mid = "m" + uuid.uuid4().hex[:7]; ensure_dirs()
     m = {"id": mid, "project": project, "title": title, "description": desc or "", "agents": ags,
          "created_by": created_by, "created": now_iso(), "approvals": {}, "history": [], "human": None}
@@ -1250,8 +1269,8 @@ def mission_verdict(mid, agent, verdict, text):
                  state="CONCLUIDO" if ok else "BLOQUEADO", evidence=text if ok else "", auto_status=False)
     touch_status(agent)  # heartbeat; dar aval nao muda o estado do agente
     return m
-def mission_done(mid, by=HUMAN):
-    by = (by or "").strip() or HUMAN
+def mission_done(mid, by):
+    by = (by or "").strip(); require_human(by)
     with FileLock(mission_path(mid)):
         m = load_mission(mid); st = mission_status(m)
         if st == "concluida": raise DoveError(f"missao {mid} ja estava concluida")
@@ -1857,7 +1876,7 @@ def loop_check(messages, runs=None, now=None, limits=None, *, missions=None, hum
     """Achados de loop entre agentes, sem gravar nada. messages: em ordem do bus. runs: registros do vigia
     ({"trigger_ids": [...]}) ou None. missions: {id: created_by} (raiz humana tambem vem da missao). since: horas
     (so conversas com atividade e janelas de teto dentro delas). Devolve {"findings", "counts", "limits", ...}."""
-    lim = dict(LOOP_LIMITS, **(limits or {})); hn = human or HUMAN; missions = missions or {}
+    lim = dict(LOOP_LIMITS, **(limits or {})); hn = human or human_name(); missions = missions or {}
     now = time.time() if now is None else now
     cutoff = now - since * 3600 if since else None
     acted = set()
@@ -1957,10 +1976,10 @@ def loop_inputs():
     names = bus_names(); idx = load_index()
     if idx and idx["n"] == len(names) and idx["last"] == _last_name([os.path.basename(f) for f in names]): msgs = idx["msgs"]
     else: msgs = index_build(names)["msgs"]
-    ms = {}
+    ms, hn = {}, human_name()
     for f in glob.glob(os.path.join(MISSIONS, "*.json")):
         m = read_json(f)
-        if isinstance(m, dict) and m.get("id"): ms[m["id"]] = m.get("created_by") or HUMAN
+        if isinstance(m, dict) and m.get("id"): ms[m["id"]] = m.get("created_by") or hn
     return msgs, ms
 def loop_lines(res):
     out = []
@@ -2666,6 +2685,7 @@ def cmd_instructions(a):
             if a.icmd == "check" and bad:
                 fail(f"{bad} arquivo(s) sem o bloco do Dove ou desatualizado(s): a2a instructions install")
             return
+        refuse_if_runner()  # mexer nos arquivos globais de instrucoes e acao do humano
         ags = instr_agents(a.agents); fn = instr_install if icmd == "install" else instr_remove
         os.makedirs(HOME, exist_ok=True)
         with FileLock(INSTR_MANIFEST):
@@ -3076,13 +3096,13 @@ def build_parser():
     ms = mi.add_subparsers(dest="mcmd", required=True)
     x = ms.add_parser("new"); x.add_argument("--project", required=True); x.add_argument("--title", required=True)
     x.add_argument("--desc", default=""); x.add_argument("--agents", help="a,b,c (padrao: todos os registrados)")
-    x.add_argument("--from", dest="_from", default=HUMAN)
+    x.add_argument("--from", dest="_from", required=True, help="quem cria (o humano ou um agente)")
     x = ms.add_parser("approve", **ex('a2a mission approve m3f9a2c1 --agent claude --evidence "rodei os testes de contrato: 48 ok"')); x.add_argument("id"); x.add_argument("--agent", required=True)
     x.add_argument("--evidence", required=True)
     x = ms.add_parser("reject", **ex('a2a mission reject m3f9a2c1 --agent claude --reason "falta o teste da assinatura antiga"')); x.add_argument("id"); x.add_argument("--agent", required=True)
     x.add_argument("--reason", required=True)
     x = ms.add_parser("done", help="confirmacao final do humano"); x.add_argument("id")
-    x.add_argument("--from", dest="_from", default=HUMAN)
+    x.add_argument("--from", dest="_from", required=True, help="o humano (acao so do humano)")
     x = ms.add_parser("list"); x.add_argument("--project")
     x = ms.add_parser("show"); x.add_argument("id")
     mi.set_defaults(func=cmd_mission)
@@ -3251,7 +3271,9 @@ def main(argv=None):
     if hasattr(sys.stdout, "reconfigure"):  # titulos com acento nao derrubam o console do Windows
         try: sys.stdout.reconfigure(errors="replace")
         except Exception: pass
-    args = build_parser().parse_args(argv); args.func(args)
+    args = build_parser().parse_args(argv)
+    try: args.func(args)
+    except RunnerRefused as e: print(f"erro: {e}", file=sys.stderr); sys.exit(2)
 
 if __name__ == "__main__":
     main()

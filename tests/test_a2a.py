@@ -1,6 +1,7 @@
 import http.client, json, os, re, socket, subprocess, sys, tempfile, time, pathlib, urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+for _k in ("A2A_RUNNER", "A2A_RUN_ID"): os.environ.pop(_k, None)  # os testes comecam como o humano (fora de execucao automatica)
 A2A = ROOT / "a2a.py"
 
 def run(env, *args):
@@ -328,6 +329,8 @@ def fase1():
 
     # ---- missoes
     r = run(env, "mission", "new", "--project", "lagu", "--title", "Checkout pronto", "--desc", "conferir tudo")
+    assert r.returncode == 2 and "--from" in r.stderr, r.stderr  # --from obrigatorio (argparse)
+    r = run(env, "mission", "new", "--project", "lagu", "--title", "Checkout pronto", "--desc", "conferir tudo", "--from", "luiz")
     assert r.returncode == 0, r.stderr
     mid = re.search(r"missao (\w+) criada", r.stdout).group(1)
     m = json.load(open(os.path.join(tmp, "missions", mid + ".json"), encoding="utf-8"))
@@ -344,7 +347,8 @@ def fase1():
     assert run(env, "mission", "approve", mid, "--agent", "claude").returncode == 2  # argparse: obrigatorio
     r = run(env, "mission", "approve", mid, "--agent", "intruso", "--evidence", "x")
     assert r.returncode == 1 and "nao participa" in r.stderr, r.stderr
-    r = run(env, "mission", "done", mid); assert r.returncode == 1 and "aval de todos" in r.stderr, r.stderr
+    r = run(env, "mission", "done", mid, "--from", "luiz"); assert r.returncode == 1 and "aval de todos" in r.stderr, r.stderr
+    r = run(env, "mission", "done", mid); assert r.returncode == 2 and "--from" in r.stderr, r.stderr
     assert run(env, "mission", "approve", mid, "--agent", "claude", "--evidence", "testes 212/212").returncode == 0
     assert "aberta" in show() and "1/3" in show()
     rep = [json.load(open(f, encoding="utf-8")) for f in sorted(pathlib.Path(tmp, "bus").glob("*.json"))]
@@ -354,7 +358,7 @@ def fase1():
     r = run(env, "mission", "reject", mid, "--agent", "codex", "--reason", "falta teste de frete")
     assert r.returncode == 0 and "reprovada" in r.stdout, r.stdout
     assert "reprovada" in show()
-    assert run(env, "mission", "done", mid).returncode == 1
+    assert run(env, "mission", "done", mid, "--from", "luiz").returncode == 1
     rep = [json.load(open(f, encoding="utf-8")) for f in sorted(pathlib.Path(tmp, "bus").glob("*.json"))]
     assert any(x["task_id"] == mid and x["state"] == "BLOQUEADO" and x["from"] == "codex" for x in rep)
     run(env, "mission", "approve", mid, "--agent", "codex", "--evidence", "frete testado")  # ultimo veredito vale
@@ -363,10 +367,13 @@ def fase1():
     assert "aval_completo" in show() and "3/3" in show(), show()
     sh = run(env, "mission", "show", mid).stdout
     assert "frete testado" in sh and "aval_completo" in sh, sh
+    r = run(env, "mission", "done", mid, "--from", "claude")  # agente nao conclui missao
+    assert r.returncode == 1 and "so o humano" in r.stderr, r.stderr
+    assert "aval_completo" in show(), show()
     assert run(env, "mission", "done", mid, "--from", "luiz").returncode == 0
     assert "concluida" in show(), show()
     assert run(env, "mission", "approve", mid, "--agent", "hermes", "--evidence", "x").returncode == 1
-    assert run(env, "mission", "new", "--project", "dove", "--title", "So dois", "--agents", "claude,hermes").returncode == 0
+    assert run(env, "mission", "new", "--project", "dove", "--title", "So dois", "--agents", "claude,hermes", "--from", "luiz").returncode == 0
     assert "dove" in run(env, "mission", "list", "--project", "dove").stdout
     assert "lagu" not in run(env, "mission", "list", "--project", "dove").stdout
     print("OK: missoes (tasks aos participantes, evidencia obrigatoria, nao-participante, ultimo veredito, status, done)")
@@ -1841,7 +1848,7 @@ def fact_fase():
     f_h = add("--ttl", "1h", "valido por uma hora").split()[1]
     out = add("--scope", f"tarefa:{task}", "contrato em tests/contract", who="hermes"); f_t = out.split()[1]
     assert "vale até fechar (no máximo " in out, out
-    mid = a2a("mission", "new", "--project", "lagu", "--title", "Frete", "--agents", "codex,claude").split()[1]
+    mid = a2a("mission", "new", "--project", "lagu", "--title", "Frete", "--agents", "codex,claude", "--from", "luiz").split()[1]
     f_m = add("--scope", f"missao:{mid}", "Cupom frete gratis: limite R$ 199", who="codex").split()[1]
     assert "vale até concluir (no máximo" in add("--scope", f"missao:{mid}", "segundo fato da missao", who="codex")
     b = brief("--project", "lagu")
@@ -2246,6 +2253,81 @@ def watch_fase():
           "nao pronto, PowerShell, copia limpa/suja/ausente, STOP, A2A_RUNNER, tabela sem padroes proibidos, --show-command, "
           "espiao: so --version/--help/auth status)")
 
+def seguranca_fase():
+    """Fase 3, passos 0 e 1: so o humano conclui missao, --from obrigatorio, vigia reservado, human_name(),
+    execucao automatica (A2A_RUNNER) nunca age como humano, run_id no status."""
+    tmp = tempfile.mkdtemp()
+    env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8", HOME=tmp, CLAUDE_CONFIG_DIR=os.path.join(tmp, ".claude"),
+               CODEX_HOME=os.path.join(tmp, ".codex"), HERMES_HOME=os.path.join(tmp, ".hermes"))
+    renv = dict(env, A2A_RUNNER="vigia-cron")
+    def a2a(*args, code=0, e=None):
+        r = run(e or env, *args); assert r.returncode == code, (args, r.returncode, r.stdout, r.stderr); return r.stdout + r.stderr
+    st = lambda a: json.load(open(os.path.join(tmp, "status", a + ".json"), encoding="utf-8"))
+    for ag in ("claude", "codex"): a2a("join", "--agent", ag)
+    # vigia e reservado (join e painel usam o mesmo check); orquestrador continua livre por enquanto
+    assert "reservado" in a2a("join", "--agent", "vigia", code=1)
+    assert not os.path.exists(os.path.join(tmp, "agents", "vigia"))
+    a2a("join", "--agent", "orquestrador"); a2a("leave", "--agent", "orquestrador")
+    # --from obrigatorio em mission new/done
+    a2a("mission", "new", "--project", "p", "--title", "t", code=2); a2a("mission", "done", "m0000000", code=2)
+    mid = a2a("mission", "new", "--project", "p", "--title", "Seg", "--agents", "claude,codex", "--from", "luiz").split()[1]
+    for ag in ("claude", "codex"): a2a("mission", "approve", mid, "--agent", ag, "--evidence", "ok")
+    assert "so o humano" in a2a("mission", "done", mid, "--from", "codex", code=1)
+    # human_name(): config.json human manda (missao, require_human, nome reservado para join)
+    json.dump({"human": "ana"}, open(os.path.join(tmp, "config.json"), "w"))
+    assert "so o humano (ana)" in a2a("mission", "done", mid, "--from", "luiz", code=1)
+    assert "humano do canal" in a2a("join", "--agent", "ana", code=1)
+    a2a("join", "--agent", "luiz"); a2a("leave", "--agent", "luiz")
+    # execucao automatica: toda acao do humano recusada com exit 2, mesmo com --from <humano>
+    msg = "acao reservada ao humano; recusada em execucao automatica (A2A_RUNNER)"
+    n_bus = len(os.listdir(os.path.join(tmp, "bus")))
+    human_cmds = [("mission", "done", mid, "--from", "ana"),
+                  ("mission", "new", "--project", "p", "--title", "x", "--agents", "claude", "--from", "ana"),
+                  ("send", "--from", "ana", "--to", "claude", "--body", "finjo ser o humano"),
+                  ("archive", "--from", "ana", "--dry-run"), ("archive", "--from", "ana", "--restore", "*"),
+                  ("fact", "prune", "--project", "p", "--from", "ana", "--dry-run"),
+                  ("instructions", "install"), ("instructions", "remove"), ("instructions", "uninstall", "--agents", "claude")]
+    human_cmds += [("worktree", w, "--project", "p", "--agent", "claude", "--from", "ana") for w in ("create", "remove", "merge", "sync")]
+    for c in human_cmds:
+        out = a2a(*c, code=2, e=renv)
+        assert msg in out and "Traceback" not in out, (c, out)
+    task = [json.load(open(f, encoding="utf-8")) for f in sorted(pathlib.Path(tmp, "bus").glob("*.json"))][-1]["msg_id"]
+    assert msg in a2a("ack", task, "--from", "ana", code=2, e=renv)
+    assert len(os.listdir(os.path.join(tmp, "bus"))) == n_bus, "recusa nao grava nada"
+    assert not os.path.exists(os.path.join(tmp, ".claude")) and not os.path.exists(os.path.join(tmp, ".codex"))
+    assert mid in a2a("mission", "list") and "aval_completo" in a2a("mission", "list")
+    assert msg in a2a("mission", "done", mid, "--from", "claude", code=2, e=renv)  # qualquer --from
+    # agentes seguem trabalhando normalmente dentro da execucao automatica
+    out = a2a("send", "--from", "claude", "--to", "codex", "--project", "p", "--body", "oi do runner", e=renv)
+    sent = out.split()[1]
+    assert "oi do runner" in a2a("brief", "--agent", "codex", e=renv)
+    assert "oi do runner" in a2a("read", sent, "--agent", "codex", e=renv)
+    a2a("ack", sent, "--from", "codex", e=renv)
+    a2a("status", "--agent", "claude", "--set", "working", "--note", "rodando", e=renv)
+    a2a("mission", "new", "--project", "p", "--title", "de agente", "--agents", "codex", "--from", "claude", e=renv)
+    a2a("instructions", "status", e=renv)
+    # sem A2A_RUNNER nada muda: o humano faz tudo
+    a2a("mission", "done", mid, "--from", "ana")
+    a2a("send", "--from", "ana", "--to", "claude", "--body", "sou eu", "--no-auto-status")
+    # run_id: gravado com A2A_RUN_ID (status --set e heartbeat), apagado por gravacao sem ele; o resto preservado
+    a2a("status", "--agent", "codex", "--set", "working", "--note", "n1", "--project", "p", "--context", "40", "--model", "gpt-5")
+    run_env = dict(renv, A2A_RUN_ID="r-123")
+    a2a("status", "--agent", "codex", "--set", "blocked", "--note", "n2", e=run_env)
+    s1 = st("codex")
+    assert s1["run_id"] == "r-123" and s1["runner"] == "vigia-cron" and s1["state"] == "blocked" and s1["note"] == "n2", s1
+    assert s1["context"] == 40 and s1["model"] == "gpt-5", s1
+    a2a("inbox", "--agent", "codex", e=dict(renv, A2A_RUN_ID="r-456"))  # heartbeat (touch_status)
+    s2 = st("codex"); assert s2["run_id"] == "r-456" and s2["note"] == "n2" and s2["state"] == "blocked", s2
+    a2a("inbox", "--agent", "codex")  # sem A2A_RUN_ID: some
+    s3 = st("codex"); assert "run_id" not in s3 and "runner" not in s3, s3
+    assert {k: s3[k] for k in ("state", "note", "project", "context", "model")} == \
+        {"state": "blocked", "note": "n2", "project": "", "context": 40, "model": "gpt-5"}, s3
+    a2a("status", "--agent", "codex", "--note", "n3", "--context", "45", e=run_env); assert st("codex")["run_id"] == "r-123"
+    a2a("status", "--agent", "codex", "--context", "50")
+    s4 = st("codex"); assert "run_id" not in s4 and s4["note"] == "n3" and s4["context"] == 50 and s4["model"] == "gpt-5", s4
+    print("OK: seguranca (mission done so humano, --from obrigatorio, vigia reservado, human_name, A2A_RUNNER recusa "
+          "acoes do humano com exit 2 e deixa agentes trabalharem, run_id no status)")
+
 if __name__ == "__main__":
     main()
     fase1()
@@ -2263,3 +2345,4 @@ if __name__ == "__main__":
     fact_fase()
     loops_fase()
     watch_fase()
+    seguranca_fase()

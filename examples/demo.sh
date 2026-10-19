@@ -16,7 +16,7 @@ $A2A status
 echo "--- missao com aval de todos ---"
 $A2A project add demo "$A2A_HOME"
 $A2A status --agent claude --set working --project demo --context 42
-$A2A mission new --project demo --title "Modulo X revisado" --agents claude,hermes
+$A2A mission new --project demo --title "Modulo X revisado" --agents claude,hermes --from luiz
 MID=$(ls "$A2A_HOME/missions" | head -1 | sed 's/\.json//')
 $A2A mission approve "$MID" --agent claude --evidence "testes ok"
 $A2A mission approve "$MID" --agent hermes --evidence "revisei o diff"

@@ -283,6 +283,8 @@ a2a wait --agent claude --until done --timeout 600
 ```
 Status mais velho que `--stale-minutes` (padrão 30) aparece como `unknown (stale, era <estado>)` — o agente pode ter morrido sem avisar. O `wait --until` olha o estado gravado, sem considerar staleness.
 
+Execução automática: quando `A2A_RUN_ID` está no ambiente, toda gravação de status (`status --set`/`--note`/`--context` e o heartbeat de `inbox`/`wait`/`brief`/`send`) guarda `run_id` e `runner` (= `A2A_RUNNER`); uma gravação sem `A2A_RUN_ID` apaga os dois. Os outros campos seguem como antes.
+
 ### Auto-status
 O status se atualiza sozinho — o agente não precisa lembrar de publicar a cada passo. Só o agente que roda o comando tem o status alterado (nunca o destinatário).
 
@@ -343,6 +345,9 @@ O app só escuta em `127.0.0.1` por padrão e protege toda escrita:
 - **Corpo:** só `Content-Type: application/json`, no máximo 64 KB.
 - **Sem aval pelo app:** não existe rota para aprovar missão. Só os agentes aprovam, pela CLI; você confirma a conclusão depois.
 - Passar outro `--host` (ex. `0.0.0.0`) expõe a leitura na rede — o `a2a` avisa.
+
+### Execução automática (`A2A_RUNNER`) nunca age como humano
+Quem roda agentes sem ninguém olhando (vigias, cron, CI) define `A2A_RUNNER` (qualquer valor não vazio) no ambiente. Com ele, a CLI recusa — saída 2 e `acao reservada ao humano; recusada em execucao automatica (A2A_RUNNER)` — toda ação do humano, **mesmo com `--from <humano>`**: `worktree create/remove/merge/sync`, `archive` (e `--restore`), `fact prune`, `mission done`, `instructions install/remove/uninstall`, `mission new --from <humano>` e `send`/`ack` com `--from <humano>`. O resto (send/ack/brief/read/status/mission approve dos agentes) funciona igual. Só vale o ambiente do próprio processo: o painel que você abriu continua sendo o humano. Nomes reservados do Dove: ninguém entra no canal como `vigia`; o humano é o `human` do `config.json` (padrão `luiz`).
 
 ### API
 | Rota | O que faz |
@@ -416,13 +421,15 @@ a2a status --agent claude --context 81       # só atualiza o contexto
 ## Missões (aval de todos os agentes)
 Uma missão só termina quando **cada agente participante** verificou e aprovou **com evidência**, e o humano confirmou.
 ```
-a2a mission new --project lagu --title "Checkout pronto" --desc "cupom, frete, pagamento" [--agents claude,codex] [--from luiz]
+a2a mission new --project lagu --title "Checkout pronto" --desc "cupom, frete, pagamento" [--agents claude,codex] --from luiz
 a2a mission approve <id> --agent claude --evidence "rodei os testes: 212/212"
 a2a mission reject  <id> --agent codex  --reason "falta teste de frete"
 a2a mission done    <id> --from luiz     # só com o aval de todos
 a2a mission list [--project lagu]
 a2a mission show <id>
 ```
+- **Mudança incompatível:** `--from` agora é **obrigatório** em `mission new` e `mission done` (antes o padrão era `luiz`). Scripts que chamavam sem `--from` recebem erro do argparse (saída 2): acrescente `--from <humano>` (ou `--from <agente>` no `new`). O painel não muda: o servidor passa o humano sozinho.
+- `mission done` é só do humano (`--from` igual ao `human` do `config.json`, padrão `luiz`); agente recebe erro.
 - Sem `--agents`, participam todos os agentes registrados.
 - `new` manda uma `task` para cada participante (com `task_id` = id da missão). `approve`/`reject` mandam um `report` ao criador (`CONCLUIDO`/`BLOQUEADO`), respondendo à task.
 - Evidência é obrigatória e só participantes votam. Vale o último veredito de cada agente.
@@ -508,10 +515,10 @@ a2a loops [--project P] [--agent X] [--since H] [--json] [--strict]
 | `panel [--port 8765] [--host 127.0.0.1] [--open]` | servidor do app (sem `--open`, não abre o navegador) |
 | `project add NOME CAMINHO` · `remove NOME` · `list` · `pin NOME [--off]` | projetos registrados |
 | `project scan RAIZ [--depth 3] [--add]` | descobre repositórios git sob RAIZ (sem rodar git) |
-| `mission new --project P --title T [--desc D] [--agents a,b] [--from X]` | cria missão e avisa os participantes |
+| `mission new --project P --title T [--desc D] [--agents a,b] --from X` | cria missão e avisa os participantes |
 | `mission approve ID --agent X --evidence E` | aval do agente (evidência obrigatória) |
 | `mission reject ID --agent X --reason R` | reprovação do agente |
-| `mission done ID [--from luiz]` | confirmação final do humano (só com aval de todos) |
+| `mission done ID --from luiz` | confirmação final do humano (só com aval de todos) |
 | `mission list [--project P]` · `mission show ID` | lista / detalha missões |
 | `summary [--project P]` | "onde estamos": tarefas abertas, bloqueios, contexto alto, missões |
 | `archive --from luiz [--older-than-days 14] [--dry-run]` | move conversas encerradas, lidas e antigas do `bus/` para `archive/AAAA-MM/` (só o humano) |
