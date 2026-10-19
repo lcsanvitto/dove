@@ -434,6 +434,26 @@ a2a index rebuild   # "indice reconstruido: 2000 mensagens, 37 tarefas abertas, 
 a2a index check     # "ok (2000 mensagens)" ou "divergente: ..." (código de saída 1)
 ```
 
+## Detector de loop entre agentes (`a2a loops`)
+Etapa 2 da Fase 3: as travas contra loop existem antes de qualquer vigia rodar agentes sozinho. O `a2a loops` só lê o `bus/` (e `~/.a2a/runs/`, se existir) e aponta conversas que parecem loop. Não grava nada: nem bus, nem cursor, nem status/heartbeat, nem `index.json` (com índice desatualizado ele relê o `bus/` sem regravar).
+```
+a2a loops [--project P] [--agent X] [--since H] [--json] [--strict]
+# LOOP pingpong 3f9a1c2b7d10 claude,codex codex<->claude 4 mensagens sem progresso (limite 4)
+# LOOP sem-origem-humana 8b21e0f4a9c3 claude,codex raiz de codex, saltos=4/4
+# LOOP teto - claude,codex par claude>codex 9/8 por hora (desde 2026-10-19T14:05Z)
+# loops: 3 achados (rodadas>=6: 0, repeticao: 0, pingpong: 1, sem-origem-humana: 1, teto: 1)
+```
+- **Conversa:** a mensagem raiz + as respostas por `--reply-to` (respostas de respostas também) + as mensagens com o mesmo `task_id`. A raiz é a primeira mensagem da conversa. `ack` não conta em nada (não acorda ninguém); mensagem do humano nunca é "automática".
+- **rodadas:** ≥ 6 mensagens entre agentes numa conversa sem mensagem do humano no meio. Uma mensagem do humano zera a contagem; um report de agente para o humano não conta nem zera.
+- **sem-origem-humana:** a conversa não nasceu do humano (nem de uma missão criada por ele) e já tem ≥ 4 saltos automáticos. O vigia futuro só acorda agentes por conversas de origem humana.
+- **repeticao:** o mesmo remetente mandou na mesma conversa um `body` igual depois de juntar os espaços (só espaços, quebras de linha e tabs; maiúsculas, pontuação e datas continuam diferentes).
+- **pingpong:** A→B→A→B por ≥ 4 mensagens sem progresso. Progresso = estado mais perto do fim do que os anteriores (`AGUARDANDO_ACEITE` → `ACEITO` → `EM_EXECUCAO` → `AGUARDANDO_APROVACAO` → `EM_REVISAO` → `CONCLUIDO`/`CANCELADO`; `BLOQUEADO` não conta), `--evidence` nova ou `--file` novo (caminho+sha).
+- **teto:** em qualquer janela de 1 hora, mais de 12 mensagens automáticas de um agente, mais de 8 de A para B (tarefas novas sem `--reply-to` contam: abrir conversa nova não escapa do teto) ou mais de 30 no total. Com `--project`, os tetos contam só aquele projeto.
+- Os limites são constantes no `a2a.py` (`LOOP_MAX_ROUNDS`, `LOOP_MAX_HOPS`, `LOOP_PINGPONG`, `LOOP_CAP_AGENT`, `LOOP_CAP_PAIR`, `LOOP_CAP_GLOBAL`); a função `loop_check(messages, runs, now, limits)` é pura e recebe outros limites (é ela que o vigia vai usar).
+- `--since H`: só conversas com atividade nas últimas H horas (e janelas de teto dentro delas). `--agent X`: só achados que envolvem X. `--json`: o resultado numa linha de JSON compacto.
+- `~/.a2a/runs/AAAA-MM/*.json` (registros do vigia, quando ele existir, com `trigger_ids`): se a pasta existe, é lida e cada achado mostra `(ja acionadas: N)`; sem a pasta, nada muda.
+- Sai 0 sempre (é informativo); com `--strict` sai 1 quando há achados.
+
 ## Comandos
 | Comando | O que faz |
 |---|---|
@@ -484,6 +504,7 @@ a2a index check     # "ok (2000 mensagens)" ou "divergente: ..." (código de sa�
 | `onboard --check ARQUIVO` | o bloco do Dove de um `AGENTS.md`/`CLAUDE.md` (do projeto ou global) está igual ao núcleo atual? sai 0, ou 1 com o diff |
 | `project which [--path P]` | nome do projeto registrado cuja pasta (ou cópia de um agente) contém P (padrão: pasta atual); sai 1 se nenhum |
 | `prompt --agent X --project P [--task ID] [--for claude\|codex\|hermes] [--prefix-hash] [--max-tail-chars N]` | imprime (não executa) o prompt em camadas para um vigia headless: núcleo + papel, pasta, fronteira, brief + tarefa; `--prefix-hash` mostra o hash do prefixo estável |
+| `loops [--project P] [--agent X] [--since H] [--json] [--strict]` | detector de loop entre agentes, só leitura: rodadas sem o humano, repetição, ping-pong, conversa sem origem humana, tetos por hora; sai 0 (com `--strict`, 1 se houver achados) |
 
 ## Envelope da mensagem (JSON)
 `data` (ISO 8601 UTC) · `task_id` · `msg_id` · `from` · `to` · `project` · `in_reply_to` · `kind` (task | report | question | correction | ack) · `state` (AGUARDANDO_ACEITE | ACEITO | EM_EXECUCAO | BLOQUEADO | AGUARDANDO_APROVACAO | EM_REVISAO | CONCLUIDO | CANCELADO) · `result` · `evidence` · `pending` · `next_action` · `body`

@@ -1810,6 +1810,180 @@ def cmd_index(a):
         ok, txt = index_check(); print(txt)
         if not ok: sys.exit(1)
 
+# ---------------------------------------------------------------- loops (detector de loop entre agentes, so leitura)
+# Calculado do bus (e de runs/, se existir), sem estado novo. Etapa 2 da Fase 3: as travas existem antes do vigia.
+# Conversa = mensagem raiz + respostas por in_reply_to (transitivo) + mensagens com o mesmo task_id.
+# Mensagem automatica = de um agente (nao do humano); acks nao contam (nao acordam ninguem).
+LOOP_MAX_ROUNDS = 6     # rodadas entre agentes numa conversa sem mensagem do humano no meio (>= isto: achado)
+LOOP_MAX_HOPS = 4       # saltos automaticos numa conversa que nao nasceu do humano (>= isto: achado)
+LOOP_PINGPONG = 4       # A->B->A->B sem progresso (estado rumo a CONCLUIDO, evidencia ou arquivo novo) (>= isto: achado)
+LOOP_CAP_AGENT = 12     # mensagens automaticas por agente em qualquer janela de 1h (> isto: achado)
+LOOP_CAP_PAIR = 8       # mensagens de A para B em 1h, tarefas novas sem --reply-to incluidas (> isto: achado)
+LOOP_CAP_GLOBAL = 30    # mensagens automaticas no total em 1h (> isto: achado)
+LOOP_LIMITS = {"rounds": LOOP_MAX_ROUNDS, "hops": LOOP_MAX_HOPS, "pingpong": LOOP_PINGPONG,
+               "cap_agent": LOOP_CAP_AGENT, "cap_pair": LOOP_CAP_PAIR, "cap_global": LOOP_CAP_GLOBAL}
+LOOP_KINDS = ("rodadas", "repeticao", "pingpong", "sem-origem-humana", "teto")
+LOOP_PROGRESS = ("AGUARDANDO_ACEITE", "ACEITO", "EM_EXECUCAO", "AGUARDANDO_APROVACAO", "EM_REVISAO")  # ordem rumo ao fim
+RUNS = os.path.join(HOME, "runs")  # runs/AAAA-MM/*.json: registros do vigia (futuro), com trigger_ids; so lidos aqui
+def loop_norm(body): return " ".join((body or "").split())  # so junta espacos; nada mais muda
+def loop_conversations(msgs):
+    """[(raiz, [mensagens em ordem])]: componentes por in_reply_to e task_id; raiz = a primeira mensagem do componente."""
+    parent = {m["msg_id"]: m["msg_id"] for m in msgs}
+    def find(x):
+        while parent[x] != x: parent[x] = parent[parent[x]]; x = parent[x]
+        return x
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb: parent[rb] = ra
+    by_task = {}
+    for m in msgs:
+        r = m.get("in_reply_to")
+        if r and r in parent: union(r, m["msg_id"])
+        t = m.get("task_id")
+        if t:
+            if t in by_task: union(by_task[t], m["msg_id"])
+            else: by_task[t] = m["msg_id"]
+    groups = {}
+    for m in msgs: groups.setdefault(find(m["msg_id"]), []).append(m)
+    return [(ms[0], ms) for ms in groups.values()]
+def _loop_window(times):
+    """Maior contagem numa janela de 1h (pico, inicio). times em ordem crescente."""
+    best, start, j = 0, None, 0
+    for i, t in enumerate(times):
+        while t - times[j] > 3600: j += 1
+        if i - j + 1 > best: best, start = i - j + 1, times[j]
+    return best, start
+def loop_check(messages, runs=None, now=None, limits=None, *, missions=None, human=None, since=None):
+    """Achados de loop entre agentes, sem gravar nada. messages: em ordem do bus. runs: registros do vigia
+    ({"trigger_ids": [...]}) ou None. missions: {id: created_by} (raiz humana tambem vem da missao). since: horas
+    (so conversas com atividade e janelas de teto dentro delas). Devolve {"findings", "counts", "limits", ...}."""
+    lim = dict(LOOP_LIMITS, **(limits or {})); hn = human or HUMAN; missions = missions or {}
+    now = time.time() if now is None else now
+    cutoff = now - since * 3600 if since else None
+    acted = set()
+    for r in runs or []:
+        if isinstance(r, dict) and isinstance(r.get("trigger_ids"), list):
+            acted.update(x for x in r["trigger_ids"] if isinstance(x, str))
+    msgs = [m for m in messages if isinstance(m, dict) and m.get("msg_id")]
+    auto = lambda m: m.get("from") != hn and m.get("kind") != "ack"
+    recent = lambda m: cutoff is None or (msg_epoch(m) or 0) >= cutoff
+    findings = []
+    def add(kind, root, agents, detail, **extra):
+        findings.append(dict(kind=kind, root=root, agents=sorted(set(agents)), detail=detail, **extra))
+    convs = loop_conversations(msgs)
+    for root, ms in convs:
+        if not any(recent(m) for m in ms): continue
+        rid, proj = root["msg_id"], root.get("project", "")
+        tids = {m.get("task_id") for m in ms if m.get("task_id")}
+        human_rooted = root.get("from") == hn or any(missions.get(t) == hn for t in tids)
+        n_acted = sum(1 for m in ms if m["msg_id"] in acted)
+        ex = {"project": proj, "acted": n_acted} if runs is not None else {"project": proj}
+        rounds = peak = hops_peak = 0; peak_agents = set(); bodies = {}
+        best_rank, seen_ev = -1, set(); run, prev, prev_ok, pp_best, pp_pair = 0, None, False, 0, ()
+        for m in ms:
+            if m.get("kind") == "ack": continue
+            if m.get("from") == hn:  # humano zera rodadas e ping-pong
+                rounds, run, prev = 0, 0, None; continue
+            # rodadas: entre agentes (mensagem de agente para o humano nao conta nem zera)
+            if m.get("to") != hn:
+                rounds += 1; peak_agents |= {m.get("from"), m.get("to")}
+                if rounds > peak: peak = rounds
+            # repeticao: mesmo remetente, mesmo body (espacos normalizados), mesma conversa
+            b = loop_norm(m.get("body"))
+            if b: bodies.setdefault((m.get("from"), b), []).append(m)
+            # ping-pong: cadeia alternada A<->B de mensagens sem progresso
+            st = m.get("state") or ""
+            rank = len(LOOP_PROGRESS) if st in CLOSED else (LOOP_PROGRESS.index(st) if st in LOOP_PROGRESS else -1)
+            ev = set()
+            if (m.get("evidence") or "").strip(): ev.add(("e", loop_norm(m["evidence"])))
+            for f in m.get("files") or []:
+                if isinstance(f, dict): ev.add(("f", f.get("path"), f.get("sha")))
+            progress = rank > best_rank or bool(ev - seen_ev)
+            best_rank, seen_ev = max(best_rank, rank), seen_ev | ev
+            if progress: run, prev_ok = 0, False
+            elif prev is not None and prev_ok and m.get("from") == prev.get("to") and m.get("to") == prev.get("from") \
+                    and m.get("to") not in (hn, "all"):
+                run += 1
+            else: run = 1
+            if not progress: prev_ok = True
+            if run > pp_best: pp_best, pp_pair = run, (m.get("from"), m.get("to"))
+            prev = m
+        hops_peak = peak
+        peak_agents.discard(None)
+        if peak >= lim["rounds"]:
+            add("rodadas", rid, peak_agents - {"all"} or peak_agents, f"rodadas={peak}/{lim['rounds']} sem mensagem de {hn}", count=peak,
+                limit=lim["rounds"], **ex)
+        for (who, b), xs in bodies.items():
+            if len(xs) >= 2:
+                add("repeticao", rid, [who], f"{who} repetiu {len(xs)}x \"{short(b, 50)}\"", count=len(xs), sender=who,
+                    msg_ids=[x["msg_id"] for x in xs], **ex)
+        if pp_best >= lim["pingpong"]:
+            a_, b_ = pp_pair
+            add("pingpong", rid, [a_, b_], f"{a_}<->{b_} {pp_best} mensagens sem progresso (limite {lim['pingpong']})",
+                count=pp_best, limit=lim["pingpong"], **ex)
+        if not human_rooted and hops_peak >= lim["hops"]:
+            add("sem-origem-humana", rid, peak_agents - {"all"} or peak_agents,
+                f"raiz de {root.get('from')}, saltos={hops_peak}/{lim['hops']}", count=hops_peak, limit=lim["hops"], **ex)
+    # tetos por hora (janela deslizante de 1h; tarefas novas sem --reply-to contam no par)
+    am = [(msg_epoch(m), m) for m in msgs if auto(m) and msg_epoch(m) is not None and recent(m)]
+    am.sort(key=lambda x: x[0])
+    per_agent, per_pair = {}, {}
+    for t, m in am:
+        per_agent.setdefault(m.get("from"), []).append(t)
+        per_pair.setdefault((m.get("from"), m.get("to")), []).append(t)
+    fmt = lambda t: epoch_iso(t)[:16] + "Z"
+    def cap(key, times, limit, label, agents):
+        n, start = _loop_window(times)
+        if n > limit:
+            add("teto", "-", agents, f"{label} {n}/{limit} por hora (desde {fmt(start)})", count=n, limit=limit, scope=key,
+                since=epoch_iso(start))
+    for a_, ts in sorted(per_agent.items()): cap("agente", ts, lim["cap_agent"], f"agente {a_}", [a_])
+    for (a_, b_), ts in sorted(per_pair.items()): cap("par", ts, lim["cap_pair"], f"par {a_}>{b_}", [a_, b_])
+    cap("global", [t for t, _ in am], lim["cap_global"], "global", ["*"])
+    counts = {k: sum(1 for f in findings if f["kind"] == k) for k in LOOP_KINDS}
+    return {"findings": findings, "counts": counts, "total": len(findings), "limits": lim, "conversations": len(convs),
+            "runs": len(runs) if runs is not None else None, "acted_on": sorted(acted)}
+def loop_runs():
+    """Registros do vigia em runs/AAAA-MM/*.json (so leitura). None se a pasta nao existe."""
+    if not os.path.isdir(RUNS): return None
+    out = []
+    for f in sorted(glob.glob(os.path.join(RUNS, "*", "*.json"))):
+        if MONTH_RE.match(os.path.basename(os.path.dirname(f))):
+            r = read_json(f)
+            if isinstance(r, dict): out.append(r)
+    return out
+def loop_inputs():
+    """Mensagens e missoes sem gravar nada (nem o index.json: indice invalido e so relido do bus, nao salvo)."""
+    names = bus_names(); idx = load_index()
+    if idx and idx["n"] == len(names) and idx["last"] == _last_name([os.path.basename(f) for f in names]): msgs = idx["msgs"]
+    else: msgs = index_build(names)["msgs"]
+    ms = {}
+    for f in glob.glob(os.path.join(MISSIONS, "*.json")):
+        m = read_json(f)
+        if isinstance(m, dict) and m.get("id"): ms[m["id"]] = m.get("created_by") or HUMAN
+    return msgs, ms
+def loop_lines(res):
+    out = []
+    for f in res["findings"]:
+        out.append(f"LOOP {f['kind']} {f['root']} {','.join(f['agents']) or '-'} {f['detail']}"
+                   + (f" (ja acionadas: {f['acted']})" if f.get("acted") else ""))
+    if res["runs"] is not None:
+        out.append(f"runs: {res['runs']} execucoes do vigia lidas, {len(res['acted_on'])} gatilhos ja acionados")
+    c = res["counts"]
+    out.append(f"loops: {res['total']} achados (rodadas>={res['limits']['rounds']}: {c['rodadas']}, repeticao: {c['repeticao']}, "
+               f"pingpong: {c['pingpong']}, sem-origem-humana: {c['sem-origem-humana']}, teto: {c['teto']})")
+    return out
+def cmd_loops(a):
+    msgs, missions = loop_inputs()
+    if a.project: msgs = [m for m in msgs if m.get("project") == a.project]
+    res = loop_check(msgs, loop_runs(), missions=missions, human=human_name(), since=a.since)
+    if a.agent:
+        res["findings"] = [f for f in res["findings"] if a.agent in f["agents"]]
+        res["counts"] = {k: sum(1 for f in res["findings"] if f["kind"] == k) for k in LOOP_KINDS}
+        res["total"] = len(res["findings"])
+    print(json.dumps(res, ensure_ascii=False, separators=(",", ":")) if a.json else "\n".join(loop_lines(res)))
+    if a.strict and res["total"]: sys.exit(1)
+
 # ---------------------------------------------------------------- painel web (app dove)
 TOKEN_GETS = ("/api/scan", "/api/doctor", "/api/fs/list", "/api/project/info", "/api/onboard", "/api/git/status", "/api/git/diff")
 FALLBACK_HTML = """<!doctype html><meta charset="utf-8"><title>Dove</title>
@@ -2199,6 +2373,7 @@ Este projeto é trabalhado por vários agentes ao mesmo tempo, que se coordenam 
 - Travou: `a2a status --agent <seu-nome> --set blocked --note "<o que destrava>"`
 - Ver quem está fazendo o quê: `a2a status`
 - Antes de mexer num arquivo que outro agente pode estar editando, avise no canal.
+- Conversa indo e voltando sem decisão? Pare e pergunte ao Luiz. `a2a loops --project <projeto> --agent <seu-nome>` mostra o que parece loop entre agentes (só leitura).
 - Informe seu contexto quando souber: `a2a status --agent <seu-nome> --set working --context <0-100>`; com 80%+ faça o handoff (abaixo).
 
 ### Contexto e handoff
@@ -2717,6 +2892,26 @@ def build_parser():
     ixs.add_parser("rebuild", help="reconstroi o indice a partir do bus/")
     ixs.add_parser("check", help="compara o indice com o bus/ (sai 1 se divergir)")
     ix.set_defaults(func=cmd_index)
+    lp = sub.add_parser("loops", help="detector de loop entre agentes (so leitura): rodadas, repeticao, ping-pong, origem, tetos",
+        description="Le o bus (e ~/.a2a/runs/, se existir) e aponta conversas que parecem loop entre agentes automaticos. "
+        "Conversa = mensagem raiz + respostas por --reply-to (transitivo) + mensagens com o mesmo task_id; acks nao contam. "
+        f"Achados: rodadas (>= {LOOP_MAX_ROUNDS} mensagens entre agentes sem mensagem do humano no meio); repeticao (mesmo "
+        "remetente, mesmo body depois de juntar espacos, na mesma conversa); pingpong (A->B->A->B sem estado rumo a CONCLUIDO "
+        f"nem evidencia ou arquivo novo, >= {LOOP_PINGPONG} mensagens); sem-origem-humana (conversa que nao nasceu do humano "
+        f"nem de missao dele com >= {LOOP_MAX_HOPS} saltos automaticos); teto (em qualquer janela de 1h: mais de {LOOP_CAP_AGENT} "
+        f"mensagens de um agente, {LOOP_CAP_PAIR} de A para B contando tarefas novas sem --reply-to, ou {LOOP_CAP_GLOBAL} no total). "
+        "Uma linha por achado (LOOP <tipo> <raiz> <agentes> <detalhe>) e uma linha de resumo. So le: nao grava bus, cursor, "
+        "status, heartbeat nem index.json. Sai 0 sempre (informativo); com --strict sai 1 se houver achados.", **ex(
+        "a2a loops",
+        "a2a loops --project lagu --since 24",
+        "a2a loops --agent codex --json",
+        "a2a loops --project lagu --strict"))
+    lp.add_argument("--project", help="so mensagens deste projeto (tetos tambem contam so ele)")
+    lp.add_argument("--agent", help="so achados que envolvem este agente")
+    lp.add_argument("--since", type=float, metavar="H", help="so conversas com atividade nas ultimas H horas (e tetos nessa janela)")
+    lp.add_argument("--json", action="store_true", help="o resultado em uma linha de JSON compacto")
+    lp.add_argument("--strict", action="store_true", help="sai 1 quando houver achados (para scripts)")
+    lp.set_defaults(func=cmd_loops)
     pm = sub.add_parser("prompt", help="monta (so imprime) o prompt em camadas para um vigia headless, com prefixo estavel",
         description="Imprime o prompt para um vigia headless (claude -p, codex exec, hermes -z) na ordem fixa: "
         "1) fixa: nucleo do AGENTS.md + papel do agente; 2) quase fixa: pasta de trabalho do agente no projeto registrado; "

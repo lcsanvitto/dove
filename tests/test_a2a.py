@@ -1919,6 +1919,169 @@ def fact_fase():
     print("OK: a2a fact (validacao, tetos 30/3000, TTL com relogio, tarefa fecha, missao condensa com alerta para 1 agente, "
           "expire, prune so do humano + arquivo morto, linhas F/JSON no brief, --facts, heartbeat, sem bus, sem memoria = igual)")
 
+def loops_fase():
+    """a2a loops (etapa 2 da Fase 3): cada achado positivo e negativo, conversa por reply_to/task_id, raiz humana (e de missao),
+    repeticao so com diferenca de espacos, tarefa nova sem --reply-to no teto do par, runs/ lido se existir, so leitura,
+    --json, --strict, --since, --agent, --project."""
+    sys.path.insert(0, str(ROOT)); import a2a as A
+    T0 = time.time() - 600; seq = [0]
+    def mk(frm, to, body="x", reply="", task="", kind="task", state="", evidence="", files=None, dt=None, project="lagu"):
+        seq[0] += 1
+        m = {"data": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(T0 + (seq[0] if dt is None else dt))),
+             "task_id": task, "msg_id": f"{seq[0]:012x}", "from": frm, "to": to, "project": project, "in_reply_to": reply,
+             "kind": kind, "state": state, "result": "", "evidence": evidence, "pending": "", "next_action": "", "body": body}
+        if files: m["files"] = files
+        return m
+    def chain(n, a="claude", b="codex", root_from=None, **kw):
+        """n mensagens alternadas a<->b, cada uma respondendo a anterior (corpos diferentes)."""
+        ms = [mk(root_from or a, b, "comeco")]
+        for i in range(n - 1):
+            prev = ms[-1]; frm = b if prev["from"] in (a, root_from) and prev["to"] == b else a
+            to = a if frm == b else b
+            ms.append(mk(frm, to, f"msg {i}", reply=prev["msg_id"], **kw))
+        return ms
+    kinds = lambda r: sorted(f["kind"] for f in r["findings"])
+    chk = lambda ms, **kw: A.loop_check(ms, human="luiz", **kw)
+    # rodadas: 6 entre agentes numa conversa de origem humana -> achado; 5 -> nada; mensagem do humano zera
+    root = mk("luiz", "claude", "comeca ai")
+    def rounds(n, extra=()):
+        ms, prev = [root], root
+        for i in range(n):
+            a, b = ("claude", "codex") if i % 2 == 0 else ("codex", "claude")
+            m = mk(a, b, f"r{i}", reply=prev["msg_id"], state="EM_EXECUCAO" if i == 0 else "", evidence=f"ev{i}"); ms.append(m); prev = m
+            if i in extra: m = mk("luiz", "claude", f"humano {i}", reply=prev["msg_id"]); ms.append(m); prev = m
+        return ms
+    r = chk(rounds(6)); assert kinds(r) == ["rodadas"], r
+    f = r["findings"][0]; assert f["root"] == root["msg_id"] and f["agents"] == ["claude", "codex"] and f["count"] == 6, f
+    assert kinds(chk(rounds(5))) == [] and kinds(chk(rounds(8, extra=(3,)))) == [], "humano no meio zera as rodadas"
+    assert kinds(chk(rounds(6), limits={"rounds": 7})) == []
+    # report de agente para o humano nao conta como rodada nem zera; acks nao contam
+    ms = rounds(5); ms.append(mk("codex", "luiz", "relatorio", reply=ms[-1]["msg_id"], kind="report"))
+    ms.append(mk("claude", "codex", "ok", reply=ms[-2]["msg_id"], kind="ack"))
+    assert kinds(chk(ms)) == []
+    ms.append(mk("claude", "codex", "mais uma", reply=ms[-3]["msg_id"], evidence="nova")); assert kinds(chk(ms)) == ["rodadas"]
+    # conversa = reply_to transitivo + mesmo task_id
+    a1 = mk("luiz", "codex", "tarefa", task="t1"); others = [mk("codex", "claude", f"q{i}", task="t1", evidence=f"e{i}") for i in range(6)]
+    r = chk([a1] + others); assert kinds(r) == ["rodadas"] and r["findings"][0]["root"] == a1["msg_id"], r
+    assert len(A.loop_conversations([a1] + others)) == 1 and len(A.loop_conversations([a1, mk("codex", "claude", "solta")])) == 2
+    # sem origem humana: raiz de agente com 4 saltos -> achado; 3 -> nada; raiz humana -> nada; missao do humano -> nada
+    def agent_rooted(n, task=""):
+        ms = [mk("codex", "claude", "raiz do agente", task=task, evidence="e-raiz")]
+        for i in range(n - 1):
+            a, b = ("claude", "codex") if i % 2 == 0 else ("codex", "claude")
+            ms.append(mk(a, b, f"s{i}", reply=ms[-1]["msg_id"], evidence=f"e{i}"))
+        return ms
+    r = chk(agent_rooted(4)); assert kinds(r) == ["sem-origem-humana"] and "raiz de codex, saltos=4/4" in r["findings"][0]["detail"], r
+    assert kinds(chk(agent_rooted(3))) == []
+    hr = agent_rooted(4); hr[0] = dict(hr[0], **{"from": "luiz"}); assert kinds(chk(hr)) == []
+    assert kinds(chk(agent_rooted(4, task="mabc1234"), missions={"mabc1234": "luiz"})) == []
+    assert kinds(chk(agent_rooted(4, task="mabc1234"), missions={"mabc1234": "codex"})) == ["sem-origem-humana"]
+    # repeticao: so espacos diferentes = repeticao; texto diferente nao; humano repetindo nao
+    rt = mk("luiz", "claude", "vai")
+    a = mk("claude", "codex", "pode  revisar\no PR?", reply=rt["msg_id"], evidence="e1")
+    b = mk("claude", "codex", " pode revisar o\tPR? ", reply=a["msg_id"], evidence="e2")
+    r = chk([rt, a, b]); assert kinds(r) == ["repeticao"] and r["findings"][0]["count"] == 2 and r["findings"][0]["agents"] == ["claude"], r
+    assert r["findings"][0]["msg_ids"] == [a["msg_id"], b["msg_id"]]
+    c = mk("claude", "codex", "pode revisar o PR?!", reply=a["msg_id"]); assert kinds(chk([rt, a, c])) == []
+    d = mk("claude", "codex", "Pode revisar o PR?", reply=a["msg_id"]); assert kinds(chk([rt, a, d])) == [], "so espacos sao normalizados"
+    e = mk("codex", "claude", "pode revisar o PR?", reply=a["msg_id"]); assert kinds(chk([rt, a, e])) == [], "outro remetente"
+    h1, h2 = mk("luiz", "claude", "e ai?"), None; h2 = mk("luiz", "claude", "e  ai?", reply=h1["msg_id"]); assert kinds(chk([h1, h2])) == []
+    other = mk("claude", "codex", "pode revisar o PR?", evidence="z"); assert kinds(chk([rt, a, other])) == [], "outra conversa"
+    # ping-pong: 4 alternadas sem progresso -> achado; com estado rumo a CONCLUIDO, evidencia nova ou arquivo novo -> nada
+    def pp(n, mid=None, root_from="luiz"):
+        ms = [mk(root_from, "claude", "comeco")]; prev = None
+        for i in range(n):
+            a_, b_ = ("claude", "codex") if i % 2 == 0 else ("codex", "claude")
+            kw = mid(i) if mid else {}
+            m = mk(a_, b_, f"p{i}", reply=ms[-1]["msg_id"], **kw); ms.append(m)
+        return ms
+    r = chk(pp(4)); assert kinds(r) == ["pingpong"] and r["findings"][0]["count"] == 4 and r["findings"][0]["agents"] == ["claude", "codex"], r
+    assert kinds(chk(pp(3))) == []
+    assert kinds(chk(pp(4, lambda i: {"state": ["ACEITO", "", "EM_EXECUCAO", ""][i]}))) == []
+    assert kinds(chk(pp(4, lambda i: {"evidence": "commit abc" if i == 2 else ""}))) == []
+    assert kinds(chk(pp(4, lambda i: {"files": [{"path": "x.py", "sha": f"{i:06x}", "lines": ""}]}))) == []
+    assert kinds(chk(pp(4, lambda i: {"state": "BLOQUEADO"} if i else {"state": "BLOQUEADO"}))) == ["pingpong"], "BLOQUEADO nao e progresso"
+    assert kinds(chk(pp(4, lambda i: {"evidence": "mesma"}))) == [], "a primeira evidencia conta como progresso"
+    assert kinds(chk(pp(5, lambda i: {"evidence": "mesma"}))) == ["pingpong"], "a mesma evidencia repetida nao e progresso"
+    assert kinds(chk(pp(4, lambda i: {"state": "CONCLUIDO"} if i == 3 else {}))) == []
+    # tetos por hora: agente, par (tarefa nova sem --reply-to conta) e global
+    tasks = [mk("claude", "codex", f"tarefa nova {i}", dt=60 * i) for i in range(9)]  # 9 raizes, nenhuma com reply_to
+    r = chk(tasks); f = [x for x in r["findings"] if x["kind"] == "teto"]
+    assert len(f) == 1 and f[0]["scope"] == "par" and f[0]["agents"] == ["claude", "codex"] and "par claude>codex 9/8 por hora" in f[0]["detail"], r
+    assert kinds(chk(tasks[:8])) == []
+    spread = [mk("claude", "codex", f"tarefa {i}", dt=500 * i) for i in range(9)]  # 9 em 4000s: nunca 9 na mesma hora
+    assert kinds(chk(spread)) == []
+    many = [mk("claude", ["codex", "hermes", "ana", "bia"][i % 4], f"n{i}", dt=10 * i) for i in range(13)]
+    f = [x for x in chk(many)["findings"] if x["kind"] == "teto"]; assert [x["scope"] for x in f] == ["agente"] and "agente claude 13/12" in f[0]["detail"], f
+    crowd = [mk(f"ag{i % 5}", f"bg{i % 7}", f"g{i}", dt=5 * i) for i in range(31)]
+    f = [x for x in chk(crowd)["findings"] if x["kind"] == "teto"]; assert [x["scope"] for x in f] == ["global"] and f[0]["agents"] == ["*"], f
+    hum = [mk("luiz", "codex", f"humano {i}", dt=i) for i in range(40)]; assert kinds(chk(hum)) == [], "humano nao conta nos tetos"
+    acks = [mk("claude", "codex", "ok", kind="ack", dt=i) for i in range(40)]; assert kinds(chk(acks)) == [], "ack nao conta"
+    # since e now: janela fora do periodo nao conta
+    assert kinds(chk(tasks, now=T0 + 600 + 3 * 3600, since=1)) == []
+    assert kinds(chk(tasks, since=2)) == ["teto"]
+    # runs: gatilhos ja acionados
+    r = chk(pp(4), runs=[{"trigger_ids": [pp(4)[0]["msg_id"]]}, "lixo", {"trigger_ids": "x"}])
+    assert r["runs"] == 3 and r["findings"][0].get("acted") == 0 and len(r["acted_on"]) == 1, r
+    ms = pp(4); r = chk(ms, runs=[{"trigger_ids": [ms[1]["msg_id"], ms[2]["msg_id"]]}]); assert r["findings"][0]["acted"] == 2
+    assert chk(ms)["runs"] is None and "acted" not in chk(ms)["findings"][0]
+    print("OK: loop_check puro (rodadas, repeticao, pingpong, sem-origem-humana, tetos agente/par/global, since, runs)")
+
+    # CLI num bus de verdade (arquivos gravados como o send grava), so leitura
+    tmp = tempfile.mkdtemp(); env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8")
+    for ag in ("claude", "codex"): run(env, "join", "--agent", ag)
+    def put(ms):
+        for m in ms:
+            fn = m["data"].replace(":", "").replace("-", "") + "-" + m["msg_id"] + ".json"
+            p = os.path.join(tmp, "bus", fn); json.dump(m, open(p, "w", encoding="utf-8"))
+            t = A.msg_epoch(m); os.utime(p, (t, t))
+    os.makedirs(os.path.join(tmp, "bus"), exist_ok=True)
+    clean = run(env, "loops"); assert clean.returncode == 0 and clean.stdout == "loops: 0 achados (rodadas>=6: 0, repeticao: 0, pingpong: 0, sem-origem-humana: 0, teto: 0)\n", clean.stdout
+    assert run(env, "loops", "--strict").returncode == 0
+    put(pp(4) + tasks + [mk("codex", "claude", "x", project="outro", evidence="e"), *agent_rooted(4)])
+    run(env, "send", "--from", "luiz", "--to", "claude", "--project", "lagu", "--body", "mensagem pelo send")  # indice valido
+    run(env, "read", os.listdir(os.path.join(tmp, "bus"))[0][-17:-5], "--agent", "claude")
+    run(env, "status", "--agent", "claude", "--set", "working", "--note", "x")
+    def snap():
+        out = {}
+        for d in ("bus", "cursor", "status", "agents"):
+            for f in sorted(os.listdir(os.path.join(tmp, d))): out[d + "/" + f] = open(os.path.join(tmp, d, f), "rb").read()
+        out["index"] = open(os.path.join(tmp, "index.json"), "rb").read() if os.path.exists(os.path.join(tmp, "index.json")) else None
+        out["dirs"] = sorted(os.listdir(tmp)); return out
+    run(env, "index", "rebuild"); before = snap(); time.sleep(0.05)
+    out = run(env, "loops")
+    assert out.returncode == 0, out.stderr
+    assert snap() == before, "loops nao pode gravar bus, cursor, status, agentes nem index.json"
+    lines = out.stdout.splitlines()
+    assert all(re.fullmatch(r"LOOP (rodadas|repeticao|pingpong|sem-origem-humana|teto) (\S+) \S+ .+", l) for l in lines[:-1]), lines
+    assert lines[-1] == "loops: 4 achados (rodadas>=6: 0, repeticao: 0, pingpong: 1, sem-origem-humana: 1, teto: 2)", lines
+    assert any(l.startswith("LOOP teto - claude,codex par claude>codex 13/8 por hora") for l in lines), lines
+    assert any(l.startswith("LOOP teto - claude agente claude 13/12 por hora") for l in lines), lines
+    assert run(env, "loops", "--strict").returncode == 1
+    j = run(env, "loops", "--json"); d = json.loads(j.stdout)
+    assert j.stdout.count("\n") == 1 and ": " not in j.stdout and d["total"] == 4 and d["counts"]["teto"] == 2 and d["limits"]["rounds"] == 6, j.stdout
+    assert json.loads(run(env, "loops", "--project", "outro", "--json").stdout)["total"] == 0
+    ag = json.loads(run(env, "loops", "--agent", "codex", "--json").stdout); assert ag["total"] == 3
+    assert json.loads(run(env, "loops", "--agent", "hermes", "--json").stdout)["total"] == 0
+    # indice desatualizado: loops rele o bus, mas nao regrava o index.json
+    open(os.path.join(tmp, "index.json"), "w").write("{}"); before = snap()
+    assert run(env, "loops").stdout == out.stdout and snap() == before
+    # runs/ (do vigia, futuro): lido se existir, so leitura; arquivo ruim ignorado
+    os.makedirs(os.path.join(tmp, "runs", "2026-10")); f0 = d["findings"][0]
+    json.dump({"trigger_ids": [f0["root"]]}, open(os.path.join(tmp, "runs", "2026-10", "r1.json"), "w"))
+    open(os.path.join(tmp, "runs", "2026-10", "ruim.json"), "w").write("{nao json")
+    before = snap(); o2 = run(env, "loops")
+    assert "runs: 1 execucoes do vigia lidas, 1 gatilhos ja acionados" in o2.stdout and snap() == before, o2.stdout
+    assert any(l.startswith(f"LOOP {f0['kind']} {f0['root']} ") and l.endswith("(ja acionadas: 1)") for l in o2.stdout.splitlines()), o2.stdout
+    # A2A_HOME que nao existe continua nao existindo
+    ghost = os.path.join(tempfile.mkdtemp(), "nada"); r = run(dict(env, A2A_HOME=ghost), "loops")
+    assert r.returncode == 0 and "loops: 0 achados" in r.stdout and not os.path.exists(ghost), (r.stdout, r.stderr)
+    h = run(env, "loops", "--help").stdout
+    assert "exemplos:\n" in h and "a2a loops --project lagu --since 24" in h and "--strict" in h, h
+    g = run(env, "onboard", "--agent", "codex").stdout
+    assert "a2a loops" in g and "loops" not in run(env, "onboard", "--agents-md").stdout
+    print("OK: a2a loops (linhas LOOP + resumo, --json, --strict, --project, --agent, runs/, so leitura: bus/cursor/status/indice intactos)")
+
 if __name__ == "__main__":
     main()
     fase1()
@@ -1934,3 +2097,4 @@ if __name__ == "__main__":
     prompt_fase()
     instructions_fase()
     fact_fase()
+    loops_fase()
