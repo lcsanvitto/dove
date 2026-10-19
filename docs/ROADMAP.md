@@ -142,7 +142,7 @@ Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas
 - `parse_run_usage()` chamado logo depois de `run_agent()`.
 - `run_budget_cap()` em `--max-budget-usd` e `budget_status()['exceeded']` recusam o run (`budget_alerts.json`).
 - `loop_runs()` não conta runs `refused`.
-- Filtro por `assignee` (passo 14, 38d8b13) já entrou. Ainda falta: a pergunta única ao `luiz` quando o gasto chegar a 80%.
+- Filtro por `assignee` (passo 14, 38d8b13) já entrou. A pergunta única ao `luiz` aos 80% também já existe (`budget_alert_notify`).
 - Testado só com executor falso (`claude` fake); o teste manual acompanhado pelo Luiz com o `claude` real continua pendente.
 
 ## 5. Decisões
@@ -164,7 +164,8 @@ Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas
 
 **Pendentes**
 - Teste manual do vigia (passo 7) com o `claude` real, acompanhado pelo Luiz (os testes automáticos usam executor falso).
-- Pergunta única ao `luiz` quando o gasto chegar a 80% (nota do passo 7, ver acima).
+- ~~Pergunta única ao `luiz` quando o gasto chegar a 80%~~: feito (`budget_alert_notify`).
+- ~~Achados da revisão de segurança (add-dir do codex, caminhos de Edit/Write, orçamento sem projeto/missão, identidade do executor, aviso do `hermes --enable`)~~: corrigidos.
 - Vigia contínuo (sem `--once`): hoje só existe `a2a watch --once`/`a2a watch plan`. Sem ele, o orquestrador (passo 11) só tem o gatilho por evento (mensagem nova endereçada a ele); o tique periódico e os gatilhos extras (agente `blocked`, `ctx>=80%`, task sem `ACEITO` em 30min) ficam pendentes.
 - `parent` (passo 15): aprovado, ainda não implementado.
 

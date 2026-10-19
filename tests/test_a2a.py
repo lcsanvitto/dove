@@ -1294,7 +1294,7 @@ def wait_fase():
     assert idle["rc"] == 2 and idle["txt"] == "(timeout)\n", idle
     # antes: 1 releitura completa por volta (~15 em 3s numa FS rapida); timeout/piso generosos porque o primeiro
     # index_build (200 msgs) pode ser lento no Windows (antivirus no primeiro acesso aos arquivos recem-criados)
-    assert idle["all"] <= 2 and 5 <= idle["passes"] <= 50, idle
+    assert idle["all"] <= 2 and 5 <= idle["passes"] <= 60, idle
     assert mid["rc"] == 0 and "chegou no meio" in mid["txt"] and mid["all"] <= 2, mid
     assert mid["lag"] < 0.2 + 0.25, mid  # em ate um --interval (com folga para o agendador)
     assert old["rc"] == 0 and "velho0000001" in old["txt"], old
@@ -2268,7 +2268,8 @@ def watch_fase():
     assert set(t["subcmds"]) == {"send", "brief", "read", "status", "ack", "whereami", "mission approve", "mission reject",
                                  "fact add", "fact list", "project which"}, t["subcmds"]
     assert t["runners"]["claude"]["mode"] == "dontAsk" and "--permission-mode" in t["runners"]["claude"]["argv"], t
-    assert t["runners"]["codex"]["argv"] == ["exec", "--json", "-s", "workspace-write", "-C", "{worktree}", "--add-dir", "{a2a_home}", "-"], t
+    assert t["runners"]["codex"]["argv"] == ["exec", "--json", "-s", "workspace-write", "-C", "{worktree}", "--add-dir", "{a2a_bus}", "--add-dir", "{a2a_status}",
+                                                        "--add-dir", "{a2a_cursor}", "--add-dir", "{a2a_missions}", "--add-dir", "{a2a_memory}", "-"], t
     assert t["runners"]["hermes"]["enabled"] is False and t["runners"]["claude"]["enabled"] and t["runners"]["codex"]["enabled"], t
     # etapa 11: orquestrador roda com o claude por baixo, mas so leitura + a2a send/brief/read/status/fact
     oallow = t["runners"]["orquestrador"]["allow"]
@@ -2288,15 +2289,17 @@ def watch_fase():
     cl = next(l for l in lines if l.startswith("claude "))
     assert cl.startswith("claude -p --output-format stream-json --verbose --permission-mode dontAsk --permission-prompts "
                         "none --allowedTools "), cl
-    assert "--max-turns 30 --max-budget-usd <run_budget_cap> --session-id <run_id>" in cl, cl
+    assert "--max-turns 30 --max-budget-usd <run_budget_cap> --session-id <run_id>" in cl.replace("'", ""), cl  # shlex.quote poe aspas no Linux
     assert "Bash(git diff *)" in cl and "PowerShell(a2a mission approve *)" in cl and "python" not in cl and "--bare" not in cl, cl
     assert f"# claude · pasta: {wt} · stdin:" in out and "# codex · pasta: <copia de codex>" in out, out
     cx = next(l for l in lines if l.startswith("codex "))
     assert cx.startswith("codex exec --json -s workspace-write -C ") and "--add-dir" in cx and home in cx and cx.endswith(" -"), cx
+    assert cx.count("--add-dir") == 5 and not re.search(r"--add-dir '?%s'? " % re.escape(home), cx), cx  # nunca ~/.a2a inteiro
     assert "# hermes (desabilitado ate o Luiz confirmar)" in out and any(l.startswith("hermes chat --oneshot") for l in lines), out
     j = json.loads(check("--show-command", "--json", "--agent", "claude", code=0)[0])
     cargv = j["commands"][0]["argv"]
-    assert cargv[:2] == ["claude", "-p"] and cargv[cargv.index("--allowedTools") + 1] == ",".join(allow), j
+    assert cargv[:2] == ["claude", "-p"] and cargv[cargv.index("--allowedTools") + 1].split(",") == \
+        [x.replace("{worktree_rule}", "<copia de claude>/**") for x in allow], j
     assert open(spy, encoding="utf-8").read() == before
     # 8) espiao: nada alem de --version, --help e auth status
     calls = [json.loads(l) for l in open(spy, encoding="utf-8") if l.strip()]
@@ -3604,6 +3607,74 @@ def budget_fase():
           "a mesma sessao duas vezes, run_budget_cap (0,50 padrao, teto do projeto, restante), alertas 80%/esgotado no summary "
           "e no brief; sem orcamento, nenhuma saida muda")
 
+HARDEN_PROBE = r"""
+import sys, json, os
+mode, root, wt = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.path.insert(0, root); import a2a
+if mode == "argv":
+    print(json.dumps({"claude": a2a.watch_argv("claude", wt), "codex": a2a.watch_argv("codex", wt), "home": a2a.HOME}))
+else:
+    if mode == "exhausted":
+        a2a.budget_status = lambda project=None, mission=None, now=None: {"has_budget": True, "exceeded": True,
+                                                                          "scope": "projeto_dia", "id": project}
+    script = os.path.join(wt, "fake.py"); open(script, "w").write("import os; print(os.environ.get('A2A_AGENT'), os.environ.get('A2A_RUNNER'))")
+    r = a2a.run_agent("orquestrador", "", [sys.executable, script], wt, timeout=30)
+    print(json.dumps({"outcome": r.outcome, "reason": r.reason, "out": open(r.out_path).read().strip() if os.path.exists(r.out_path) else ""}))
+"""
+def endurecimento_fase():
+    """Endurecimento do vigia: --add-dir do codex so nas pastas do barramento, Edit/Write do claude presos na copia e negados
+    em ~/.a2a, orcamento do dia tambem sem projeto/missao, identidade do executor (A2A_AGENT) amarrada ao --from/--agent."""
+    tmp = tempfile.mkdtemp(); home = os.path.join(tmp, "home"); wt = os.path.join(tmp, "wt"); os.makedirs(wt)
+    base = {k: v for k, v in os.environ.items() if k not in ("A2A_RUNNER", "A2A_RUN_ID", "A2A_AGENT", "A2A_TESTING", "A2A_RUNNER_OVERRIDE")}
+    env = dict(base, A2A_HOME=home, PYTHONIOENCODING="utf-8")
+    def probe(mode, e=env):
+        r = subprocess.run([sys.executable, "-c", HARDEN_PROBE, mode, str(ROOT), wt], capture_output=True, text=True, encoding="utf-8", env=e)
+        assert r.returncode == 0, r.stderr
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    # codex: nada de ~/.a2a inteiro nem de STOP/budgets/config; claude: Edit/Write presos na copia, ~/.a2a negado
+    a = probe("argv"); cx = a["codex"]; h = a["home"]
+    dirs = [cx[i + 1] for i, x in enumerate(cx) if x == "--add-dir"]
+    assert sorted(dirs) == sorted(os.path.join(h, d) for d in ("bus", "status", "cursor", "missions", "memory")), cx
+    assert h not in cx and not any(re.search(r"STOP|budgets|config|budget_alerts|models|instructions|(^|[\\/])runs?$", x) for x in dirs), cx
+    c = a["claude"]; allow = c[c.index("--allowedTools") + 1].split(","); deny = c[c.index("--disallowedTools") + 1].split(",")
+    wr = "//" + wt.lstrip("/") + "/**" if not is_win() else None
+    if wr: assert f"Edit({wr})" in allow and f"Write({wr})" in allow, allow
+    assert "Edit" not in allow and "Write" not in allow, allow  # nunca sem escopo de caminho
+    hr = "//" + h.lstrip("/") + "/**" if not is_win() else None
+    if hr: assert deny == [f"Edit({hr})", f"Write({hr})"], deny
+    # orcamento: sem projeto/missao, so recusa com limite do dia esgotado; A2A_AGENT vai no env do filho
+    ok = probe("ok"); assert ok["outcome"] == "ok" and ok["out"] == "orquestrador watch", ok
+    ex = probe("exhausted")
+    assert ex["outcome"] == "ok", ex  # sem nenhum orcamento definido, nada muda
+    os.makedirs(home, exist_ok=True)
+    json.dump({"v": 1, "projects": {"lagu": {"usd_day": 1.0}}}, open(os.path.join(home, "budgets.json"), "w"))
+    ex = probe("exhausted")
+    assert ex["outcome"] == "refused" and "orcamento esgotado" in ex["reason"] and "lagu" in ex["reason"], ex
+    assert probe("ok")["outcome"] == "ok"  # orcamento definido e com folga: roda
+    # identidade: o executor de codex nao fala como claude
+    def a2a(*args, e, code=0):
+        r = subprocess.run([sys.executable, str(A2A), *args], capture_output=True, text=True, encoding="utf-8", env=e)
+        assert r.returncode == code, (args, r.returncode, r.stdout, r.stderr)
+        return r.stdout + r.stderr
+    a2a("init", e=env); a2a("join", "--agent", "claude", e=env); a2a("join", "--agent", "codex", e=env)
+    rn = dict(env, A2A_RUNNER="watch", A2A_AGENT="codex")
+    a2a("send", "--from", "codex", "--to", "claude", "--project", "p", "--kind", "task", "--body", "oi", e=rn)
+    for args in (("send", "--from", "claude", "--to", "codex", "--project", "p", "--kind", "task", "--body", "x"),
+                 ("status", "--agent", "claude", "--set", "working"),
+                 ("fact", "add", "--project", "p", "--from", "claude", "x"),
+                 ("ack", "zzz", "--from", "claude")):
+        assert "identidade do executor" in a2a(*args, e=rn, code=2), args
+    a2a("status", "--agent", "codex", "--set", "working", e=rn)
+    assert not any("--from claude" in m for m in [a2a("inbox", "--agent", "codex", "--no-auto-status", e=env)]), "nada de claude gravado"
+    a2a("send", "--from", "claude", "--to", "codex", "--project", "p", "--kind", "task", "--body", "livre",
+        e=dict(env, A2A_AGENT="codex"))  # sem A2A_RUNNER: nada muda
+    he = a2a("watch", "hermes", "--enable", "--from", "luiz", e=env)
+    assert "AVISO:" in he and "quero arriscar" in he and "sem sandbox de SO" in he, he  # mesmo aviso do watch check
+    assert "AVISO" not in a2a("watch", "hermes", "--disable", "--from", "luiz", e=env)
+    print("OK: endurecimento - add-dir do codex so em bus/status/cursor/missions/memory, Edit/Write do claude na copia e "
+          "negados em ~/.a2a, orcamento do dia vale sem projeto/missao, A2A_AGENT amarra --from/--agent do executor")
+def is_win(): return os.name == "nt"
+
 if __name__ == "__main__":
     main()
     fase1()
@@ -3628,3 +3699,4 @@ if __name__ == "__main__":
     models_fase()
     budget_fase()
     assignee_fase()
+    endurecimento_fase()

@@ -470,6 +470,15 @@ def save_config(**kv):
     with FileLock(CONFIG):
         c = load_config(); c.update(kv); write_json(CONFIG, c)
 def human_name(): return load_config().get("human") or HUMAN
+def refuse_if_runner_as_other(args):
+    """Identidade do executor: com A2A_RUNNER e A2A_AGENT (o vigia grava o agente dono da execucao), --from/--agent de
+    outro agente e recusado (codex nao fala como claude). Sem A2A_RUNNER nada muda."""
+    me = os.environ.get("A2A_AGENT", "").strip()
+    if not (runner_active() and me): return
+    for attr, flag in (("_from", "--from"), ("agent", "--agent")):
+        v = getattr(args, attr, None)
+        if isinstance(v, str) and v.strip() and v.strip() != me:
+            raise RunnerRefused(f"identidade do executor: esta execucao e de '{me}' (A2A_AGENT); {flag} {v.strip()} recusado")
 def refuse_if_runner_as_human(who):
     """Execucao automatica (A2A_RUNNER) nunca fala como o humano (send/ack/mission new --from <humano>)."""
     if (who or "").strip() == human_name(): refuse_if_runner()
@@ -3059,7 +3068,13 @@ WATCH_GIT_READ = ("status", "diff", "log")
 WATCH_GIT_WRITE = ("add", "commit")  # commit so na propria copia (cwd = copia; git -C proibido); push/merge ficam com o humano
 def _watch_rules(shell):
     return tuple(f"{shell}(a2a {c} *)" for c in WATCH_A2A_SUBCMDS) + tuple(f"{shell}(git {c} *)" for c in WATCH_GIT_READ + WATCH_GIT_WRITE)
-WATCH_CLAUDE_ALLOW = ("Read", "Grep", "Glob", "Edit", "Write") + _watch_rules("Bash") + _watch_rules("PowerShell")
+# Edit/Write so dentro da copia do agente ({worktree_rule} vira //<caminho absoluto>/**, a forma absoluta do Claude Code) e
+# negados em ~/.a2a ({a2a_home_rule}); a negacao vale mais que a liberacao. Bash/PowerShell nao tem como ser contido por caminho.
+HERMES_RISK_MSG = ("ligado por opt-in explicito (a2a watch hermes --enable --from <humano>); risco "
+                   "aceito pelo Luiz em 2026-10-19 ('quero arriscar'); sem sandbox de SO")
+WATCH_CLAUDE_ALLOW = ("Read", "Grep", "Glob", "Edit({worktree_rule})", "Write({worktree_rule})") \
+    + _watch_rules("Bash") + _watch_rules("PowerShell")
+WATCH_CLAUDE_DENY = ("Edit({a2a_home_rule})", "Write({a2a_home_rule})")
 # etapa 11: orquestrador so tem leitura + a2a send/brief/read/status/fact (nunca Edit/Write, nunca mission/git) - a
 # recusa de mission approve/reject/done tambem esta no codigo (mission_verdict/require_human), isto e so a allowlist.
 WATCH_ORQ_A2A_SUBCMDS = ("send", "brief", "read", "status", "fact add", "fact list")
@@ -3067,18 +3082,22 @@ def _watch_orq_rules(shell):
     return tuple(f"{shell}(a2a {c} *)" for c in WATCH_ORQ_A2A_SUBCMDS)
 WATCH_ORQ_ALLOW = ("Read", "Grep", "Glob") + _watch_orq_rules("Bash") + _watch_orq_rules("PowerShell")
 WATCH_RUNNERS = {
-    "claude": {"exe": "claude", "enabled": True, "permission_mode": "dontAsk", "allow": WATCH_CLAUDE_ALLOW,
+    "claude": {"exe": "claude", "enabled": True, "permission_mode": "dontAsk", "allow": WATCH_CLAUDE_ALLOW, "deny": WATCH_CLAUDE_DENY,
                "argv": ("-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk",
-                        "--permission-prompts", "none", "--allowedTools", "{allow}", "--max-turns", "30",
+                        "--permission-prompts", "none", "--allowedTools", "{allow}", "--disallowedTools", "{deny}", "--max-turns", "30",
                         "--max-budget-usd", "{budget}", "--session-id", "{run_id}"),
                "stdin": "prompt (a2a prompt --for claude)", "cwd": "{worktree}",
                "note": "sem --bare: --bare exige ANTHROPIC_API_KEY (nao usa a assinatura); sandbox de SO so no macOS/Linux/WSL2; "
                        "--session-id exige um UUID (etapa 7 deriva um de run_id com uuid5, so para esta flag)"},
     "codex": {"exe": "codex", "enabled": True, "permission_mode": "workspace-write", "allow": (),
-              "argv": ("exec", "--json", "-s", "workspace-write", "-C", "{worktree}", "--add-dir", "{a2a_home}", "-"),
+              "argv": ("exec", "--json", "-s", "workspace-write", "-C", "{worktree}", "--add-dir", "{a2a_bus}", "--add-dir", "{a2a_status}",
+                       "--add-dir", "{a2a_cursor}", "--add-dir", "{a2a_missions}", "--add-dir", "{a2a_memory}", "-"),
               "stdin": "prompt (a2a prompt --for codex)", "cwd": "{worktree}",
               "note": "exec nunca pede aprovacao; workspace-write deixa .git (inclusive o gitdir da copia) so leitura: "
-                      "o codex nao commita na copia; --add-dir libera a escrita em ~/.a2a"},
+                      "o codex nao commita na copia; --add-dir libera a escrita so em bus/, status/, cursor/, missions/ e memory/ "
+                      "(o que a2a send/status/read/ack/mission approve/fact add gravam); nunca ~/.a2a inteiro (STOP, "
+                      "budgets.json, config.json, budget_alerts.json, run/, runs/, models.json, instructions.json). index.json "
+                      "e so cache (falha de gravacao e silenciosa)"},
     "hermes": {"exe": "hermes", "enabled": False, "permission_mode": "", "allow": (),
                "argv": ("chat", "--oneshot", "-Q", "--query-file", "-", "--source", "tool", "--max-turns", "30",
                         "--usage-file", "{run_dir}/usage.json"),
@@ -3102,7 +3121,7 @@ def watch_forbidden():
     """Textos proibidos na tabela (argv, allowlist, modo); a nota explicativa fica de fora. Vazio = ok."""
     bad = []
     for ag, r in WATCH_RUNNERS.items():
-        for s in (r["exe"], r["permission_mode"], *r["argv"], *r["allow"]):
+        for s in (r["exe"], r["permission_mode"], *r["argv"], *r["allow"], *r.get("deny", ())):
             if WATCH_FORBIDDEN.search(s): bad.append(f"{ag}: {s}")
     return bad
 def watch_prompt_runner(agent):
@@ -3110,12 +3129,24 @@ def watch_prompt_runner(agent):
     o nome do agente (etapa 11: orquestrador roda com o claude por baixo, mas o nome dele nao esta em PROMPT_RUNNERS)."""
     exe = (WATCH_RUNNERS.get(agent) or {}).get("exe", agent)
     return exe if exe in PROMPT_RUNNERS else ""
+def claude_path_rule(p):
+    """Caminho absoluto na sintaxe de regra do Claude Code (//caminho; no Windows C:\\x vira //c/x). Sem ** no fim."""
+    p = str(p).replace("\\", "/")
+    m = re.match(r"^([A-Za-z]):(/.*)?$", p)
+    if m: p = "/" + m.group(1).lower() + (m.group(2) or "")
+    return "/" + p.rstrip("/") if p.startswith("/") else p.rstrip("/")
 def watch_argv(agent, worktree="", a2a_home="", run_dir="", run_id="", budget=None):
     """argv exato que o vigia usaria (o prompt vai pelo stdin). run_id/budget: so usados pelo claude (--session-id,
     --max-budget-usd); sem eles (simulacao), mostram um texto-placeholder, como {worktree} sem copia registrada."""
     r = WATCH_RUNNERS[agent]
-    sub = {"{allow}": ",".join(r["allow"]), "{worktree}": worktree or f"<copia de {agent}>",
-           "{a2a_home}": a2a_home or HOME, "{run_dir}": run_dir or os.path.join(HOME, "runs", "<run_id>"),
+    wt = worktree or f"<copia de {agent}>"; home = a2a_home or HOME
+    rules = {"{worktree_rule}": claude_path_rule(wt) + "/**", "{a2a_home_rule}": claude_path_rule(home) + "/**"}
+    def rule(x):
+        for k, v in rules.items(): x = x.replace(k, v)
+        return x
+    sub = {"{allow}": ",".join(rule(x) for x in r["allow"]), "{deny}": ",".join(rule(x) for x in r.get("deny", ())),
+           "{worktree}": wt, "{a2a_home}": home, "{run_dir}": run_dir or os.path.join(HOME, "runs", "<run_id>"),
+           **{f"{{a2a_{d}}}": os.path.join(home, d) for d in ("bus", "status", "cursor", "missions", "memory")},
            "{run_id}": run_id or "<run_id>", "{budget}": f"{budget:.2f}" if isinstance(budget, (int, float)) else "<run_budget_cap>"}
     out = [r["exe"]]
     for x in r["argv"]:
@@ -3218,8 +3249,7 @@ def watch_check_hermes(which):
         if m: out.append(("OK", "aprovacoes", f"approvals.mode = {m.group(1)} ({p})"))
         else: out.append(("PULADO", "aprovacoes", f"approvals.mode nao encontrado em {p}"))
     if hermes_enabled():
-        out.append(("AVISO", "vigia", "ligado por opt-in explicito (a2a watch hermes --enable --from <humano>); risco "
-                    "aceito pelo Luiz em 2026-10-19 ('quero arriscar'); sem sandbox de SO"))
+        out.append(("AVISO", "vigia", HERMES_RISK_MSG))
     else:
         out.append(("AVISO", "vigia", "desabilitado no vigia (opt-in: a2a watch hermes --enable --from <humano>)"))
     return out
@@ -4167,6 +4197,8 @@ def real_runner_argv(agent, worktree="", run_id="", budget=None):
     exe = shutil.which(WATCH_RUNNERS[agent]["exe"])
     if not exe: raise DoveError(f"{WATCH_RUNNERS[agent]['exe']} nao encontrado no PATH")
     argv = watch_argv(agent, worktree, run_id=run_id, budget=budget)
+    if agent == "codex":  # --add-dir exige a pasta existente; memory/ so nasce no primeiro fact add
+        for d in (BUS, STATUS, CURSOR, MISSIONS, MEMORY): os.makedirs(d, exist_ok=True)
     argv[0] = exe
     if is_windows() and exe.lower().endswith((".cmd", ".bat")):
         return [os.environ.get("ComSpec", "cmd.exe"), "/d", "/s", "/c", watch_quote(argv)]
@@ -4221,6 +4253,9 @@ def run_agent(agent, project, argv, cwd, stdin_text="", timeout=900, env_extra=N
     if project or mission:
         cap = run_budget_cap(project or None, mission or None, now=t0)
         if cap <= 0: return finish("refused", "orcamento esgotado: nenhum valor disponivel para a proxima execucao")
+    else:  # sem projeto/missao (ex.: orquestrador): nao ha escopo proprio, entao vale o limite do dia de QUALQUER projeto
+        ex = budget_day_exhausted(now=t0)
+        if ex: return finish("refused", f"orcamento esgotado: {ex} (execucao sem projeto/missao so roda com todos os limites do dia livres)")
     lock_p = os.path.join(RUN_DIR, agent + ".json")
     linfo = lock_info(kind="run", agent=agent, run_id=run_id, project=project or "")
     ok, cur = lock_acquire(lock_p, linfo)
@@ -4229,7 +4264,7 @@ def run_agent(agent, project, argv, cwd, stdin_text="", timeout=900, env_extra=N
     try:
         if not os.path.isdir(cwd or ""): return finish("error", f"pasta de trabalho nao existe: {cwd}")
         env = dict(os.environ); env.update({str(k): str(v) for k, v in (env_extra or {}).items()})
-        env.update(A2A_RUNNER="watch", A2A_RUN_ID=run_id)  # depois do env_extra: nao da para sobrescrever
+        env.update(A2A_RUNNER="watch", A2A_RUN_ID=run_id, A2A_AGENT=agent)  # depois do env_extra: nao da para sobrescrever
         tree = make_tree(run_id)
         try:
             with open(out_p, "wb") as fo, open(err_p, "wb") as fe:
@@ -4348,6 +4383,7 @@ def watch_supervisor(a):
             on = hermes_opt_in(a._from, a.enable)
             print(f"opt-in do hermes no vigia: {'ligado' if on else 'desligado'} (por {a._from})"
                   + ("" if on else " — o vigia continua recusando o hermes"))
+            if on: print(f"AVISO: {HERMES_RISK_MSG}")
         elif a.wcmd == "stop":
             killed = watch_stop(a._from, a.kill)
             print(f"STOP criado ({STOP_FILE}): nenhuma execucao nova; as em curso param em ate 1s + {RUN_GRACE:g}s"
@@ -4766,6 +4802,13 @@ def run_budget_cap(project=None, mission=None, now=None):
         if st["exceeded"]: return 0.0
         if st["remaining"]["usd"] is not None: caps.append(st["remaining"]["usd"])
     return round(max(min(caps), 0.0), 6)
+def budget_day_exhausted(now=None):
+    """Rotulo do primeiro projeto cujo limite do dia (usd_day/tokens_day) esta esgotado, ou "" (sem limite ou folga)."""
+    for kind, x in budget_targets(days=True, missions=[]):
+        try: st = budget_status(project=x, now=now)
+        except DoveError: continue
+        if st["has_budget"] and st["exceeded"]: return budget_label(st)
+    return ""
 def budget_targets(project=None, agent=None, missions=None, days=True):
     """Orcamentos definidos (sem ler registros): [("missao", dict)] das missoes abertas com budget e [("projeto_dia", P)]."""
     out = []
@@ -5311,7 +5354,7 @@ def main(argv=None):
         try: sys.stdout.reconfigure(errors="replace")
         except Exception: pass
     args = build_parser().parse_args(argv)
-    try: args.func(args)
+    try: refuse_if_runner_as_other(args); args.func(args)
     except RunnerRefused as e: print(f"erro: {e}", file=sys.stderr); sys.exit(2)
 
 if __name__ == "__main__":

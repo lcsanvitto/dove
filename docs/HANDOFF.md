@@ -30,7 +30,8 @@ Para uma sessão nova retomar sem reexplicar nada. Estado detalhado: [`docs/ROAD
 - Só acorda por conversas iniciadas pelo humano (`a2a watch --once --from <human>`). Sem `--bare` (usa a assinatura).
 - Testado só com executor falso (valida a linha de comando exata); **falta o teste manual acompanhado pelo Luiz com o `claude` real** — esse é o gate real antes de automatizar o disparo.
 - **Gap resolvido pela etapa 14** (38d8b13): com `assignee` definido na missão/tarefa, o vigia acorda só o responsável; sem o campo, continua acordando todo participante elegível (como antes).
-- Falta fazer: a pergunta única ao `luiz` quando o gasto chegar a 80%.
+- A pergunta única ao `luiz` quando o gasto chegar a 80% já existe (`budget_alert_notify`).
+- Endurecimento (revisão de segurança, corrigido): `--add-dir` do codex só em `bus/ status/ cursor/ missions/ memory/` (nunca `~/.a2a` inteiro); `Edit`/`Write` do claude presos na própria cópia e negados em `~/.a2a`; sem projeto/missão a execução também recusa com limite do dia esgotado; o vigia grava `A2A_AGENT` e, sob `A2A_RUNNER`, `--from`/`--agent` de outro agente é recusado (código 2); `watch hermes --enable` mostra o mesmo aviso de risco do `watch check`.
 
 **Etapa 14 — `assignee`** · **FEITO** · 38d8b13 (emenda à etapa 7, não pré-requisito; a 7 já foi feita sem ela)
 - Campo opcional `assignee` em missões (`a2a mission new --assignee`) e tarefas avulsas (`a2a send --kind task --assignee`): um único agente responsável, participante registrado (nunca o humano, nunca reservado); em missão precisa estar em `--agents`, em tarefa avulsa precisa ser o destinatário (`--to`) ou, com `--to all`, qualquer agente registrado.
