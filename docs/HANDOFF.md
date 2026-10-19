@@ -7,14 +7,14 @@ Para uma sessão nova retomar sem reexplicar nada. Estado detalhado: [`docs/ROAD
 - Usuário: Luiz, no Windows (`C:\Users\Dell`); projetos em `C:\Users\Dell\Cowork\Codigo` (ex.: `lagu`).
 - Também usa uma VPS Ubuntu 24.04 e uma máquina com Omarchy (canal entre máquinas ainda não existe).
 - Agentes no canal: `claude` (Claude Code), `codex` (Codex), `hermes` (Hermes).
-- Fase atual: Fase 3 (orquestrador/vigia). Feitos 0+1, 2, 3 (75c979d), 4, 5, 6, 7 (396cfd5), 8 (7fca4c3), 10, 13; 9 e 11 livres pra seguir (dependiam só do 7); 12 aceito com risco (desligado por padrão). Aprovados em 2026-10-19: 14 (`assignee`) e 15 (`parent`, junto com o 11). O 7 foi feito **sem** esperar o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora") — hoje acorda todos os participantes, não só o `assignee`; o 14 entra depois como emenda ao 7.
+- Fase atual: Fase 3 (orquestrador/vigia). Feitos 0+1, 2, 3 (75c979d), 4, 5, 6, 7 (396cfd5), 8 (7fca4c3), 10, 13, 14 (`assignee`, 38d8b13 — emenda ao 7); 9 e 11 livres pra seguir (dependiam só do 7); 12 aceito com risco (desligado por padrão). Aprovado em 2026-10-19: 15 (`parent`, junto com o 11). O 7 foi feito **sem** esperar o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"); o 14 entrou depois como emenda — o vigia agora acorda só o `assignee` quando ele está definido, e todo participante elegível quando não está (como antes).
 
 ## Regras do projeto
 - Só stdlib.
 - **NÃO mexer em `ui/`**: parte visual pausada; o Claude Design cuida só da estética, quando o Luiz retomar.
 - `DOVE_VERSION` fica `"0.6.0"` enquanto a UI estiver pausada (a UI compara a versão exata e mostra a faixa "servidor desatualizado").
 - Comportamento existente não muda sem aval do Luiz.
-- Tudo que executa agentes, gasta dinheiro, muda o envelope ou o `~/.a2a` precisa de aval do Luiz. Já aprovados: etapas 0–11 da Fase 3; a 12 com risco aceito pelo Luiz em 2026-10-19 (desligada por padrão, opt-in explícito). A 7 está feita (396cfd5); a 14 (`assignee`) e a 15 (`parent`) foram aprovadas em 2026-10-19 (14 como emenda ao 7, não mais pré-requisito; 15 junto com a 11).
+- Tudo que executa agentes, gasta dinheiro, muda o envelope ou o `~/.a2a` precisa de aval do Luiz. Já aprovados: etapas 0–11 da Fase 3; a 12 com risco aceito pelo Luiz em 2026-10-19 (desligada por padrão, opt-in explícito). A 7 está feita (396cfd5); a 14 (`assignee`) está feita (38d8b13, emenda ao 7); a 15 (`parent`) foi aprovada em 2026-10-19 (junto com a 11).
 - Workers trabalham em worktrees `/home/user/dove-wt/<nome>` com branch própria; rebase só dos próprios commits; rodar os testes completos (`python3 tests/test_a2a.py`); push em `main` sem force.
 - Commits terminam com as linhas `Co-Authored-By:` / `Claude-Session:` usadas no repo.
 
@@ -29,14 +29,14 @@ Para uma sessão nova retomar sem reexplicar nada. Estado detalhado: [`docs/ROAD
 - `loop_runs()` não conta runs `refused` como "já acionados".
 - Só acorda por conversas iniciadas pelo humano (`a2a watch --once --from <human>`). Sem `--bare` (usa a assinatura).
 - Testado só com executor falso (valida a linha de comando exata); **falta o teste manual acompanhado pelo Luiz com o `claude` real** — esse é o gate real antes de automatizar o disparo.
-- **Gap conhecido**: acorda todos os participantes elegíveis, não só um responsável único — isso só muda quando a etapa 14 (`assignee`) entrar (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora").
+- **Gap resolvido pela etapa 14** (38d8b13): com `assignee` definido na missão/tarefa, o vigia acorda só o responsável; sem o campo, continua acordando todo participante elegível (como antes).
 - Falta fazer: a pergunta única ao `luiz` quando o gasto chegar a 80%.
 
-**Etapa 14 — `assignee`** · aprovada (Luiz, 2026-10-19: "sim") · agora é uma **emenda à etapa 7** (não mais pré-requisito; a 7 já foi feita sem ela)
-- Campo opcional `assignee` em missões e tarefas: um único agente responsável.
-- Só o `assignee` marca `EM_EXECUCAO` ou `AGUARDANDO_APROVACAO`; os demais participantes só comentam ou revisam.
-- Quando entrar, o vigia (etapa 7) passa a acordar só o `assignee`, não todos os participantes (menos gasto, menos risco de loop, dono claro).
-- Sem o campo, nada muda no comportamento atual.
+**Etapa 14 — `assignee`** · **FEITO** · 38d8b13 (emenda à etapa 7, não pré-requisito; a 7 já foi feita sem ela)
+- Campo opcional `assignee` em missões (`a2a mission new --assignee`) e tarefas avulsas (`a2a send --kind task --assignee`): um único agente responsável, participante registrado (nunca o humano, nunca reservado); em missão precisa estar em `--agents`, em tarefa avulsa precisa ser o destinatário (`--to`) ou, com `--to all`, qualquer agente registrado.
+- Só o `assignee` marca `EM_EXECUCAO` ou `AGUARDANDO_APROVACAO` (por `--task` ou, sem ele, pela mensagem respondida via `--reply-to`); os demais participantes seguem comentando/revisando — outros estados e `mission approve`/`reject` continuam livres. O humano está sempre isento.
+- O vigia (etapa 7) já acorda só o `assignee` quando definido (`watch_plan`, valendo também para `watch --once`).
+- Sem o campo, nada muda no comportamento atual (testado em `assignee_fase()` e no bloco novo de `plan_fase()`, `tests/test_a2a.py`).
 
 **Etapa 9 — Codex no vigia** (a 7 já está feita, pode seguir)
 - `codex exec --json -s workspace-write -C <cópia> --add-dir <A2A_HOME> -`.
@@ -85,6 +85,7 @@ dove   # painel
 - TOON, memória vetorial/GraphRAG, SupervisorAgent e mcp-compressor não adotados.
 - `assignee` (14) e `parent` (15) aprovados pelo Luiz em 2026-10-19 ("sim"). Descartados: prioridade, tags, dependências entre tarefas e qualquer coisa que o agente já leia no texto da missão.
 - Etapa 7 comitada sem esperar a 14 (Luiz, 2026-10-19: "Comitar a 7 como está agora"): o vigia acorda todos os participantes elegíveis até a 14 entrar como emenda.
+- Etapa 14 (`assignee`) feita (38d8b13): restrição de estado (`EM_EXECUCAO`/`AGUARDANDO_APROVACAO`) e filtro do vigia ligados só quando o campo está definido; sem ele, nada muda. Uma mensagem do humano endereçada a um participante que não é o `assignee` de uma conversa com responsável definido não aciona esse participante (leitura literal do pedido do Luiz: "só o assignee marca/é acionado").
 
 ## Onde estão as coisas
 - Propostas: `docs/propostas/`.

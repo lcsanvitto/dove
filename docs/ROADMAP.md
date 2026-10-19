@@ -2,7 +2,7 @@
 
 > **Sessão nova? Comece por [`docs/HANDOFF.md`](HANDOFF.md)** — contexto, regras e próximos passos para retomar sem reexplicar.
 
-Estado em 2026-10-19 · base `main` em 396cfd5.
+Estado em 2026-10-19 · base `main` em 38d8b13.
 
 ## 1. O que é o Dove
 Canal A2A local e global: os agentes (`claude`, `codex`, `hermes`) conversam e dividem trabalho por arquivos JSON em `~/.a2a`, sem nuvem.
@@ -55,23 +55,22 @@ Todos os passos têm aval do Luiz; o 12 foi aceito com risco em 2026-10-19 (desl
 | 4 | `a2a cost` (lê os registros do Claude/Codex/Hermes, só leitura) | **FEITO** · 247ef1f |
 | 5 | `a2a watch check` | **FEITO** · 37be0d7 |
 | 6 | Supervisor: `STOP`, travas, timeout, Job Object | **FEITO** · 81a0e14 |
-| 7 | Vigia real, só com o `claude`, iniciado à mão | **FEITO** · 396cfd5 (falta o filtro por `assignee` quando o passo 14 entrar) |
+| 7 | Vigia real, só com o `claude`, iniciado à mão | **FEITO** · 396cfd5 (+ filtro por `assignee` do passo 14, 38d8b13) |
 | 8 | Orçamento: `parse_run_usage`, `run_budget_cap`, `budget_status`, `budget_alerts`, `a2a mission budget`, `a2a cost budget`/`--budget`, `budgets.json`, `a2a watch usage` | **FEITO** · 7fca4c3 |
 | 9 | Codex no vigia (sandbox do Windows; sem commit) | próximo (aprovado) · 7 feito |
 | 10 | `a2a models` (roteamento de modelo) | **FEITO** · 97ce044 |
 | 11 | Orquestrador (só leitura + mensagens) | próximo (aprovado) · 7 feito, depende também do 15 |
 | 12 | Hermes no vigia | **APROVADO COM RISCO** (Luiz, 2026-10-19: "quero arriscar"): desligado por padrão, só com opt-in explícito |
 | 13 | Política de subagentes | **FEITO** · 898c637 (+ c65d148 teste determinístico) |
-| 14 | `assignee` (responsável único) em missões e tarefas | **APROVADO** (Luiz, 2026-10-19: "sim") · **pré-requisito do passo 7** (entra antes dele) |
+| 14 | `assignee` (responsável único) em missões e tarefas | **FEITO** · 38d8b13 (emenda ao passo 7) |
 | 15 | `parent` (missão-mãe) em missões | **APROVADO** (Luiz, 2026-10-19: "sim") · entra junto com o 11, depois do 7 |
 
-Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"). Hoje o vigia acorda **todos** os participantes elegíveis, não só o `assignee`. Quando o 14 entrar, vira uma emenda no 7 (filtro por `assignee`), não mais um pré-requisito. Os passos 9 e 11 seguem livres para usar a 7 atual.
+Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"). O passo 14 entrou depois (38d8b13) como **emenda** ao 7, não como pré-requisito: hoje o vigia acorda **só o `assignee`** quando ele está definido numa missão ou tarefa; sem o campo, continua acordando todo participante elegível, como antes. Os passos 9 e 11 seguem livres para usar a 7 atual.
 
-**Passo 14 — `assignee`** (agora uma emenda ao 7, não mais pré-requisito dele):
-- Campo opcional `assignee` em missões e tarefas: um único agente responsável.
-- Regra: só o `assignee` marca `EM_EXECUCAO` ou `AGUARDANDO_APROVACAO`; os demais participantes só comentam ou revisam.
-- Quando entrar, o vigia (passo 7) passa a acordar só o `assignee`, não todos os participantes: menos gasto, menos risco de loop, dono claro.
-- Sem o campo, tudo se comporta exatamente como hoje (nenhuma mudança de comportamento).
+**Passo 14 — `assignee`** (**FEITO**, 38d8b13 — emenda ao 7, não pré-requisito dele):
+- Campo opcional `assignee` em missões (`a2a mission new --assignee`) e tarefas avulsas (`a2a send --kind task --assignee`): um único agente responsável, precisa ser participante registrado (nunca o humano, nunca reservado).
+- Só o `assignee` marca `EM_EXECUCAO` ou `AGUARDANDO_APROVACAO` (por `--task` ou por `--reply-to`); os demais participantes seguem comentando/revisando — outros estados e `mission approve`/`reject` continuam livres. O humano está sempre isento da restrição.
+- O vigia (passo 7) já acorda só o `assignee` quando definido (`watch_plan`, e portanto também `watch --once`); sem o campo, tudo se comporta exatamente como antes (nenhuma mudança de comportamento).
 
 **Passo 15 — `parent`** (junto com o 11, depois do 7):
 - Campo opcional `parent` em missões: id da missão-mãe.
@@ -84,7 +83,7 @@ Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** 
 - `parse_run_usage()` chamado logo depois de `run_agent()`.
 - `run_budget_cap()` em `--max-budget-usd` e `budget_status()['exceeded']` recusam o run (`budget_alerts.json`).
 - `loop_runs()` não conta runs `refused`.
-- Ainda falta: filtro por `assignee` (passo 14, ver acima) e a pergunta única ao `luiz` quando o gasto chegar a 80%.
+- Filtro por `assignee` (passo 14, 38d8b13) já entrou. Ainda falta: a pergunta única ao `luiz` quando o gasto chegar a 80%.
 - Testado só com executor falso (`claude` fake); o teste manual acompanhado pelo Luiz com o `claude` real continua pendente.
 
 ## 5. Decisões
@@ -103,7 +102,7 @@ Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** 
 
 **Pendentes**
 - Teste manual do vigia (passo 7) com o `claude` real, acompanhado pelo Luiz (os testes automáticos usam executor falso).
-- Passo 14 (`assignee`): quando entrar, emenda o passo 7 para acordar só o `assignee`.
+- Pergunta única ao `luiz` quando o gasto chegar a 80% (nota do passo 7, ver acima).
 
 ## 6. Depois da Fase 3
 - Canal entre máquinas: VPS Ubuntu 24.04 + Omarchy + Windows.
