@@ -1661,6 +1661,21 @@ def prompt_fase():
         assert hp["sha256"] != h["prefixo"]["sha256"], (mode, extra, ag)
     f = run(env, *args, "--for", "codex").stdout
     assert "- Executor: `codex exec`" in f.split(boundary)[0], f
+    # etapa 11: orquestrador tem papel proprio (so leitura + a2a send/brief/read/status/fact), prefixo estavel e
+    # diferente do claude/codex, sem pasta de projeto (pasta propria, run/orquestrador-home)
+    oargs = ["prompt", "--agent", "orquestrador", "--project", "lagu"]
+    ofixed, ofixed2 = run(env, *oargs).stdout.split(boundary)[0], run(env, *oargs).stdout.split(boundary)[0]
+    assert ofixed == ofixed2, "prefixo do orquestrador tem que ser estavel entre execucoes"
+    for el in ("Você é `orquestrador`", "projeto `lagu`", "nunca `mission approve/reject/done`",
+               "merge, deploy, gasto ou exclusão", "a2a send", "a2a fact add", "a2a mission new",
+               "a2a models suggest", "orquestrador-home"):
+        assert el in ofixed, (el, ofixed)
+    assert "Sua pasta de trabalho" not in ofixed and "Pasta do projeto" not in ofixed, ofixed
+    oh = dict(kv.split("=", 1) for kv in inproc("plain", *oargs, "--prefix-hash").splitlines()[0].split()[1:])
+    assert oh["sha256"] != h["prefixo"]["sha256"], (oh, h)  # diferente do prefixo do codex (h, acima)
+    ch = dict(kv.split("=", 1) for kv in inproc("plain", "prompt", "--agent", "claude", "--project", "lagu",
+                                                 "--prefix-hash").splitlines()[0].split()[1:])
+    assert oh["sha256"] != ch["sha256"], (oh, ch)  # e do claude
     # quase fixa: pasta do projeto registrado ou a copia do agente (estavel entre execucoes)
     work = os.path.join(tmp, "lagu"); os.makedirs(work); run(env, "project", "add", "lagu", work)
     p1 = run(env, *args).stdout.split(boundary)[0]
@@ -2242,7 +2257,7 @@ def watch_fase():
     os.remove(os.path.join(home, "STOP")); os.remove(os.path.join(wt, "novo.txt"))
     # 6) a tabela nunca tem padroes proibidos; cada subcomando nas formas Bash e PowerShell; check acusa tabela adulterada
     t = json.loads(subprocess.run([sys.executable, "-c", WATCH_INPROC, "table", str(ROOT)], capture_output=True, env=env).stdout)
-    assert t["bad"] == [] and set(t["runners"]) == {"claude", "codex", "hermes"}, t
+    assert t["bad"] == [] and set(t["runners"]) == {"claude", "codex", "hermes", "orquestrador"}, t
     forbidden = re.compile(r"python|\ba2a \*|git push|git merge|git -C|git rebase|git reset|git checkout|git switch|git branch -D|"
                            r"git clean|bypassPermissions|danger-full-access|--yolo|dangerously", re.I)
     for ag, rr in t["runners"].items():
@@ -2255,6 +2270,10 @@ def watch_fase():
     assert t["runners"]["claude"]["mode"] == "dontAsk" and "--permission-mode" in t["runners"]["claude"]["argv"], t
     assert t["runners"]["codex"]["argv"] == ["exec", "--json", "-s", "workspace-write", "-C", "{worktree}", "--add-dir", "{a2a_home}", "-"], t
     assert t["runners"]["hermes"]["enabled"] is False and t["runners"]["claude"]["enabled"] and t["runners"]["codex"]["enabled"], t
+    # etapa 11: orquestrador roda com o claude por baixo, mas so leitura + a2a send/brief/read/status/fact
+    oallow = t["runners"]["orquestrador"]["allow"]
+    assert t["runners"]["orquestrador"]["enabled"] and t["runners"]["orquestrador"]["mode"] == "dontAsk", t
+    assert "Edit" not in oallow and "Write" not in oallow and not any("mission" in x or "git" in x for x in oallow), oallow
     r, _, _ = rows("--agent", "claude", mode="bad", code=1)
     assert r[("dove", "tabela")][0] == "ERRO" and "Bash(python *)" in r[("dove", "tabela")][1] and "Bash(git push *)" in r[("dove", "tabela")][1], r
     tb = json.loads(subprocess.run([sys.executable, "-c", WATCH_INPROC, "table-bad2", str(ROOT)], capture_output=True, env=env).stdout)
@@ -2517,14 +2536,28 @@ def plan_fase():
     r3 = h3.plan(5)
     assert ("codex", "lagu") in r3 and r3[("codex", "lagu")]["action"] != "NADA", r3
     assert ("claude", "lagu") not in r3 and ("hermes", "lagu") not in r3, r3  # tarefa avulsa (--to all --assignee codex)
+    # 11) orquestrador (etapa 11): nao registrado, nunca aparece (como qualquer agente desconhecido); registrado, tem
+    # copia propria (run/orquestrador-home) e nunca "sem copia de trabalho" nem "sem projeto"
+    h = H()
+    h.msg("luiz", "orquestrador", 0)
+    assert ("orquestrador", "lagu") not in h.plan(200), h.plan(200)  # nao registrado: nem aparece
+    open(os.path.join(h.home, "agents", "orquestrador"), "w").close()
+    d = h.plan(200)[("orquestrador", "lagu")]
+    assert d["action"] == "RODARIA" and "orquestrador-home" in d["worktree"], d
+    h4 = H(); h4.msg("luiz", "orquestrador", 0, project="")
+    open(os.path.join(h4.home, "agents", "orquestrador"), "w").close()
+    d4 = h4.plan(200)[("orquestrador", "")]
+    assert d4["action"] == "RODARIA" and "orquestrador-home" in d4["worktree"], d4  # sem projeto, ainda tem pasta propria
     print("OK: a2a watch plan (debounce 90s/silencio 30s, uma execucao por agente+projeto, origem humana, report como resposta, "
           "ja acionadas, STOP, desabilitados, sem projeto/copia, sessao interativa, trava, loop, filtros, JSON, --dry-run --once, "
           "so leitura, nenhum processo; --check-git so git status --porcelain; watch real sai 2; assignee (etapa 14) restringe "
-          "o acionamento ao responsavel da missao/tarefa, sem ele continua acionando todo participante)")
+          "o acionamento ao responsavel da missao/tarefa, sem ele continua acionando todo participante; orquestrador (etapa 11) "
+          "so acorda se registrado e sempre tem copia propria, mesmo sem projeto)")
 
 def seguranca_fase():
     """Fase 3, passos 0 e 1: so o humano conclui missao, --from obrigatorio, vigia reservado, human_name(),
-    execucao automatica (A2A_RUNNER) nunca age como humano, run_id no status."""
+    execucao automatica (A2A_RUNNER) nunca age como humano, run_id no status; passo 11: orquestrador nunca
+    vota/aprova/conclui missao nem faz archive/worktree (so propoe e manda mensagem)."""
     tmp = tempfile.mkdtemp()
     env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8", HOME=tmp, CLAUDE_CONFIG_DIR=os.path.join(tmp, ".claude"),
                CODEX_HOME=os.path.join(tmp, ".codex"), HERMES_HOME=os.path.join(tmp, ".hermes"))
@@ -2533,10 +2566,23 @@ def seguranca_fase():
         r = run(e or env, *args); assert r.returncode == code, (args, r.returncode, r.stdout, r.stderr); return r.stdout + r.stderr
     st = lambda a: json.load(open(os.path.join(tmp, "status", a + ".json"), encoding="utf-8"))
     for ag in ("claude", "codex"): a2a("join", "--agent", ag)
-    # vigia e reservado (join e painel usam o mesmo check); orquestrador continua livre por enquanto
+    # vigia e reservado (join e painel usam o mesmo check); orquestrador e um agente comum (join/leave livres)
     assert "reservado" in a2a("join", "--agent", "vigia", code=1)
     assert not os.path.exists(os.path.join(tmp, "agents", "vigia"))
-    a2a("join", "--agent", "orquestrador"); a2a("leave", "--agent", "orquestrador")
+    a2a("join", "--agent", "orquestrador")
+    # etapa 11: orquestrador nunca vota/aprova/conclui missao nem faz archive/worktree - so propoe e manda mensagem
+    mo = a2a("mission", "new", "--project", "p", "--title", "Orq", "--agents", "claude,orquestrador", "--from", "luiz").split()[1]
+    for c in (("mission", "approve", mo, "--agent", "orquestrador", "--evidence", "ok"),
+              ("mission", "reject", mo, "--agent", "orquestrador", "--reason", "nao")):
+        assert "'orquestrador' nao aprova nem reprova missao (etapa 11)" in a2a(*c, code=1)
+    a2a("mission", "approve", mo, "--agent", "claude", "--evidence", "ok")  # outro participante segue livre
+    assert "so o humano" in a2a("mission", "done", mo, "--from", "orquestrador", code=1)
+    assert "so o humano" in a2a("archive", "--from", "orquestrador", "--dry-run", code=1)
+    assert "so o humano" in a2a("worktree", "create", "--project", "p", "--agent", "claude", "--from", "orquestrador", code=1)
+    sent = a2a("send", "--from", "orquestrador", "--to", "claude", "--project", "p", "--body", "encaminhando").split()[1]
+    assert "encaminhando" in a2a("brief", "--agent", "claude")  # send/brief seguem livres (etapa 11)
+    a2a("ack", sent, "--from", "claude")
+    a2a("leave", "--agent", "orquestrador")
     # --from obrigatorio em mission new/done
     a2a("mission", "new", "--project", "p", "--title", "t", code=2); a2a("mission", "done", "m0000000", code=2)
     mid = a2a("mission", "new", "--project", "p", "--title", "Seg", "--agents", "claude,codex", "--from", "luiz").split()[1]
@@ -2595,7 +2641,8 @@ def seguranca_fase():
     a2a("status", "--agent", "codex", "--context", "50")
     s4 = st("codex"); assert "run_id" not in s4 and s4["note"] == "n3" and s4["context"] == 50 and s4["model"] == "gpt-5", s4
     print("OK: seguranca (mission done so humano, --from obrigatorio, vigia reservado, human_name, A2A_RUNNER recusa "
-          "acoes do humano com exit 2 e deixa agentes trabalharem, run_id no status)")
+          "acoes do humano com exit 2 e deixa agentes trabalharem, run_id no status; orquestrador (etapa 11) nunca "
+          "vota/aprova/conclui missao nem archive/worktree, so propoe e manda mensagem)")
 
 def cost_fase():
     """a2a cost: fixtures do Claude (dedup, varios modelos, projeto e copia), do Codex (token_count e
@@ -2885,16 +2932,26 @@ def supervisor_fase():
               dict(base, A2A_HOME=tmp, A2A_RUNNER_OVERRIDE=fake, A2A_TESTING="0")):
         out, rc = drive("resolve", {"agent": "hermes"}, e)
         assert rc == 1 and "executor real ainda nao habilitado" in out["error"], out
-    noov = dict(base, A2A_HOME=tmp, PYTHONIOENCODING="utf-8")  # sem A2A_TESTING/A2A_RUNNER_OVERRIDE
+    # stubs de claude/codex/hermes no PATH (nunca executados: "resolve" so monta o argv) para o "resolve pra valer"
+    # nao depender de ter esses binarios de verdade instalados na maquina que roda o teste
+    stubbin = os.path.join(work, "stubbin"); os.makedirs(stubbin, exist_ok=True)
+    for name in ("claude", "codex", "hermes"):
+        if os.name == "nt": open(os.path.join(stubbin, name + ".cmd"), "w").write("@echo stub\n")
+        else:
+            p = os.path.join(stubbin, name); open(p, "w").write("#!/bin/sh\necho stub\n"); os.chmod(p, 0o755)
+    noov = dict(base, A2A_HOME=tmp, PYTHONIOENCODING="utf-8", PATH=stubbin + os.pathsep + base.get("PATH", ""))
     out, rc = drive("resolve", {"agent": "claude"}, noov)
     assert rc == 0 and out != [sys.executable, fake] and "claude" in " ".join(out).lower(), out
     out, rc = drive("resolve", {"agent": "codex"}, noov)  # etapa 9: codex tambem resolve pra valer
     joined = " ".join(out).lower()
     assert rc == 0 and out != [sys.executable, fake] and "codex" in joined and "workspace-write" in joined, out
+    out, rc = drive("resolve", {"agent": "orquestrador"}, noov)  # etapa 11: idem, com o claude por baixo
+    joined = " ".join(out).lower()
+    assert rc == 0 and out != [sys.executable, fake] and "claude" in joined and "--allowedtools" in joined, out
     out, rc = drive("resolve", {"agent": "claude"})  # com A2A_TESTING=1 + override: nunca o claude de verdade
     assert rc == 0 and out == [sys.executable, fake], out
-    print("OK: vigia - A2A_RUNNER_OVERRIDE so com A2A_TESTING=1; sem ele, claude (etapa 7) e codex (etapa 9) "
-          "resolvem pra valer (so monta o argv); hermes continua recusado")
+    print("OK: vigia - A2A_RUNNER_OVERRIDE so com A2A_TESTING=1; sem ele, claude (etapa 7), codex (etapa 9) e "
+          "orquestrador (etapa 11) resolvem pra valer (so monta o argv); hermes continua recusado")
 
     # execucao normal: env do vigia visivel ao filho, stdin = prompt, stdout em arquivo, registro com redacao
     prompt = "faca a tarefa X com cuidado e responda pelo canal"

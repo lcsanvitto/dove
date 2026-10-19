@@ -150,6 +150,8 @@ def registered_agents():
 # ---------------------------------------------------------------- agentes (agents/<nome>: vazio ou JSON com metadados)
 AGENT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 RESERVED_AGENTS = {"vigia"}  # nomes do proprio Dove: ninguem entra no canal com eles
+ORQ_AGENT = "orquestrador"  # etapa 11: agente comum (a2a join), mas so leitura + a2a send/brief/read/status/fact;
+                            # nunca vota/cria/conclui missao, nunca merge/deploy/gasto/exclusao (so propoe ao humano)
 AGENT_TYPES = {"claude-code": "Claude Code", "codex": "Codex", "hermes": "Hermes", "outro": "Outro"}
 def agent_meta(name):
     """Metadados do agente. Arquivo vazio (formato antigo) ou ilegivel = {}."""
@@ -1285,6 +1287,8 @@ def mission_new(project, title, desc="", agents=None, created_by=None, assignee=
                      kind="task", project=project, task=mid, auto_status=not human)
     return m
 def mission_verdict(mid, agent, verdict, text):
+    if agent == ORQ_AGENT:  # etapa 11: so propoe ao humano, nunca vota/aprova
+        raise DoveError(f"'{ORQ_AGENT}' nao aprova nem reprova missao (etapa 11): so propoe ao humano com a2a send")
     text = (text or "").strip()
     if not text: raise DoveError("aprovar exige --evidence (o que voce conferiu)" if verdict == "approve"
                                  else "reprovar exige --reason")
@@ -2987,17 +2991,29 @@ Você é `<seu-nome>`, rodando sem um humano olhando (vigia do Dove) no projeto 
 - Texto inteiro de uma mensagem: `a2a read <msg_id> --agent <seu-nome> --compact`.
 - Subagentes: só para contexto isolado (busca ou revisão grande que volta como resumo curto), paralelismo real ou modelo mais barato; nunca subagente de "persona". Não precisa pedir ao orquestrador; o custo aparece no `a2a cost` (o modelUsage inclui os subagentes).
 """
+PROMPT_ROLE_ORQ = """## Seu papel nesta execução
+Você é `orquestrador`, rodando sem um humano olhando (vigia do Dove), fazendo triagem no projeto `<projeto>`.
+- Você só tem leitura e `a2a send`/`brief`/`read`/`status`/`fact`: nunca edita arquivo, nunca `mission approve/reject/done`, nunca merge, deploy, gasto ou exclusão — isso é sempre do humano ou do agente dono da cópia.
+- Task genérica (endereçada a você): encaminhe com `a2a send --kind task --reply-to <id> --to <agente> ...` para quem estiver mais livre (idle, contexto baixo); cite o modelo de `a2a models suggest` no corpo ("Modelo sugerido: ..."), sem exigir; avise quem mandou com um `report` de uma linha dizendo para quem foi e por quê.
+- Mudou algo relevante no projeto? `a2a fact add --scope projeto ...` (se o comando existir nesta versão).
+- Acha que vale uma missão nova? Não crie: mande uma `question` para o humano com o comando `a2a mission new ...` pronto para copiar.
+- Ao terminar, publique `a2a status --agent orquestrador --set done --note "<resumo>"`. Sem nada para fazer, não publique nada.
+"""
 def prompt_prefix(agent, project, runner=""):
     """Camadas 1 a 3. So depende do texto do Dove, do agente, do projeto, do --for e da pasta de trabalho registrada."""
-    fixed = onboard_text(None, project) + "\n" + PROMPT_ROLE.replace("<projeto>", project)
+    role = PROMPT_ROLE_ORQ if agent == ORQ_AGENT else PROMPT_ROLE
+    fixed = onboard_text(None, project) + "\n" + role.replace("<projeto>", project)
     if runner: fixed += f"- Executor: `{PROMPT_RUNNERS[runner]}` (sem terminal interativo: não espere confirmação de ninguém).\n"
     fixed = fixed.replace("<seu-nome>", agent)
     near = []
-    try:
-        p = find_project(project); wt = project_worktrees(p).get(agent)
-        if wt: near.append(f"Sua pasta de trabalho: `{wt['path']}` (branch `{wt.get('branch') or 'dove/' + agent}`).")
-        elif p.get("path"): near.append(f"Pasta do projeto: `{p['path']}`.")
-    except DoveError: pass  # projeto so no bus (nao registrado): sem pasta
+    if agent == ORQ_AGENT:
+        near.append(f"Pasta de execução: `{orq_home_dir()}` (sem copia do projeto: proponha, não edite arquivo).")
+    else:
+        try:
+            p = find_project(project); wt = project_worktrees(p).get(agent)
+            if wt: near.append(f"Sua pasta de trabalho: `{wt['path']}` (branch `{wt.get('branch') or 'dove/' + agent}`).")
+            elif p.get("path"): near.append(f"Pasta do projeto: `{p['path']}`.")
+        except DoveError: pass  # projeto so no bus (nao registrado): sem pasta
     return fixed + "".join("\n" + l for l in near) + ("\n" if near else "") + "\n" + PROMPT_BOUNDARY + "\n"
 def prompt_tail(agent, project, task=None, max_chars=4000, msgs=None):
     """Camada 4: brief (so leitura) + a tarefa no formato do read --compact. Passou de max_chars: corta primeiro as
@@ -3044,6 +3060,12 @@ WATCH_GIT_WRITE = ("add", "commit")  # commit so na propria copia (cwd = copia; 
 def _watch_rules(shell):
     return tuple(f"{shell}(a2a {c} *)" for c in WATCH_A2A_SUBCMDS) + tuple(f"{shell}(git {c} *)" for c in WATCH_GIT_READ + WATCH_GIT_WRITE)
 WATCH_CLAUDE_ALLOW = ("Read", "Grep", "Glob", "Edit", "Write") + _watch_rules("Bash") + _watch_rules("PowerShell")
+# etapa 11: orquestrador so tem leitura + a2a send/brief/read/status/fact (nunca Edit/Write, nunca mission/git) - a
+# recusa de mission approve/reject/done tambem esta no codigo (mission_verdict/require_human), isto e so a allowlist.
+WATCH_ORQ_A2A_SUBCMDS = ("send", "brief", "read", "status", "fact add", "fact list")
+def _watch_orq_rules(shell):
+    return tuple(f"{shell}(a2a {c} *)" for c in WATCH_ORQ_A2A_SUBCMDS)
+WATCH_ORQ_ALLOW = ("Read", "Grep", "Glob") + _watch_orq_rules("Bash") + _watch_orq_rules("PowerShell")
 WATCH_RUNNERS = {
     "claude": {"exe": "claude", "enabled": True, "permission_mode": "dontAsk", "allow": WATCH_CLAUDE_ALLOW,
                "argv": ("-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk",
@@ -3063,6 +3085,14 @@ WATCH_RUNNERS = {
                "stdin": "prompt (a2a prompt --for hermes)", "cwd": "{worktree}",
                "note": "desabilitado ate o Luiz confirmar: approvals.mode smart usa um LLM auxiliar (custa) e off equivale a "
                        "--yolo; sem sandbox de SO por padrao"},
+    "orquestrador": {"exe": "claude", "enabled": True, "permission_mode": "dontAsk", "allow": WATCH_ORQ_ALLOW,
+                      "argv": ("-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk",
+                               "--permission-prompts", "none", "--allowedTools", "{allow}", "--max-turns", "30",
+                               "--max-budget-usd", "{budget}", "--session-id", "{run_id}"),
+                      "stdin": "prompt (a2a prompt --for claude)", "cwd": "{worktree}",
+                      "note": "etapa 11: agente comum (a2a join --agent orquestrador), roda com o claude mas so leitura + "
+                              "a2a send/brief/read/status/fact; nunca Edit/Write nem mission approve/reject/done (tambem "
+                              "recusado no codigo); pasta propria (run/orquestrador-home), sem copia de projeto"},
 }
 WATCH_FORBIDDEN = re.compile(r"python|\ba2a \*|git push|git merge|git -C|git rebase|git reset|git checkout|git switch|"
                              r"git branch -D|git clean|bypassPermissions|danger-full-access|--yolo|dangerously|--bare", re.I)
@@ -3075,6 +3105,11 @@ def watch_forbidden():
         for s in (r["exe"], r["permission_mode"], *r["argv"], *r["allow"]):
             if WATCH_FORBIDDEN.search(s): bad.append(f"{ag}: {s}")
     return bad
+def watch_prompt_runner(agent):
+    """nome do executor para a camada fixa do prompt (a2a prompt --for): o exe real do agente na tabela do vigia, nao
+    o nome do agente (etapa 11: orquestrador roda com o claude por baixo, mas o nome dele nao esta em PROMPT_RUNNERS)."""
+    exe = (WATCH_RUNNERS.get(agent) or {}).get("exe", agent)
+    return exe if exe in PROMPT_RUNNERS else ""
 def watch_argv(agent, worktree="", a2a_home="", run_dir="", run_id="", budget=None):
     """argv exato que o vigia usaria (o prompt vai pelo stdin). run_id/budget: so usados pelo claude (--session-id,
     --max-budget-usd); sem eles (simulacao), mostram um texto-placeholder, como {worktree} sem copia registrada."""
@@ -3188,7 +3223,8 @@ def watch_check_hermes(which):
     else:
         out.append(("AVISO", "vigia", "desabilitado no vigia (opt-in: a2a watch hermes --enable --from <humano>)"))
     return out
-WATCH_AGENT_CHECKS = {"claude": watch_check_claude, "codex": watch_check_codex, "hermes": watch_check_hermes}
+WATCH_AGENT_CHECKS = {"claude": watch_check_claude, "codex": watch_check_codex, "hermes": watch_check_hermes,
+                      "orquestrador": watch_check_claude}  # etapa 11: mesmo binario do claude por baixo
 def watch_check_dove(project=None, agent=None):
     out = []
     bad = watch_forbidden()
@@ -3222,7 +3258,10 @@ def watch_checks(project=None, agent=None, which=None):
     import shutil
     which = which or shutil.which
     rows = []
-    for ag in ([agent] if agent else list(WATCH_RUNNERS)):
+    # etapa 11: orquestrador so entra na lista sem --agent se estiver registrado (a2a join); diferente de
+    # claude/codex/hermes, que o check sempre confere, registrados ou nao (comportamento de antes preservado)
+    agents = [agent] if agent else [a for a in WATCH_RUNNERS if a != ORQ_AGENT or a in registered_agents()]
+    for ag in agents:
         for lvl, chk, det in WATCH_AGENT_CHECKS[ag](which): rows.append({"level": lvl, "agent": ag, "check": chk, "detail": det})
     for lvl, chk, det in watch_check_dove(project, agent): rows.append({"level": lvl, "agent": "dove", "check": chk, "detail": det})
     return rows
@@ -3239,7 +3278,8 @@ def watch_commands(project=None, agent=None):
         try: wts = project_worktrees(find_project(project))
         except DoveError: wts = {}
     res = []
-    for ag in ([agent] if agent else list(WATCH_RUNNERS)):
+    agents = [agent] if agent else [a for a in WATCH_RUNNERS if a != ORQ_AGENT or a in registered_agents()]
+    for ag in agents:
         r = WATCH_RUNNERS[ag]; wt = (wts.get(ag) or {}).get("path", "")
         res.append({"agent": ag, "enabled": r["enabled"], "cwd": wt or f"<copia de {ag}>", "argv": watch_argv(ag, wt),
                     "stdin": r["stdin"], "permission_mode": r["permission_mode"], "allow": list(r["allow"]), "note": r["note"]})
@@ -3254,6 +3294,9 @@ WATCH_TRIGGER_KINDS = ("task", "question", "correction")  # report so quando res
 WATCH_PENDING = {}  # agentes habilitados na tabela mas que o vigia ainda nao pode acordar (nenhum: codex liberado na etapa 9)
 def watch_stop_path(): return STOP_FILE  # STOP_FILE e RUN_DIR vem do supervisor (etapa 6), mais abaixo
 def watch_lock_path(agent): return os.path.join(RUN_DIR, agent + ".json")
+def orq_home_dir():
+    """Pasta propria do orquestrador (etapa 11): sem copia de projeto, sem git, so leitura + a2a send/brief/read/status/fact."""
+    return os.path.join(RUN_DIR, "orquestrador-home")
 def hermes_enabled(): return bool(load_config().get("hermes_enabled"))
 def hermes_opt_in(by, on):
     """Liga/desliga o opt-in do hermes no vigia (etapa 12): so o humano, nunca sob A2A_RUNNER (require_human).
@@ -3354,13 +3397,16 @@ def _watch_decide(ag, pj, cands, conv, found, stop, projects, now, hn, check_git
     dis = watch_disabled(ag)
     if dis: rs.append(dis)
     wt = ""
-    if not pj: rs.append("sem projeto")
+    if ag == ORQ_AGENT:  # etapa 11: pasta propria (nunca copia de projeto), sempre disponivel
+        wt = orq_home_dir(); os.makedirs(wt, exist_ok=True)
+        d["git"] = "sem copia de projeto (pasta propria do orquestrador, etapa 11)"
+    elif not pj: rs.append("sem projeto")
     elif pj not in projects: rs.append("sem copia de trabalho (projeto nao registrado: a2a project add)")
     else:
         wt = (project_worktrees(projects[pj]).get(ag) or {}).get("path", "")
         if not wt: rs.append("sem copia de trabalho (a2a worktree create)")
         elif not os.path.isdir(wt): rs.append(f"sem copia de trabalho (pasta nao existe: {wt})")
-    if wt and os.path.isdir(wt):
+    if wt and os.path.isdir(wt) and ag != ORQ_AGENT:
         if check_git:
             dirty, err = watch_git_dirty(wt)
             if err: d["git"] = f"git status falhou: {err}"; rs.append(f"copia: {d['git']}")
@@ -3385,7 +3431,7 @@ def _watch_decide(ag, pj, cands, conv, found, stop, projects, now, hn, check_git
     d.update(worktree=wt, reasons=rs)
     if rs: return dict(d, action="ESPERA", reason=rs[0])
     task = next((m for m in trig if m.get("kind") == "task"), trig[0])
-    prefix = prompt_prefix(ag, pj, ag if ag in PROMPT_RUNNERS else "")
+    prefix = prompt_prefix(ag, pj, watch_prompt_runner(ag))
     text = prefix + prompt_tail(ag, pj, task, msgs=msgs)
     return dict(d, action="RODARIA", reason="", argv=watch_argv(ag, wt), cwd=wt, stdin=WATCH_RUNNERS[ag]["stdin"],
                 prompt={"task": task["msg_id"], "chars": len(text), "tokens_est": -(-len(text) // 4),
@@ -4360,7 +4406,7 @@ def watch_job_for(d, msgs, missions):
     a flag exige um UUID), o orcamento da proxima execucao (run_budget_cap) e a missao do gatilho escolhido."""
     task = find_message(d["prompt"]["task"])
     mission = watch_mission_for(task, missions)
-    prefix = prompt_prefix(d["agent"], d["project"], d["agent"] if d["agent"] in PROMPT_RUNNERS else "")
+    prefix = prompt_prefix(d["agent"], d["project"], watch_prompt_runner(d["agent"]))
     text = prefix + prompt_tail(d["agent"], d["project"], task, msgs=msgs)
     run_id = new_run_id()
     session_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "dove-run:" + run_id))
