@@ -1,6 +1,8 @@
 # Roadmap do Dove
 
-Estado em 2026-10-19 · base `main` em 8748075.
+> **Sessão nova? Comece por [`docs/HANDOFF.md`](HANDOFF.md)** — contexto, regras e próximos passos para retomar sem reexplicar.
+
+Estado em 2026-10-19 · base `main` em 97ce044.
 
 ## 1. O que é o Dove
 Canal A2A local e global: os agentes (`claude`, `codex`, `hermes`) conversam e dividem trabalho por arquivos JSON em `~/.a2a`, sem nuvem.
@@ -47,19 +49,21 @@ Todos os passos têm aval do Luiz, **exceto o 12**.
 
 | Passo | Item | Estado |
 |---|---|---|
-| 0+1 | Segurança: `mission done` só humano, `--from` obrigatório, `vigia` reservado, `A2A_RUNNER` nunca age como humano | em execução |
-| 2 | `a2a loops` (prevenção de loop entre agentes automáticos) | em execução |
-| 3 | `a2a watch --dry-run` | próximo |
-| 4 | `a2a cost` (lê os registros do Claude/Codex/Hermes, só leitura) | em execução |
-| 5 | `a2a watch check` | em execução |
-| 6 | Supervisor: `STOP`, travas, timeout, Job Object | em execução |
-| 7 | Vigia real, só com o `claude`, iniciado à mão | próximo |
-| 8 | Orçamento por missão | próximo |
-| 9 | Codex no vigia (sandbox do Windows; sem commit) | próximo |
-| 10 | `a2a models` (roteamento de modelo) | em execução |
-| 11 | Orquestrador (só leitura + mensagens) | próximo |
+| 0+1 | Segurança: `mission done` só humano, `--from` obrigatório, `vigia` reservado, `A2A_RUNNER` nunca age como humano | **FEITO** · 67d2d37 |
+| 2 | `a2a loops` (prevenção de loop entre agentes automáticos) | **FEITO** · 2a8485d |
+| 3 | `a2a watch plan` / `--dry-run` (+ `git add`/`git commit` na allowlist do Claude só na própria cópia; proíbe rebase/reset/checkout/switch/`branch -D`/clean) | **EM ANDAMENTO** · branch `fase3/plan` |
+| 4 | `a2a cost` (lê os registros do Claude/Codex/Hermes, só leitura) | **FEITO** · 247ef1f |
+| 5 | `a2a watch check` | **FEITO** · 37be0d7 |
+| 6 | Supervisor: `STOP`, travas, timeout, Job Object | **FEITO** · 81a0e14 |
+| 7 | Vigia real, só com o `claude`, iniciado à mão | próximo (aprovado) |
+| 8 | Orçamento por missão + `parse_run_usage` | **EM ANDAMENTO** · branch `fase3/budget` |
+| 9 | Codex no vigia (sandbox do Windows; sem commit) | próximo (aprovado) |
+| 10 | `a2a models` (roteamento de modelo) | **FEITO** · 97ce044 |
+| 11 | Orquestrador (só leitura + mensagens) | próximo (aprovado) |
 | 12 | Hermes no vigia | **PENDENTE**: aguarda o Luiz definir a contenção |
-| 13 | Política de subagentes | em execução |
+| 13 | Política de subagentes | **FEITO** · 898c637 (+ c65d148 teste determinístico) |
+
+Os passos 3 e 8 estão em branches locais de outros workers e podem chegar ao `main` a qualquer momento; confira com `git log --oneline origin/main`.
 
 ## 5. Decisões
 **Tomadas**
