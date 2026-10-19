@@ -16,6 +16,7 @@ M3. Custo de relembrar o projeto: missao com 12 mensagens e 3 decisoes. Antes: `
 M4. Mapa: repositorio sintetico com 60 arquivos em 5 linguagens. Antes: `git ls-files` + `head -40` de cada arquivo.
     Depois: `a2a map show`; e, apos mudar 1 arquivo e fazer commit, `a2a map build` deve dizer 1 refeito.
 Medidas cujo comando ainda nao existe nesta versao do a2a aparecem como "pendente" (com o "antes" ja medido).
+Os ids dos fatos do M3 sao aleatorios (so aparecem no --show); os tamanhos nao mudam.
 
 Uso: python3 tests/measure_tokens.py [--agents-md CAMINHO] [--show]   (--show imprime as saidas brutas). So stdlib.
 """
@@ -164,7 +165,7 @@ def m3(root):
     rows = [(f"antes (mission show + 12 read --compact)", ra)]
     if has_cmd("fact"):
         for d in M3_DECISIONS:
-            a2a(home, "fact", "add", "--project", "lagu", "--from", "claude", "--scope", f"missao:{M3_MISSION}", d)
+            a2a_at(home, NOW, "fact", "add", "--project", "lagu", "--from", "claude", "--scope", f"missao:{M3_MISSION}", d)
         b = a2a_at(home, NOW, "brief", "--agent", AGENT, "--project", "lagu", "--no-auto-status")
         f_lines = "".join(l + "\n" for l in b.splitlines() if l.startswith("F "))
         rows += [("depois (brief --project, com linhas F)", measure([("", b)])), ("  so as linhas F", measure([("", f_lines)]))]

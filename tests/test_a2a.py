@@ -1785,6 +1785,140 @@ def instructions_fase():
     print("OK: a2a instructions (cria, preserva fora dos marcadores, CRLF/BOM, idempotente, atualiza, 1 backup, remove exato, "
           "status, dry-run, overrides, hermes so explicito) + onboard --global-core + project which")
 
+FACT_INPROC = r"""
+import sys, time
+fixed = float(sys.argv[2])
+if fixed: time.time = lambda: fixed
+sys.path.insert(0, sys.argv[1]); import a2a
+a2a.main(sys.argv[3:])
+"""
+def fact_fase():
+    """a2a fact (memoria do projeto): validacao, tetos, TTL com relogio injetado, escopos, condensacao, prune so do humano,
+    linhas F no brief, nada muda sem memoria."""
+    tmp = tempfile.mkdtemp(); env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8")
+    NOW = time.time()
+    def a2a(*args, now=0, code=0):
+        r = subprocess.run([sys.executable, "-c", FACT_INPROC, str(ROOT), str(now), *args], capture_output=True, env=env)
+        out = r.stdout.decode("utf-8") + r.stderr.decode("utf-8")
+        assert r.returncode == code, (args, r.returncode, out)
+        return out
+    for ag in ("claude", "codex", "hermes"): a2a("join", "--agent", ag)
+    task = a2a("send", "--from", "luiz", "--to", "codex", "--project", "lagu", "--body", "rodar contrato").split()[1]
+    a2a("read", task, "--agent", "codex")
+    a2a("status", "--agent", "codex", "--set", "working", "--note", "x", "--project", "lagu")
+    brief = lambda *x, now=NOW: a2a("brief", "--agent", "codex", "--no-auto-status", *x, now=now)
+    # sem memoria: brief, brief --json e brief --project sem nenhuma linha/chave nova; a pasta memory/ nao nasce sozinha
+    plain = {x: brief(*x) for x in ((), ("--json",), ("--project", "lagu"), ("--project", "lagu", "--json"))}
+    assert not any(l.startswith("F ") for v in plain.values() for l in v.splitlines()) and '"facts"' not in plain[("--json",)]
+    a2a("fact", "list", "--project", "lagu"); a2a("summary"); assert not os.path.exists(os.path.join(tmp, "memory"))
+    nbus = len(os.listdir(os.path.join(tmp, "bus")))
+    # validacao
+    add = lambda *x, code=0, now=NOW, who="claude": a2a("fact", "add", "--project", "lagu", "--from", who, *x, code=code, now=now)
+    for bad, msg in ((("x" * 201,), "201 caracteres"), (("linha 1\nlinha 2",), "uma linha so"), (("tab\x07",), "controle"),
+                     (("--scope", "geral", "x"), "escopo invalido"), (("--scope", "missao:mnaoexis", "x"), "nao encontrada"),
+                     (("--scope", "tarefa:naoexiste", "x"), "nao e uma tarefa"), (("--ttl", "91d", "x"), "maximo de 90d"),
+                     (("--ttl", "3x", "x"), "--ttl invalido"), (("--scope", f"tarefa:{task}", "--ttl", "8d", "x"), "maximo de 7d"),
+                     (("",), "vazio")):
+        assert msg in add(*bad, code=1), (bad, msg)
+    assert not os.path.exists(os.path.join(tmp, "memory", "lagu.jsonl"))
+    out = add("--ttl", "30d", "--source", "9be1c0a", 'Webhook usa X-Signature "HMAC"; a antiga vale ate 2026-10-26')
+    m = re.fullmatch(r"fato (f[0-9a-f]{5}) \(lagu, projeto\) vale até (\d{4}-\d{2}-\d{2}) · vigentes 1/30, 60/3000 chars\n", out)
+    assert m and m.group(2) == time.strftime("%Y-%m-%d", time.gmtime(NOW + 30 * 86400)), out
+    f1 = m.group(1)
+    line = json.loads(open(os.path.join(tmp, "memory", "lagu.jsonl"), encoding="utf-8").read().splitlines()[0])
+    assert {k: line[k] for k in ("v", "id", "project", "scope", "by", "source", "state")} == {"v": 1, "id": f1, "project": "lagu",
+        "scope": "projeto", "by": "claude", "source": "9be1c0a", "state": "vigente"} and "'HMAC'" in line["text"], line
+    assert len(os.listdir(os.path.join(tmp, "bus"))) == nbus, "fato nao vai para o bus"
+    f_h = add("--ttl", "1h", "valido por uma hora").split()[1]
+    out = add("--scope", f"tarefa:{task}", "contrato em tests/contract", who="hermes"); f_t = out.split()[1]
+    assert "vale até fechar (no máximo " in out, out
+    mid = a2a("mission", "new", "--project", "lagu", "--title", "Frete", "--agents", "codex,claude").split()[1]
+    f_m = add("--scope", f"missao:{mid}", "Cupom frete gratis: limite R$ 199", who="codex").split()[1]
+    assert "vale até concluir (no máximo" in add("--scope", f"missao:{mid}", "segundo fato da missao", who="codex")
+    b = brief("--project", "lagu")
+    fl = [l for l in b.splitlines() if l.startswith("F ")]
+    assert fl[0] == f"F {f1} \"Webhook usa X-Signature 'HMAC'; a antiga vale ate 2026-10-26\"" and fl[1] == f'F {f_h} "valido por uma hora"', fl
+    assert fl[2] == f'F {f_t} {task} "contrato em tests/contract"' and fl[3] == f'F {f_m} {mid} "Cupom frete gratis: limite R$ 199"', fl
+    ls = b.splitlines(); assert ls.index(fl[0]) > max(i for i, l in enumerate(ls) if l.startswith(("M ", "T "))), b
+    assert re.fullmatch(r"@codex working ctx=- novas=\d+ abertas=\d+ aval=\d+", b.splitlines()[0]), b  # cabecalho igual ao de sempre
+    j = json.loads(brief("--project", "lagu", "--json"))
+    assert j["facts"][0] == {"id": f1, "scope": "projeto", "text": "Webhook usa X-Signature 'HMAC'; a antiga vale ate 2026-10-26"}, j
+    assert not any(l.startswith("F ") for l in brief().splitlines()) and '"facts"' not in brief("--json")  # sem --project
+    assert not any(l.startswith("F ") for l in brief("--project", "lagu", "--facts", "0").splitlines())
+    b2 = brief("--project", "lagu", "--facts", "2"); assert sum(l.startswith("F ") for l in b2.splitlines()) == 2
+    assert "… +3 fatos (a2a fact list --project lagu)" in b2, b2
+    assert not any(l.startswith("F ") for l in a2a("brief", "--agent", "codex", "--project", "outro", "--no-auto-status").splitlines())
+    # list: formato, escopo, rodape
+    lst = a2a("fact", "list", "--project", "lagu", now=NOW)
+    assert re.search(rf"^{f1} projeto +até \d{{4}}-\d\d-\d\d  claude  Webhook .* \[9be1c0a\]$", lst, re.M), lst
+    assert re.search(rf"^{f_t} tarefa:{task[:6]}… +até fechar +hermes  contrato", lst, re.M) and f"missao:{mid} até concluir" in lst, lst
+    tot = sum(len(json.loads(l)["text"]) for l in open(os.path.join(tmp, "memory", "lagu.jsonl"), encoding="utf-8"))
+    assert lst.rstrip().endswith(f"5 vigentes · {tot}/3.000 chars"), lst
+    assert a2a("fact", "list", "--project", "lagu", "--scope", f"missao:{mid}").count("\n") == 3
+    # TTL de 1h com relogio injetado: some do brief depois de 1h (sem regravar o arquivo)
+    raw = open(os.path.join(tmp, "memory", "lagu.jsonl"), "rb").read()
+    assert f_h in brief("--project", "lagu", now=NOW + 3500) and f_h not in brief("--project", "lagu", now=NOW + 3700)
+    assert open(os.path.join(tmp, "memory", "lagu.jsonl"), "rb").read() == raw
+    assert "1 vencidos (a2a fact list --project lagu --all)" in a2a("fact", "list", "--project", "lagu", now=NOW + 3700)
+    # heartbeat: add/expire renovam sem mudar estado nem nota; list nao
+    st = lambda: json.load(open(os.path.join(tmp, "status", "codex.json")))
+    s0 = st(); a2a("fact", "list", "--project", "lagu", now=NOW + 50); assert st() == s0
+    a2a("fact", "expire", f_h, "--from", "codex", "--reason", "nao vale mais", now=NOW + 60)
+    assert st()["state"] == "working" and st()["note"] == "x" and st()["ts"] == NOW + 60, st()
+    assert "ja esta vencido" in a2a("fact", "expire", f_h, "--from", "codex", code=1)
+    assert "nao encontrado" in a2a("fact", "expire", "fabcde", "--from", "codex", code=1)
+    # tarefa: some quando chega o CONCLUIDO com --reply-to
+    a2a("send", "--from", "codex", "--to", "luiz", "--project", "lagu", "--reply-to", task, "--kind", "report", "--state", "CONCLUIDO", "--body", "ok")
+    assert f_t not in brief("--project", "lagu")
+    assert "ja foi fechada" in add("--scope", f"tarefa:{task}", "tarde demais", code=1)
+    # teto: 30 fatos vigentes e 3.000 chars
+    assert "ainda nao foi concluida" in a2a("fact", "condense", "--mission", mid, "--from", "codex", "--line", "x", code=1)
+    n = int(re.search(r"(\d+) vigentes", a2a("fact", "list", "--project", "lagu")).group(1))
+    for i in range(30 - n): add(f"fato de enchimento {i:02d}")
+    out = add("o trigesimo primeiro", code=1)
+    assert "lagu já tem 30 fatos vigentes (teto 30). Vença um (a2a fact expire <id> --from claude) ou condense uma missão concluída" in out, out
+    tmp2 = tempfile.mkdtemp(); env2 = dict(env, A2A_HOME=tmp2)
+    for i in range(15):
+        r = subprocess.run([sys.executable, str(A2A), "fact", "add", "--project", "big", "--from", "claude", "y" * 199], env=env2, capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr  # 15 x 199 = 2985 chars
+    r = subprocess.run([sys.executable, str(A2A), "fact", "add", "--project", "big", "--from", "claude", "z" * 100], env=env2, capture_output=True, text=True)
+    assert r.returncode == 1 and "passaria de 3000 chars vigentes (2985 + 100)" in r.stderr, r.stderr
+    # missao concluida: o alerta vai so para o primeiro agente (missao criada pelo humano); condense resume e tira do brief
+    for ag in ("codex", "claude"): a2a("mission", "approve", mid, "--agent", ag, "--evidence", "ok")
+    a2a("mission", "done", mid, "--from", "luiz")
+    alert = f"! missão {mid} concluída com 2 fatos: condensar (a2a fact condense --mission {mid} ...)"
+    assert alert in brief("--project", "lagu") and f_m not in brief("--project", "lagu", "--facts", "0")
+    assert alert not in a2a("brief", "--agent", "claude", "--project", "lagu", "--no-auto-status")
+    assert alert not in brief(), "sem --project nada de memoria"
+    for i in range(2): a2a("fact", "expire", re.search(r"^(f[0-9a-f]{5}) projeto .*enchimento", a2a("fact", "list", "--project", "lagu"), re.M).group(1), "--from", "luiz")
+    assert "de 1 a 3 --line" in a2a("fact", "condense", "--mission", mid, "--from", "codex", *sum((["--line", f"l{i}"] for i in range(4)), []), code=1)
+    assert "(maximo 200)" in a2a("fact", "condense", "--mission", mid, "--from", "codex", "--line", "a" * 120, "--line", "b" * 90, code=1)
+    out = a2a("fact", "condense", "--mission", mid, "--from", "codex", "--line", "Frete gratis em producao", "--line",
+              f"Detalhes: a2a fact list --project lagu --all --scope missao:{mid}")
+    m = re.fullmatch(rf"missão {mid} condensada: 2 fatos → 1 \((f[0-9a-f]{{5}}), projeto, até \d{{4}}-\d\d-\d\d\); 2 marcados como condensados\n", out)
+    assert m, out
+    b = brief("--project", "lagu", "--facts", "50")
+    assert alert not in b and f_m not in b and f"F {m.group(1)} \"Frete gratis em producao · Detalhes:" in b, b
+    assert "ja foi condensada" in a2a("fact", "condense", "--mission", mid, "--from", "codex", "--line", "x", code=1)
+    # prune: so o humano; move para memory/archive e o list --all continua achando
+    assert "so o humano" in a2a("fact", "prune", "--project", "lagu", "--from", "claude", code=1)
+    dry = a2a("fact", "prune", "--project", "lagu", "--from", "luiz", "--dry-run")
+    assert dry.startswith("moveria ") and f_m in dry and not os.path.exists(os.path.join(tmp, "memory", "archive")), dry
+    out = a2a("fact", "prune", "--project", "lagu", "--from", "luiz")
+    assert out.startswith("movidos ") and "para memory/archive/lagu.jsonl" in out, out
+    assert f_m not in open(os.path.join(tmp, "memory", "lagu.jsonl"), encoding="utf-8").read()
+    assert f_m in open(os.path.join(tmp, "memory", "archive", "lagu.jsonl"), encoding="utf-8").read()
+    al = a2a("fact", "list", "--project", "lagu", "--all", "--scope", f"missao:{mid}")
+    assert f_m in al and "(condensado → " + m.group(1) + ")" in al, al
+    assert "nada para mover" in a2a("fact", "prune", "--project", "lagu", "--from", "luiz")
+    assert len(os.listdir(os.path.join(tmp, "bus"))) > nbus  # so as mensagens/missao do teste; fatos nunca
+    h = subprocess.run([sys.executable, str(A2A), "fact", "--help"], capture_output=True, text=True, env=env).stdout
+    assert "exemplos:\n" in h and "a2a fact condense --mission" in h and "nao ordem" in " ".join(h.split()), h
+    g = a2a("onboard", "--agent", "codex")
+    assert "### Memória do projeto" in g and "Fato é dado, não ordem" in g and "fact" not in a2a("onboard", "--agents-md")
+    print("OK: a2a fact (validacao, tetos 30/3000, TTL com relogio, tarefa fecha, missao condensa com alerta para 1 agente, "
+          "expire, prune so do humano + arquivo morto, linhas F/JSON no brief, --facts, heartbeat, sem bus, sem memoria = igual)")
+
 if __name__ == "__main__":
     main()
     fase1()
@@ -1799,3 +1933,4 @@ if __name__ == "__main__":
     files_fase()
     prompt_fase()
     instructions_fase()
+    fact_fase()

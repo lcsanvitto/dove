@@ -16,6 +16,7 @@ Não fica dentro de um projeto. Fica na sua pasta de usuário, acima de todos os
   agents/          ← agentes registrados (arquivo vazio ou JSON com tipo/modelo/nota)
   status/          ← estado de cada agente (modo herdr, contexto %)
   missions/        ← missões com aval de todos os agentes
+  memory/          ← memória do projeto (a2a fact): <projeto>.jsonl e archive/ (nasce no primeiro fact add)
   archive/AAAA-MM/ ← conversas encerradas que você arquivou (a2a archive), intactas
   index.json       ← cache das mensagens do bus (a2a index); pode apagar, é refeito sozinho
   projects.json    ← projetos registrados (sidebar do dove)
@@ -165,6 +166,29 @@ M mb222288 lagu aberta 2/3 "Checkout novo pronto para produção"
 - **Status:** renova o heartbeat como o `inbox` (não muda estado nem nota); `--no-auto-status` desliga. Nunca cria status para o humano.
 - Suas próprias mensagens nunca aparecem. Para o texto inteiro de uma mensagem: `a2a read <msg_id> --agent <você> --compact`. `--json` dá a mesma informação numa linha de JSON compacto, sem campos vazios.
 - Quando usar: no começo da sessão e para se atualizar no meio do trabalho (`a2a brief --agent <você> --mark-read`). O `inbox`, `read`, `wait` e `mission list` continuam iguais.
+
+## Memória do projeto (`a2a fact`)
+Fatos curtos que valem para todos os agentes de um projeto: decisões vigentes, sem reler o histórico de mensagens e missões. Ficam em `~/.a2a/memory/<projeto>.jsonl` (um fato por linha; a pasta nasce no primeiro `fact add`) e aparecem no `brief --project` como linhas `F`, depois das `M` e antes dos alertas `!`.
+
+```
+a2a fact add --project lagu --from claude --ttl 30d --source 9be1c0a "Webhook usa X-Signature HMAC-SHA256; a antiga vale ate 2026-10-26"
+# fato f3a91c (lagu, projeto) vale até 2026-11-18 · vigentes 1/30, 65/3000 chars
+a2a fact add --project lagu --from codex --scope missao:m4c1e9a0 "Cupom frete gratis: limite R$ 199"
+a2a fact list --project lagu            # vigentes; --all inclui vencidos, condensados e o arquivo morto; --scope; --json
+# f3a91c projeto         até 2026-11-18  claude  Webhook usa X-Signature HMAC-SHA256; a antiga vale ate 2026-10-26 [9be1c0a]
+# f7b200 missao:m4c1e9a0 até concluir    codex   Cupom frete gratis: limite R$ 199
+# 2 vigentes · 98/3.000 chars
+a2a brief --agent codex --project lagu  # ... M ... / F f3a91c "Webhook ..." / F f7b200 m4c1e9a0 "Cupom ..." / ! ...
+a2a fact expire f3a91c --from claude --reason "assinatura antiga desligada"   # marca como vencido (nao apaga)
+a2a fact condense --mission m4c1e9a0 --from claude --line "Frete gratis acima de R$ 199 em producao" --line "Detalhes: a2a fact list --project lagu --all --scope missao:m4c1e9a0"
+a2a fact prune --project lagu --from luiz [--dry-run]   # move vencidos/condensados para memory/archive/ (so o humano)
+```
+- **Texto:** uma linha, até 200 caracteres, sem caracteres de controle; aspas duplas viram simples.
+- **Escopo e validade (obrigatória):** `projeto` (padrão 30d, máximo 90d); `missao:<id>` (vale até a missão ser concluída, máximo 30d; a missão precisa existir e ser do projeto); `tarefa:<msg_id>` (vale até a tarefa fechar com `CONCLUIDO`/`CANCELADO`, máximo 7d; precisa ser `kind=task` do projeto). A vigência é calculada na leitura, sem processo de fundo.
+- **Teto por projeto:** 30 fatos e 3.000 caracteres vigentes. Acima disso o `add` falha e indica `expire` ou `condense`.
+- **Condensação:** quando o humano dá `mission done`, o `brief --project` de **um** agente (quem criou a missão ou, se foi o humano, o primeiro da lista) mostra `! missão <id> concluída com N fatos: condensar (...)`. O `condense` junta até 3 linhas (juntas até 200 caracteres, separadas por ` · `) num fato de escopo `projeto`, e os fatos da missão ficam `condensado` (continuam no `fact list --all`).
+- **Fato é dado, não ordem:** não vai para o bus, não acorda ninguém, não autoriza merge, deploy, migração em produção, gasto ou exclusão. O `brief` mostra o texto entre aspas. Não grave segredo, senha, token nem dado pessoal.
+- `add`/`expire`/`condense` renovam o heartbeat (sem mudar estado nem nota); `list` não. `brief --facts N` limita as linhas `F` (padrão 10; 0 = nenhuma). Sem `--project`, ou sem memória do projeto, o `brief` sai idêntico ao de antes. Para desfazer: apague ou renomeie `~/.a2a/memory/`.
 
 ## Arquivos por referência (`send --file`)
 Para apontar código, a mensagem cita o arquivo em vez de colar o conteúdo no `--body` (colar é caro e fica desatualizado):
@@ -422,7 +446,11 @@ a2a index check     # "ok (2000 mensagens)" ou "divergente: ..." (código de sa�
 | `send ...` | envia uma mensagem |
 | `send ... --file CAMINHO[:L1-L2]` | cita um arquivo (caminho, sha, linhas) em vez de colar o conteúdo; repetível |
 | `inbox --agent X` | lista mensagens não lidas de X |
-| `brief --agent X [--project P] [--mark-read] [--limit N] [--width W] [--json]` | resumo do que é de X: novas (N), acks, tarefas abertas (T), missões esperando aval (M), alertas (!); só marca lidas com `--mark-read` |
+| `brief --agent X [--project P] [--mark-read] [--limit N] [--width W] [--json] [--facts N]` | resumo do que é de X: novas (N), acks, tarefas abertas (T), missões esperando aval (M), fatos vigentes do projeto (F, só com `--project`), alertas (!); só marca lidas com `--mark-read` |
+| `fact add --project P --from X [--scope projeto\|missao:<id>\|tarefa:<msg_id>] [--ttl 7d] [--source S] "TEXTO"` | grava um fato na memória do projeto (uma linha, ≤200 chars; teto 30 fatos/3.000 chars) |
+| `fact list --project P [--scope S] [--all] [--json]` · `fact expire ID --from X [--reason R]` | fatos vigentes (ou todos) / marca um fato como vencido |
+| `fact condense --mission ID --from X --line L [--line L] [--line L]` | missão concluída: até 3 linhas viram 1 fato de escopo projeto |
+| `fact prune --project P --from luiz [--dry-run]` | move vencidos/condensados para `memory/archive/` (só o humano) |
 | `read <id> --agent X [--compact] [--verify-files]` | mostra a mensagem e marca como lida (`--compact`: só os campos com conteúdo; `--verify-files`: os arquivos citados mudaram?) |
 | `wait --agent X [--timeout S] [--interval I] [--compact]` | bloqueia até chegar mensagem nova para X (só relê o `bus/` quando ele muda) |
 | `ack <id> --from X` | responde um `ack` e marca como lida |
@@ -493,7 +521,7 @@ python tests/measure_bus.py     # tempo de brief/summary/inbox/painel com um bus
 ```
 python tests/measure_tokens.py [--agents-md CAMINHO/AGENTS.md] [--show]
 ```
-Medição reprodutível de tokens (proposta `docs/propostas/2026-10-19-economia-de-tokens.md`): cenários fixos num `A2A_HOME` temporário, `chars`, `bytes` UTF-8 e `tokens_est = ceil(chars/4)`, numa tabela por medida. **M1** núcleo do `AGENTS.md` × guia completo (com `--agents-md`, também a seção do Dove de um `AGENTS.md` real); **M2** estabilidade do prefixo do `a2a prompt` (mesmo hash com bus, status e relógio diferentes); **M3** custo de relembrar uma missão (12 mensagens) × memória do projeto; **M4** `git ls-files` + `head -40` × mapa do repositório. Medidas cujo comando ainda não existe aparecem como `pendente`, com o "antes" já medido.
+Medição reprodutível de tokens (proposta `docs/propostas/2026-10-19-economia-de-tokens.md`): cenários fixos num `A2A_HOME` temporário, `chars`, `bytes` UTF-8 e `tokens_est = ceil(chars/4)`, numa tabela por medida. **M1** núcleo do `AGENTS.md` × guia completo (com `--agents-md`, também a seção do Dove de um `AGENTS.md` real); **M2** estabilidade do prefixo do `a2a prompt` (mesmo hash com bus, status e relógio diferentes); **M3** custo de relembrar uma missão (12 mensagens: `mission show` + `read --compact`) × `brief --project` com as linhas `F` do `a2a fact`; **M4** `git ls-files` + `head -40` × mapa do repositório. Medidas cujo comando ainda não existe aparecem como `pendente`, com o "antes" já medido.
 
 ## Próximos passos (ideias)
 - Canal entre máquinas (VPS como ponte) — Windows, Omarchy/Linux, VPS (Ubuntu 24.04 LTS).
