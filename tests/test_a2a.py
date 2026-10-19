@@ -176,6 +176,15 @@ def main():
         assert sorted(os.listdir(os.path.join(h, ".a2a", "agents"))) == ["claude", "codex", "hermes"]
         dlink = os.path.join(h, ".local", "bin", "dove")
         assert os.path.islink(dlink) and os.path.realpath(dlink) == str(A2A.resolve()), dlink
+        ienv = {k: v for k, v in ienv.items() if k not in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "HERMES_HOME")}
+        r = subprocess.run(["bash", str(ROOT / "install.sh")], capture_output=True, text=True, env=ienv)
+        assert "Para valer em todos os projetos: a2a instructions install" in r.stdout, r.stdout
+        assert not os.path.exists(os.path.join(h, ".claude")), "sem --instructions nao mexe nos arquivos globais"
+        for _ in range(2):  # --instructions: claude e codex (nao hermes), idempotente
+            r = subprocess.run(["bash", str(ROOT / "install.sh"), "--instructions", "claude"], capture_output=True, text=True, env=ienv)
+            assert r.returncode == 0 and "Para valer" not in r.stdout, r.stdout + r.stderr
+        assert "ja atualizado" in r.stdout and os.path.isfile(os.path.join(h, ".claude", "CLAUDE.md")), r.stdout
+        assert os.path.isfile(os.path.join(h, ".codex", "AGENTS.md")) and not os.path.exists(os.path.join(h, ".hermes"))
         print("OK: install.sh (symlinks a2a e dove, shebang, agentes, idempotente)")
 
     # install.ps1: checagem estatica (shims .cmd e Git Bash, ASCII puro)
@@ -183,7 +192,8 @@ def main():
     assert all(b < 128 for b in raw), "install.ps1 tem bytes nao-ASCII"
     txt = raw.decode("ascii")
     for needle in ("a2a.cmd", "#!/bin/sh", "UTF8Encoding($false)", "dove.cmd", "panel --open %*",
-                   'Join-Path $bin "dove"', 'panel --open `"`$@`"'):
+                   'Join-Path $bin "dove"', 'panel --open `"`$@`"', "[switch]$Instructions",
+                   'instructions install --agents "claude,codex"', "Para valer em todos os projetos: a2a instructions install"):
         assert needle in txt, needle
     print("OK: install.ps1 (estatico: a2a.cmd, dove.cmd, shims Git Bash, ASCII)")
 
@@ -1642,6 +1652,122 @@ def prompt_fase():
     assert "exemplos:\n" in h and "| codex exec -" in h and "--prefix-hash" in h and "nunca executa" in h, h
     print("OK: a2a prompt (camadas, prefixo sem data/estado com hash igual apos msgs/status/relogio, hash muda com nucleo/papel/agente/--for, pasta, corte, so leitura, nao executa nada)")
 
+INSTR_INPROC = r"""
+import sys
+sys.path.insert(0, sys.argv[1]); import a2a
+a2a.AGENTS_MD_CORE += "- linha nova no nucleo.\n"
+a2a.main(sys.argv[2:])
+"""
+def instructions_fase():
+    """a2a instructions / onboard --global-core / project which: arquivos globais com HOME temporario e overrides."""
+    import glob as _glob
+    tmp = tempfile.mkdtemp(); home = os.path.join(tmp, "home"); os.makedirs(home)
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "HERMES_HOME")}
+    env.update(HOME=home, USERPROFILE=home, A2A_HOME=os.path.join(tmp, "a2a"), PYTHONIOENCODING="utf-8")
+    def a2a(*args, e=None, code=0):
+        r = subprocess.run([sys.executable, str(A2A), *args], capture_output=True, env=e or env)
+        out = r.stdout.decode("utf-8") + r.stderr.decode("utf-8")
+        assert r.returncode == code, (args, r.returncode, out)
+        return out
+    claude, codex = os.path.join(home, ".claude", "CLAUDE.md"), os.path.join(home, ".codex", "AGENTS.md")
+    B, E = "<!-- dove:inicio (gerado por a2a instructions; nao edite entre estes marcadores) -->", "<!-- dove:fim -->"
+    rb = lambda p: open(p, "rb").read()
+    # nucleo global: mesmo texto do nucleo do AGENTS.md, com o nome do agente e <projeto> explicado; curto e estavel
+    core = a2a("onboard", "--agents-md"); g = a2a("onboard", "--agent", "claude", "--global-core")
+    assert g == a2a("onboard", "--agent", "claude", "--global-core") and len(g.splitlines()) <= 12, g
+    assert "<seu-nome>" not in g and "Seu nome: `claude`." in g and "`a2a project which`" in g and "Claude Code →" not in g, g
+    for l in core.splitlines():
+        if "Seu nome:" not in l: assert l.replace("<seu-nome>", "claude") in g.splitlines(), (l, g)
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", g)
+    a2a("onboard", "--global-core", code=2); a2a("onboard", "--agent", "claude", "--global-core", "--project", "x", code=1)
+    # dry-run nao grava nada
+    out = a2a("instructions", "install", "--dry-run")
+    assert "(dry-run) criado: " + claude in out and "+" + B in out and not os.path.exists(os.path.join(home, ".claude")), out
+    assert not os.path.exists(os.path.join(tmp, "a2a", "instructions.json"))
+    # do zero: cria arquivo e pasta; o bloco e o nucleo global entre marcadores
+    os.makedirs(os.path.dirname(codex))
+    orig = b"# minhas regras\r\nnao mexa\r\n\r\nfim sem quebra"  # CRLF, sem quebra no fim
+    open(codex, "wb").write(orig)
+    out = a2a("instructions", "install")
+    assert f"claude: criado: {claude}" in out and f"codex: adicionado: {codex} (backup: {codex}.dove-bak-" in out, out
+    assert rb(claude).decode("utf-8") == B + "\n" + g + E + "\n", rb(claude)
+    cx = rb(codex)
+    assert cx.startswith(orig + b"\r\n\r\n" + B.encode() + b"\r\n") and cx.endswith(E.encode() + b"\r\n"), cx
+    assert b"\n" not in cx.replace(b"\r\n", b""), "CRLF virou LF"
+    assert cx.decode("utf-8").replace("\r\n", "\n").endswith(a2a("onboard", "--agent", "codex", "--global-core") + E + "\n")
+    baks = _glob.glob(codex + ".dove-bak-*"); assert len(baks) == 1 and rb(baks[0]) == orig, baks
+    # idempotente
+    out = a2a("instructions", "install"); assert out.count("ja atualizado") == 2, out
+    assert rb(codex) == cx and len(_glob.glob(codex + ".dove-bak-*")) == 1
+    # status
+    st = a2a("instructions", "status")
+    assert re.search(rf"claude +{re.escape(claude)}  existe=sim bloco=sim atualizado=sim backups=0", st), st
+    assert re.search(rf"codex +{re.escape(codex)}  existe=sim bloco=sim atualizado=sim backups=1", st) and "backup: " + baks[0] in st, st
+    assert "hermes" in st and "existe=nao bloco=nao atualizado=- backups=0" in st, st
+    # o nucleo mudou: status mostra desatualizado; install troca o bloco no lugar, sem novo backup, resto intacto
+    def inproc(*args):
+        r = subprocess.run([sys.executable, "-c", INSTR_INPROC, str(ROOT), *args], capture_output=True, env=env)
+        assert r.returncode == 0, r.stderr.decode("utf-8", "replace"); return r.stdout.decode("utf-8")
+    open(codex, "ab").write(b"depois do bloco\r\n")  # o usuario escreveu depois do bloco
+    assert "atualizado=nao" in inproc("instructions", "status", "--agents", "codex")
+    out = inproc("instructions", "install")
+    assert f"claude: atualizado: {claude}" in out and f"codex: atualizado: {codex}" in out and "backup" not in out, out
+    new = rb(codex); assert new.startswith(orig + b"\r\n\r\n" + B.encode()) and b"- linha nova no nucleo.\r\n" + E.encode() + b"\r\ndepois do bloco\r\n" in new, new
+    assert len(_glob.glob(codex + ".dove-bak-*")) == 1
+    assert "atualizado=sim" in inproc("instructions", "status", "--agents", "codex") and "atualizado=nao" in a2a("instructions", "status", "--agents", "codex")
+    a2a("instructions", "install")  # volta ao nucleo atual
+    # remove: so o bloco (e a linha em branco que ele pos); arquivo criado pelo Dove e vazio some (com a pasta)
+    out = a2a("instructions", "remove", "--dry-run"); assert rb(codex).count(B.encode()) == 1 and os.path.exists(claude), out
+    out = a2a("instructions", "remove")
+    assert f"claude: arquivo removido: {claude}" in out and f"codex: removido: {codex}" in out, out
+    assert rb(codex) == orig + b"depois do bloco\r\n", rb(codex)
+    assert not os.path.exists(claude) and not os.path.exists(os.path.dirname(claude))
+    assert "sem bloco" in a2a("instructions", "remove", "--agents", "codex") and "nao existe" in a2a("instructions", "remove", "--agents", "claude")
+    # remove devolve o original exato (o usuario nao escreveu depois do bloco); backup continua um so
+    open(codex, "wb").write(orig); a2a("instructions", "install", "--agents", "codex"); a2a("instructions", "remove", "--agents", "codex")
+    assert rb(codex) == orig and len(_glob.glob(codex + ".dove-bak-*")) == 1
+    # arquivo LF com conteudo e BOM: bloco em LF, BOM mantido (nunca acrescentado), conteudo fora dos marcadores intacto
+    lf = "﻿regra global\n".encode("utf-8"); open(codex, "wb").write(lf)
+    a2a("instructions", "install", "--agents", "codex"); x = rb(codex)
+    assert x.startswith(lf + b"\n" + B.encode() + b"\n") and b"\r" not in x, x
+    a2a("instructions", "remove", "--agents", "codex"); assert rb(codex) == lf
+    a2a("instructions", "install", "--agents", "claude"); assert not rb(claude).startswith(b"\xef\xbb\xbf")
+    # marcadores quebrados: erro e nada muda
+    open(codex, "wb").write(b"x\n" + B.encode() + b"\nsem fim\n"); before = rb(codex)
+    assert "sem o de fim" in a2a("instructions", "install", "--agents", "codex", code=1) and rb(codex) == before
+    # overrides: CLAUDE_CONFIG_DIR / CODEX_HOME / HERMES_HOME; hermes so explicito, com nota
+    e2 = dict(env, CLAUDE_CONFIG_DIR=os.path.join(tmp, "cc"), CODEX_HOME=os.path.join(tmp, "cx"), HERMES_HOME=os.path.join(tmp, "hh"))
+    out = a2a("instructions", "install", e=e2)
+    assert os.path.isfile(os.path.join(tmp, "cc", "CLAUDE.md")) and os.path.isfile(os.path.join(tmp, "cx", "AGENTS.md")), out
+    assert "hermes" not in out and not os.path.exists(os.path.join(tmp, "hh")), out
+    out = a2a("instructions", "install", "--agents", "hermes", e=e2)
+    assert "hermes: criado: " + os.path.join(tmp, "hh", "SOUL.md") in out and "SOUL.md" in out and "--agents hermes" in out, out
+    assert "Seu nome: `hermes`." in open(os.path.join(tmp, "hh", "SOUL.md"), encoding="utf-8").read()
+    open(os.path.join(tmp, "cx", "AGENTS.override.md"), "w").write("temporario\n")
+    assert "AGENTS.override.md" in a2a("instructions", "status", "--agents", "codex", e=e2)
+    a2a("instructions", "install", "--agents", "gemini", e=e2, code=1)
+    # project which: exato, subpasta, copia de trabalho, nenhum -> sai 1
+    proj = os.path.join(tmp, "lagu"); os.makedirs(os.path.join(proj, "src", "a")); os.makedirs(proj + "-codex")
+    a2a("project", "add", "lagu", proj); a2a("project", "add", "lagu-docs", os.path.join(proj, "src", "a"))
+    pj = os.path.join(tmp, "a2a", "projects.json"); ps = json.load(open(pj))
+    ps[0]["worktrees"] = {"codex": {"path": proj + "-codex", "branch": "dove/codex", "base": "main"}}; json.dump(ps, open(pj, "w"))
+    assert a2a("project", "which", "--path", proj) == "lagu\n"
+    assert a2a("project", "which", "--path", os.path.join(proj, "src")) == "lagu\n"
+    assert a2a("project", "which", "--path", os.path.join(proj, "src", "a", "b")) == "lagu-docs\n"  # o mais especifico
+    assert a2a("project", "which", "--path", proj + "-codex") == "lagu\n"
+    assert subprocess.run([sys.executable, str(A2A), "project", "which"], capture_output=True, text=True, env=env,
+                          cwd=os.path.join(proj, "src")).stdout == "lagu\n"
+    out = a2a("project", "which", "--path", proj + "x", code=1); assert "nenhum projeto registrado contem" in out, out
+    a2a("project", "which", "--path", tmp, code=1)
+    sys.path.insert(0, str(ROOT)); import importlib; os.environ["A2A_HOME"] = os.path.join(tmp, "a2a")
+    import a2a as mod; importlib.reload(mod)
+    assert mod.project_which(proj.upper() + "/SRC", windows=True) == ("lagu", "")  # Windows: sem diferenciar maiusculas
+    assert mod.project_which(proj.upper(), windows=False) == (None, "")
+    assert mod.project_which(proj + "-codex/x", windows=True) == ("lagu", "codex")
+    del os.environ["A2A_HOME"]
+    print("OK: a2a instructions (cria, preserva fora dos marcadores, CRLF/BOM, idempotente, atualiza, 1 backup, remove exato, "
+          "status, dry-run, overrides, hermes so explicito) + onboard --global-core + project which")
+
 if __name__ == "__main__":
     main()
     fase1()
@@ -1655,3 +1781,4 @@ if __name__ == "__main__":
     index_fase()
     files_fase()
     prompt_fase()
+    instructions_fase()

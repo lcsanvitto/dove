@@ -1,6 +1,7 @@
 # Instalador do Dove (Windows). Idempotente - pode rodar de novo sem problema.
-# Uso: powershell -ExecutionPolicy Bypass -File install.ps1 [-Agents claude,codex,hermes]
-param([string[]]$Agents = @("claude", "codex", "hermes"))
+# Uso: powershell -ExecutionPolicy Bypass -File install.ps1 [-Agents claude,codex,hermes] [-Instructions]
+#   -Instructions: grava o nucleo do Dove nos arquivos globais do Claude Code e do Codex (a2a instructions install)
+param([string[]]$Agents = @("claude", "codex", "hermes"), [switch]$Instructions)
 $ErrorActionPreference = "Stop"
 
 $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -62,6 +63,9 @@ if (-not (($env:Path -split ";") | Where-Object { $_.TrimEnd("\") -ieq $bin.Trim
 & $py $script init
 foreach ($ag in $Agents) { & $py $script join --agent $ag }
 
+# Instrucoes globais (todos os projetos): so com -Instructions
+if ($Instructions) { & $py $script instructions install --agents "claude,codex" }
+
 Write-Host ""
 Write-Host "Dove instalado." -ForegroundColor Green
 Write-Host "  repo:    $repo"
@@ -71,5 +75,6 @@ Write-Host "  app:     $doveCmd (dove: abre o painel no navegador)"
 Write-Host "  agentes: $($Agents -join ', ')"
 Write-Host "  atualizar: git -C `"$repo`" pull"
 Write-Host ""
+if (-not $Instructions) { Write-Host "Para valer em todos os projetos: a2a instructions install" }
 Write-Host "Feche e abra um PowerShell novo e rode: a2a status   (ou: dove, para abrir o app)"
 Write-Host 'Se um agente no Git Bash nao achar o a2a, rode no Git Bash: echo ''export PATH="$HOME/bin:$PATH"'' >> ~/.bashrc'

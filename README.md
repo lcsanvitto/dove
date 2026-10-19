@@ -20,6 +20,7 @@ Não fica dentro de um projeto. Fica na sua pasta de usuário, acima de todos os
   index.json       ← cache das mensagens do bus (a2a index); pode apagar, é refeito sozinho
   projects.json    ← projetos registrados (sidebar do dove)
   config.json      ← preferências (ex.: última pasta raiz do "Descobrir projetos")
+  instructions.json ← o que o a2a instructions gravou nos arquivos globais dos agentes (nasce no primeiro install)
 ```
 
 Qualquer agente, em qualquer projeto (`lagu`, `qLink`, …), chama o mesmo `a2a`. O campo `project` marca de qual projeto a mensagem fala. No Windows, `~/.a2a` vira `C:\Users\<você>\.a2a`.
@@ -81,6 +82,33 @@ As instruções para os agentes têm uma fonte única: o próprio `a2a`. Elas v�
    ```
 2. No `CLAUDE.md` do projeto, adicione a linha `@AGENTS.md` para o Claude Code carregar o mesmo texto.
 3. Para colar direto numa sessão (ou quando o agente precisar dos detalhes): `a2a onboard --agent codex --project <nome>` — o guia completo, já com o nome do agente preenchido.
+
+## Instruções globais (todos os projetos)
+Com muitos repositórios, não precisa de um `AGENTS.md` por repo: `a2a instructions install` grava o núcleo do Dove no arquivo de instruções **global** de cada agente, que ele carrega em toda sessão, em qualquer pasta.
+
+| Agente | Arquivo global (Linux/macOS) | Windows | Variável que muda a pasta | Fonte |
+|---|---|---|---|---|
+| Claude Code (`claude`) | `~/.claude/CLAUDE.md` | `C:\Users\<você>\.claude\CLAUDE.md` | `CLAUDE_CONFIG_DIR` | [memória do usuário](https://code.claude.com/docs/en/memory) ("User instructions: `~/.claude/CLAUDE.md` … all projects"; carregado em toda sessão, junto com o `AGENTS.md`/`CLAUDE.md` do projeto) e [`CLAUDE_CONFIG_DIR`](https://code.claude.com/docs/en/env-vars) ("Override the configuration directory (default: `~/.claude`)") |
+| Codex (`codex`) | `~/.codex/AGENTS.md` | `C:\Users\<você>\.codex\AGENTS.md` | `CODEX_HOME` | [Custom instructions with AGENTS.md](https://developers.openai.com/codex/guides/agents-md) (escopo global no Codex home, `~/.codex` ou `CODEX_HOME`; um `AGENTS.override.md` ali tem prioridade e faz o Codex ignorar o `AGENTS.md` global; depois vêm os `AGENTS.md` do projeto, até 32 KiB no total) |
+| Hermes (`hermes`) | `~/.hermes/SOUL.md` | `%LOCALAPPDATA%\hermes\SOUL.md` | `HERMES_HOME` | [context files](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/context-files.md) e [personality](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/personality.md) |
+
+**Hermes:** o único arquivo global sempre carregado é o `SOUL.md` (vai no slot 1 do prompt de sistema), mas a doc o descreve como **persona/identidade** e manda regras de projeto para o `AGENTS.md`; os arquivos de memória (`~/.hermes/memories/MEMORY.md`, `USER.md`) são curados pelo próprio agente e têm teto. Por isso o Dove **não** escreve no Hermes por padrão: só com `--agents hermes` (e avisa). Num repo trabalhado pelo Hermes, prefira o `AGENTS.md` do projeto.
+
+```
+a2a instructions install [--agents claude,codex[,hermes]] [--dry-run]   # grava/atualiza o bloco (padrao: claude,codex)
+a2a instructions status  [--agents ...]                                 # caminho, existe?, bloco?, atualizado?, backups
+a2a instructions remove  [--agents ...] [--dry-run]                     # tira so o bloco
+a2a onboard --agent claude --global-core                                # o texto que vai no bloco
+a2a project which [--path P]                                            # projeto registrado da pasta atual (sai 1 se nenhum)
+```
+- O bloco fica entre `<!-- dove:inicio (gerado por a2a instructions; nao edite entre estes marcadores) -->` e `<!-- dove:fim -->`. Nada fora dos marcadores muda; o fim de linha (LF/CRLF) e a codificação do arquivo ficam como estão (UTF-8; BOM nunca é acrescentado).
+- Rodar de novo é seguro: sem mudança, diz `ja atualizado`; se o núcleo mudou (versão nova do Dove), troca o bloco no lugar.
+- Antes da primeira mudança num arquivo que já existia, grava `<arquivo>.dove-bak-AAAAmmddHHMMSS` (uma vez só). `--dry-run` mostra o diff e não grava nada.
+- `remove` tira o bloco e a linha em branco que ele pôs; um arquivo que o Dove criou e ficou vazio é apagado. O manifesto `~/.a2a/instructions.json` guarda caminho, se o Dove criou o arquivo, o hash do bloco e o backup.
+- O núcleo global é o mesmo núcleo do `AGENTS.md`, com o nome do agente já preenchido e `<projeto>` explicado como "o projeto da pasta atual: `a2a project which`" (que acha o projeto registrado cuja pasta, ou a cópia de trabalho de um agente, contém a pasta atual).
+- Instaladores: `install.ps1 -Instructions` / `./install.sh --instructions` rodam `a2a instructions install` (claude e codex). Sem a opção, só lembram: `Para valer em todos os projetos: a2a instructions install`.
+
+**Global e `AGENTS.md` do projeto:** o global basta. Use o `AGENTS.md` do projeto só para regras extras daquele repo, **sem** repetir o bloco do Dove (senão o agente carrega o núcleo duas vezes por sessão). Num repo que já tem a seção `## Canal A2A — Dove` no `AGENTS.md`, apague a seção depois de instalar o global.
 
 ## Uso no dia a dia
 ```
@@ -421,6 +449,9 @@ a2a index check     # "ok (2000 mensagens)" ou "divergente: ..." (código de sa�
 | `whereami --agent A --project P` | pasta onde o agente trabalha nesse projeto |
 | `onboard --agent X [--project P]` | imprime o guia completo do canal para o agente X (com exemplos) |
 | `onboard --agents-md [--project P]` | imprime o núcleo curto e estável para o `AGENTS.md` |
+| `onboard --agent X --global-core` | imprime o núcleo para os arquivos globais de instruções (nome de X preenchido, sem projeto) |
+| `instructions install\|remove\|status [--agents claude,codex[,hermes]] [--dry-run]` | grava / tira / confere o núcleo do Dove no `~/.claude/CLAUDE.md` e `~/.codex/AGENTS.md` (Hermes só explícito); backup antes da 1ª mudança |
+| `project which [--path P]` | nome do projeto registrado cuja pasta (ou cópia de um agente) contém P (padrão: pasta atual); sai 1 se nenhum |
 | `prompt --agent X --project P [--task ID] [--for claude\|codex\|hermes] [--prefix-hash] [--max-tail-chars N]` | imprime (não executa) o prompt em camadas para um vigia headless: núcleo + papel, pasta, fronteira, brief + tarefa; `--prefix-hash` mostra o hash do prefixo estável |
 
 ## Envelope da mensagem (JSON)

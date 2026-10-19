@@ -484,6 +484,22 @@ def project_add(name, path, auto_name=False, must_exist=False):
         p = {"name": name, "path": full, "pinned": False, "added": now_iso()}
         ps.append(p); write_json(PROJECTS, ps)
     return p
+def project_which(path="", windows=None):
+    """Projeto registrado cuja pasta (ou a copia de trabalho de um agente) contem path (padrao: pasta atual).
+    O mais especifico ganha (pasta mais longa). No Windows compara sem diferenciar maiusculas. -> (projeto, agente|"")."""
+    windows = is_windows() if windows is None else windows
+    sep = "\\" if windows else os.sep
+    key = lambda p: path_key(clean_path(p), windows)
+    k, best = key(path or os.getcwd()), None
+    for p in load_projects():
+        cands = [(p.get("path"), "")] + [(w["path"], ag) for ag, w in project_worktrees(p).items()]
+        for c, ag in cands:
+            if not isinstance(c, str) or not c.strip(): continue
+            try: ck = key(c)
+            except DoveError: continue
+            if k == ck or k.startswith(ck if ck.endswith(sep) else ck + sep):
+                if not best or len(ck) > best[0]: best = (len(ck), p["name"], ag)
+    return (best[1], best[2]) if best else (None, "")
 def project_remove(name):
     with FileLock(PROJECTS):
         ps = load_projects(); keep = [p for p in ps if p["name"] != name]
@@ -1145,6 +1161,11 @@ def cmd_project(a):
         elif a.pcmd == "remove": project_remove(a.name); print(f"projeto '{a.name}' removido")
         elif a.pcmd == "pin":
             project_pin(a.name, not a.off); print(f"projeto '{a.name}' " + ("desafixado" if a.off else "fixado"))
+        elif a.pcmd == "which":
+            where = clean_path(a.path) if a.path else os.getcwd()
+            name, _ = project_which(where)
+            if not name: fail(f"erro: nenhum projeto registrado contem {where} (registre com: a2a project add NOME CAMINHO)")
+            print(name)
         elif a.pcmd == "list":
             ps = sorted_projects(load_projects())
             if not ps: print("(nenhum projeto) - use: a2a project add NOME CAMINHO  ou  a2a project scan RAIZ"); return
@@ -1888,9 +1909,10 @@ def cmd_panel(a):
     finally: srv.server_close()
 
 # Nucleo do AGENTS.md: curto e estavel (vai no prefixo em cache de toda sessao). Detalhes ficam no guia (ONBOARD_TEMPLATE).
-AGENTS_MD_CORE = """## Canal A2A — Dove
+CORE_NAMES = "Seu nome: Claude Code → `claude` · Codex → `codex` · Hermes → `hermes`."
+AGENTS_MD_CORE = f"""## Canal A2A — Dove
 
-Agentes se coordenam pelo Dove (`a2a`). Seu nome: Claude Code → `claude` · Codex → `codex` · Hermes → `hermes`.
+Agentes se coordenam pelo Dove (`a2a`). {CORE_NAMES}
 - Início: `a2a brief --agent <seu-nome> --mark-read` e `a2a status --agent <seu-nome> --set working --note "..." --project <projeto>`.
 - Onde trabalhar: `a2a whereami --agent <seu-nome> --project <projeto>`.
 - Fim: `a2a status ... --set done --note "<resumo>"`.
@@ -1992,9 +2014,190 @@ def utf8_stdout():
     if hasattr(sys.stdout, "reconfigure"):  # console do Windows (cp1252) nao quebra com acentos
         try: sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         except Exception: pass
+def global_core(agent):
+    """Nucleo para os arquivos globais de instrucoes (todos os projetos): o mesmo AGENTS_MD_CORE, com o nome do agente
+    no lugar da lista de nomes e <projeto> explicado (o projeto da pasta atual). Sem data: estavel entre sessoes."""
+    agent = check_agent_name(agent)
+    return AGENTS_MD_CORE.replace(CORE_NAMES, f"Seu nome: `{agent}`. `<projeto>` = o projeto da pasta atual: `a2a project which` (sem projeto: pule o `--project`).", 1
+                                  ).replace("<seu-nome>", agent)
 def cmd_onboard(a):
     utf8_stdout()
+    if a.global_core:
+        if not a.agent: fail("erro: --global-core exige --agent")
+        if a.project: fail("erro: --global-core vale para todos os projetos (sem --project)")
+        try: sys.stdout.write(global_core(a.agent))
+        except DoveError as e: fail(f"erro: {e}")
+        return
     sys.stdout.write(onboard_text(None if a.agents_md else a.agent, a.project))
+
+# ---------------------------------------------------------------- instrucoes globais (arquivos de instrucoes dos agentes)
+# Bloco do Dove entre marcadores nos arquivos que cada agente carrega em toda sessao, em qualquer pasta:
+#   claude: $CLAUDE_CONFIG_DIR/CLAUDE.md ou ~/.claude/CLAUDE.md (memoria do usuario, code.claude.com/docs/en/memory)
+#   codex:  $CODEX_HOME/AGENTS.md ou ~/.codex/AGENTS.md (AGENTS.md global; AGENTS.override.md, se existir, tem prioridade)
+#   hermes: $HERMES_HOME/SOUL.md (~/.hermes; Windows nativo %LOCALAPPDATA%\hermes). SOUL.md e a persona: so com --agents hermes
+# Nunca mexe fora dos marcadores; backup antes da primeira mudanca num arquivo que ja existia; manifesto em instructions.json.
+INSTR_BEGIN = "<!-- dove:inicio (gerado por a2a instructions; nao edite entre estes marcadores) -->"
+INSTR_END = "<!-- dove:fim -->"
+INSTR_MANIFEST = os.path.join(HOME, "instructions.json")
+INSTR_AGENTS = ("claude", "codex", "hermes")
+INSTR_DEFAULT = ("claude", "codex")  # hermes so explicito
+HERMES_NOTE = ("nota: no Hermes o unico arquivo global sempre carregado e o SOUL.md (persona/identidade, "
+               "slot 1 do prompt de sistema); a doc dele pede regras de projeto no AGENTS.md. "
+               "Por isso o Dove so escreve nele com --agents hermes.")
+def instr_path(agent):
+    env = os.environ.get
+    if agent == "claude": return os.path.join(env("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude"), "CLAUDE.md")
+    if agent == "codex": return os.path.join(env("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex"), "AGENTS.md")
+    if agent == "hermes":
+        base = env("HERMES_HOME") or (os.path.join(env("LOCALAPPDATA"), "hermes") if is_windows() and env("LOCALAPPDATA")
+                                      else os.path.join(os.path.expanduser("~"), ".hermes"))
+        return os.path.join(base, "SOUL.md")
+    raise DoveError(f"agente sem arquivo global conhecido: '{agent}' (use {', '.join(INSTR_AGENTS)})")
+def instr_agents(spec, default=INSTR_DEFAULT):
+    ags = [x.strip() for x in (spec or "").split(",") if x.strip()] or list(default)
+    bad = [x for x in ags if x not in INSTR_AGENTS]
+    if bad: raise DoveError(f"agente sem arquivo global conhecido: '{bad[0]}' (use {', '.join(INSTR_AGENTS)})")
+    return list(dict.fromkeys(ags))
+def instr_block(agent, nl="\n"):
+    return (INSTR_BEGIN + "\n" + global_core(agent) + INSTR_END + "\n").replace("\n", nl)
+def instr_hash(text): return hashlib.sha256(text.replace("\r\n", "\n").encode("utf-8")).hexdigest()[:12]
+BOM = b"\xef\xbb\xbf"
+def instr_read(path):
+    """(existe, bom, texto, nl). Texto decodificado sem mexer em nada; nl = \\r\\n se o arquivo ja usa CRLF."""
+    try:
+        with open(path, "rb") as f: raw = f.read()
+    except FileNotFoundError: return False, False, "", "\n"
+    except OSError as e: raise DoveError(f"nao consegui ler {path}: {e}")
+    bom = raw.startswith(BOM)
+    try: text = raw[3 if bom else 0:].decode("utf-8")
+    except UnicodeDecodeError: raise DoveError(f"{path} nao esta em UTF-8: nao mexi nele")
+    return True, bom, text, "\r\n" if "\r\n" in text else "\n"
+def instr_find(text, path):
+    """(inicio, fim) do bloco no texto (fim inclui a quebra de linha do marcador final) ou None."""
+    i = text.find(INSTR_BEGIN)
+    if i < 0:
+        if INSTR_END in text: raise DoveError(f"{path}: marcador {INSTR_END} sem o de inicio - corrija a mao (nada mudou)")
+        return None
+    if text.find(INSTR_BEGIN, i + 1) >= 0: raise DoveError(f"{path}: mais de um bloco do Dove - deixe um so (nada mudou)")
+    j = text.find(INSTR_END, i)
+    if j < 0: raise DoveError(f"{path}: marcador de inicio do Dove sem o de fim - corrija a mao (nada mudou)")
+    j += len(INSTR_END)
+    if text.startswith("\r\n", j): j += 2
+    elif text.startswith("\n", j): j += 1
+    return i, j
+def instr_write(path, text, bom):
+    data = (BOM if bom else b"") + text.encode("utf-8")
+    tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex[:6]}.tmp"
+    with open(tmp, "wb") as f: f.write(data)
+    try:
+        try: os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+        except OSError: pass
+        os.replace(tmp, path)
+    except OSError as e:
+        try: os.remove(tmp)
+        except OSError: pass
+        raise DoveError(f"nao consegui gravar {path}: {e}")
+def instr_backups(path): return sorted(glob.glob(glob.escape(path) + ".dove-bak-*"))
+def instr_backup(path, entry):
+    """Copia o arquivo antes da primeira mudanca (uma vez so: o manifesto guarda o backup)."""
+    if entry.get("created_by_dove") or (entry.get("backup") and os.path.exists(entry["backup"])): return ""
+    b = f"{path}.dove-bak-{datetime.now().strftime('%Y%m%d%H%M%S')}"; n = 2
+    while os.path.exists(b): b = f"{path}.dove-bak-{datetime.now().strftime('%Y%m%d%H%M%S')}-{n}"; n += 1
+    with open(path, "rb") as f: raw = f.read()
+    with open(b, "wb") as f: f.write(raw)
+    entry["backup"] = b
+    return b
+def instr_manifest():
+    m = read_json(INSTR_MANIFEST, {}); return m if isinstance(m, dict) else {}
+def instr_diff(path, old, new):
+    import difflib
+    return "".join(difflib.unified_diff(old.splitlines(True), new.splitlines(True), path + " (atual)", path + " (novo)"))
+def instr_install(agent, dry_run=False, manifest=None):
+    """-> (acao, caminho, detalhe). acao: criado | adicionado | atualizado | ja atualizado."""
+    path = instr_path(agent); exists, bom, text, nl = instr_read(path)
+    manifest = instr_manifest() if manifest is None else manifest
+    entry = dict(manifest.get(path) or {}, agent=agent); block = instr_block(agent, nl)
+    hit = instr_find(text, path) if exists else None
+    if hit:
+        if text[hit[0]:hit[1]] == block: return "ja atualizado", path, ""
+        new, act = text[:hit[0]] + block + text[hit[1]:], "atualizado"
+    elif not exists: new, act = block, "criado"; entry.update(created_by_dove=True, sep="")
+    else:
+        sep = "" if not text else (nl if text.endswith("\n") else nl + nl)
+        new, act = text + sep + block, "adicionado"; entry.update(sep=sep); entry.setdefault("created_by_dove", False)
+    if dry_run: return act, path, instr_diff(path, text, new)
+    if not exists:
+        d = os.path.dirname(path)
+        if not os.path.isdir(d): os.makedirs(d); entry["created_dir"] = d
+    bk = instr_backup(path, entry) if exists else ""
+    instr_write(path, new, bom)
+    entry["hash"] = instr_hash(block); manifest[path] = entry
+    return act, path, f"backup: {bk}" if bk else ""
+def instr_remove(agent, dry_run=False, manifest=None):
+    """-> (acao, caminho, detalhe). acao: removido | arquivo removido | sem bloco | nao existe."""
+    path = instr_path(agent); exists, bom, text, nl = instr_read(path)
+    manifest = instr_manifest() if manifest is None else manifest
+    entry = dict(manifest.get(path) or {})
+    if not exists: return "nao existe", path, ""
+    hit = instr_find(text, path)
+    if not hit: return "sem bloco", path, ""
+    before, after = text[:hit[0]], text[hit[1]:]
+    sep = entry.get("sep")
+    if sep is None: sep = nl if before.endswith(nl + nl) else ""  # sem manifesto: so a linha em branco que o install poe
+    if sep and before.endswith(sep): before = before[:-len(sep)]
+    new = before + after
+    gone = new == "" and bool(entry.get("created_by_dove"))
+    if dry_run: return ("arquivo removido" if gone else "removido"), path, instr_diff(path, text, new)
+    if gone:
+        try: os.remove(path)
+        except OSError as e: raise DoveError(f"nao consegui remover {path}: {e}")
+        if entry.get("created_dir"):
+            try: os.rmdir(entry["created_dir"])  # so se ficou vazia
+            except OSError: pass
+        manifest.pop(path, None); return "arquivo removido", path, "criado pelo Dove e vazio"
+    bk = instr_backup(path, entry)
+    instr_write(path, new, bom)
+    if entry.get("backup"): manifest[path] = {"agent": agent, "backup": entry["backup"]}  # backup continua sendo o unico
+    else: manifest.pop(path, None)
+    return "removido", path, f"backup: {bk}" if bk else ""
+def instr_status(agent):
+    path = instr_path(agent); s = {"agent": agent, "path": path, "exists": False, "block": False, "current": False,
+                                   "backups": instr_backups(path), "note": ""}
+    try:
+        exists, _, text, nl = instr_read(path); s["exists"] = exists
+        hit = instr_find(text, path) if exists else None
+        if hit: s.update(block=True, current=text[hit[0]:hit[1]] == instr_block(agent, nl))
+    except DoveError as e: s["note"] = str(e)
+    if agent == "codex":
+        ov = os.path.join(os.path.dirname(path), "AGENTS.override.md")
+        if os.path.isfile(ov) and os.path.getsize(ov) > 0:
+            s["note"] = f"AVISO: {ov} existe e tem prioridade - o Codex ignora o AGENTS.md global enquanto ele existir"
+    return s
+def cmd_instructions(a):
+    utf8_stdout()
+    sim = lambda b: "sim" if b else "nao"
+    try:
+        if a.icmd == "status":
+            for ag in instr_agents(a.agents, INSTR_AGENTS):
+                s = instr_status(ag)
+                print(f"{ag:<7} {s['path']}  existe={sim(s['exists'])} bloco={sim(s['block'])} "
+                      f"atualizado={sim(s['current']) if s['block'] else '-'} backups={len(s['backups'])}")
+                for b in s["backups"]: print(f"        backup: {b}")
+                if s["note"]: print(f"        {s['note']}")
+            return
+        ags = instr_agents(a.agents); fn = instr_install if a.icmd == "install" else instr_remove
+        os.makedirs(HOME, exist_ok=True)
+        with FileLock(INSTR_MANIFEST):
+            man = instr_manifest(); changed = False
+            for ag in ags:
+                act, path, det = fn(ag, a.dry_run, man)
+                pre = "(dry-run) " if a.dry_run else ""
+                if a.dry_run and det: print(f"{ag}: {pre}{act}: {path}\n{det}", end="" if det.endswith("\n") else "\n")
+                else: print(f"{ag}: {pre}{act}: {path}" + (f" ({det})" if det else ""))
+                if ag == "hermes": print(f"hermes: {HERMES_NOTE}")
+                changed |= act not in ("ja atualizado", "sem bloco", "nao existe")
+            if changed and not a.dry_run: write_json(INSTR_MANIFEST, man)
+    except DoveError as e: fail(f"erro: {e}")
 
 # ---------------------------------------------------------------- prompt em camadas para vigias headless (so imprime)
 # Ordem fixa: 1. fixa (nucleo + papel) -> 2. quase fixa (pasta de trabalho) -> 3. fronteira -> 4. variavel (brief + tarefa).
@@ -2147,6 +2350,9 @@ def build_parser():
     x = ps.add_parser("add"); x.add_argument("name"); x.add_argument("path")
     x = ps.add_parser("remove"); x.add_argument("name")
     ps.add_parser("list")
+    x = ps.add_parser("which", help="projeto registrado da pasta atual (ou de --path); sai 1 se nenhum", **ex(
+        "a2a project which", "a2a project which --path ~/code/lagu/src"))
+    x.add_argument("--path", help="pasta a procurar (padrao: a pasta atual); vale a pasta do projeto ou a copia de um agente")
     x = ps.add_parser("pin"); x.add_argument("name"); x.add_argument("--off", action="store_true")
     x = ps.add_parser("scan", help="acha repos git sob ROOT (sem rodar git)"); x.add_argument("root")
     x.add_argument("--depth", type=int, default=3); x.add_argument("--add", action="store_true")
@@ -2231,7 +2437,26 @@ def build_parser():
     o = sub.add_parser("onboard", help="imprime as instrucoes do canal para um agente ou para o AGENTS.md")
     og = o.add_mutually_exclusive_group(required=True)
     og.add_argument("--agent"); og.add_argument("--agents-md", dest="agents_md", action="store_true")
-    o.add_argument("--project"); o.set_defaults(func=cmd_onboard)
+    o.add_argument("--project")
+    o.add_argument("--global-core", dest="global_core", action="store_true",
+                   help="com --agent: o nucleo para os arquivos globais de instrucoes (todos os projetos; a2a instructions)")
+    o.set_defaults(func=cmd_onboard)
+    ins = sub.add_parser("instructions", help="nucleo do Dove nos arquivos globais de instrucoes dos agentes (todos os projetos)",
+        description="Grava o nucleo do Dove (a2a onboard --agent X --global-core) entre os marcadores "
+        f"'{INSTR_BEGIN}' e '{INSTR_END}' no arquivo de instrucoes que cada agente carrega em toda sessao, em qualquer pasta: "
+        "claude = $CLAUDE_CONFIG_DIR/CLAUDE.md ou ~/.claude/CLAUDE.md; codex = $CODEX_HOME/AGENTS.md ou ~/.codex/AGENTS.md; "
+        "hermes = $HERMES_HOME/SOUL.md (~/.hermes; Windows %LOCALAPPDATA%\\hermes), so com --agents hermes (SOUL.md e a persona). "
+        "Nunca mexe fora dos marcadores; preserva fim de linha (LF/CRLF) e codificacao; antes da primeira mudanca num arquivo que "
+        "ja existia grava <arquivo>.dove-bak-AAAAmmddHHMMSS. Manifesto: ~/.a2a/instructions.json.", **ex(
+        "a2a instructions install", "a2a instructions install --dry-run", "a2a instructions status",
+        "a2a instructions remove --agents codex", "a2a instructions install --agents hermes"))
+    inss = ins.add_subparsers(dest="icmd", required=True)
+    for nm, hl in (("install", "grava ou atualiza o bloco do Dove (idempotente)"), ("remove", "tira so o bloco do Dove"),
+                   ("status", "caminho, existe, bloco, atualizado, backups (padrao: claude,codex,hermes)")):
+        x = inss.add_parser(nm, help=hl)
+        x.add_argument("--agents", help="lista separada por virgula: claude,codex[,hermes] (padrao: claude,codex)")
+        if nm != "status": x.add_argument("--dry-run", dest="dry_run", action="store_true", help="so mostra o plano e o diff")
+    ins.set_defaults(func=cmd_instructions)
     return p
 
 def main(argv=None):

@@ -6,7 +6,8 @@ de cada comando. Cenarios fixos (ids, textos, relogio e datas de commit fixos) n
 a cada execucao.
 
 M1. Nucleo x guia: `a2a onboard --agents-md --project lagu` (o que vai no AGENTS.md, carregado em toda sessao) x
-    `a2a onboard --agent codex --project lagu` (o guia completo, lido sob demanda). Com --agents-md CAMINHO tambem
+    `a2a onboard --agent codex --project lagu` (o guia completo, lido sob demanda); e o nucleo global
+    (`a2a onboard --agent claude --global-core`, o que `a2a instructions` grava nos arquivos globais). Com --agents-md CAMINHO tambem
     mede a secao do Dove de um AGENTS.md real (de "## Canal A2A" ate o proximo "## " ou o fim).
 M2. Estabilidade do prefixo: `a2a prompt --prefix-hash` duas vezes no cenario do measure_brief.py, com 2 mensagens
     novas, uma troca de status e o relogio 10 minutos adiante entre as execucoes. Esperado: prefixo igual, cauda muda.
@@ -69,6 +70,10 @@ def m1(root, agents_md):
     core = a2a(home, "onboard", "--agents-md", "--project", "lagu")
     guide = a2a(home, "onboard", "--agent", AGENT, "--project", "lagu")
     rows = [("guia completo (onboard --agent codex)", stats(guide)), ("nucleo (onboard --agents-md)", stats(core))]
+    glob_core = a2a(home, "onboard", "--agent", "claude", "--global-core") if "--global-core" in a2a(home, "onboard", "--help") else None
+    if glob_core is not None:
+        rows.append(("nucleo global (onboard --global-core)", stats(glob_core)))
+        SHOW.append(("M1 nucleo global (claude)", glob_core))
     sec = dove_section(agents_md) if agents_md else None
     if sec is not None:
         name = os.path.basename(os.path.dirname(os.path.abspath(agents_md))) or "."
@@ -78,9 +83,11 @@ def m1(root, agents_md):
     table(rows)
     print(f"  economia por sessao e por agente: ≈{rows[0][1]['tokens'] - rows[1][1]['tokens']} tokens_est "
           "(o que saiu do AGENTS.md para o guia)")
+    if glob_core is not None:
+        print("  nucleo global: o que a2a instructions grava em ~/.claude/CLAUDE.md e ~/.codex/AGENTS.md (uma vez para todos os projetos)")
     if sec is not None:
         print("  secao do AGENTS.md: " + ("igual ao nucleo" if sec == core else
-              f"difere do nucleo ({rows[2][1]['tokens'] - rows[1][1]['tokens']:+d} tokens_est; a2a onboard --agents-md --project <nome>)"))
+              f"difere do nucleo ({rows[-1][1]['tokens'] - rows[1][1]['tokens']:+d} tokens_est; a2a onboard --agents-md --project <nome>)"))
     SHOW.extend((("M1 nucleo", core), ("M1 guia", guide)))
 
 # ---------------------------------------------------------------- M2
