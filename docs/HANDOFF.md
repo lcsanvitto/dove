@@ -62,8 +62,8 @@ Para uma sessão nova retomar sem reexplicar nada. Estado detalhado: [`docs/ROAD
 - Soma o gasto das filhas no orçamento/teto da mãe (`budget_status`/`run_budget_cap`) e no `a2a cost --mission` numa **única passada** de escopo-família (ids mãe+filhas, agentes em união) — não soma chamadas independentes por missão, pra não contar o mesmo registro do vigia duas vezes. O rollup é só pra cima (a filha nunca vê o gasto da mãe).
 - `mission done` só fecha a mãe com **todas** as filhas diretas `concluida` (reprovada não conta como fechada).
 - `mission show` lista mãe/filhas.
-- **Decisão resolvida (@@HASH@@)**: `run_budget_cap` agora propaga o teto das missões-mãe (pai, avô, ... até a raiz, guarda de ciclo/profundidade 16): rodar a filha pelo id dela respeita o que resta de cada mãe ativa. Limite conhecido: o gasto de netas só entra na mãe direta delas (rollup de 1 nível, passo 15), não na avó.
-- **Decisão resolvida (@@HASH@@)**: `a2a mission cancel <id> --from <humano>` (só humano, `require_human`; recusado em `A2A_RUNNER`): `state: CANCELADO` + quem/quando/motivo. Filha CANCELADO conta como resolvida no gate da mãe (reprovada continua travando); cancelada não acorda o vigia, sai do `brief` e dos orçamentos ativos, não recebe aval nem filha nova; não desfaz.
+- **Decisão resolvida (9593f82)**: `run_budget_cap` agora propaga o teto das missões-mãe (pai, avô, ... até a raiz, guarda de ciclo/profundidade 16): rodar a filha pelo id dela respeita o que resta de cada mãe ativa. Limite conhecido: o gasto de netas só entra na mãe direta delas (rollup de 1 nível, passo 15), não na avó.
+- **Decisão resolvida (9593f82)**: `a2a mission cancel <id> --from <humano>` (só humano, `require_human`; recusado em `A2A_RUNNER`): `state: CANCELADO` + quem/quando/motivo. Filha CANCELADO conta como resolvida no gate da mãe (reprovada continua travando); cancelada não acorda o vigia, sai do `brief` e dos orçamentos ativos, não recebe aval nem filha nova; não desfaz.
 
 **Etapa 16 — Controle remoto pelo celular** · aprovada (Luiz, 2026-10-19: "Sim", **MUITO IMPORTANTE**)
 Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas/2026-10-19-orca-controle-remoto-mobile.md) (pesquisa do Orca + design).
@@ -102,7 +102,7 @@ Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas
 
 **Etapa 12 — Hermes**: o Luiz aceitou o risco em 2026-10-19 ("quero arriscar"). Sem sandbox de SO (`approvals.mode`), então fica **desligado por padrão** e só liga com opt-in explícito.
 
-**Fase 3 (0+1 a 15) está completa, com as duas decisões abertas do 15 resolvidas (cap herdado das mães e `mission cancel`, @@HASH@@); restam 16 e depois 17.**
+**Fase 3 (0+1 a 15) está completa, com as duas decisões abertas do 15 resolvidas (cap herdado das mães e `mission cancel`, 9593f82); restam 16 e depois 17.**
 
 **Depois**: roteiro de ativação para o Luiz no Windows; canal entre máquinas (VPS/Omarchy); retomada visual com o Claude Design; qLink.
 
