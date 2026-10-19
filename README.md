@@ -83,6 +83,34 @@ a2a agents
 ```
 Você (humano) espia quando quiser: `a2a inbox --agent <qualquer>` ou abra os arquivos em `~/.a2a/bus/`.
 
+## Brief: se atualizar numa chamada só
+Em vez de `inbox` + um `read` por mensagem + `mission list`, o agente roda um único comando e recebe só o que é dele, uma linha por item:
+```
+a2a brief --agent codex [--project P] [--mark-read] [--limit 20] [--width 100] [--json] [--no-auto-status]
+```
+```
+@codex blocked ctx=82 novas=4 abertas=1 aval=1
+N 3f9a1c2b7d10 claude task lagu 9m "cupom de frete grátis: aplicar regra acima de R$ 199"
+N 8b21e0f4a9c3 hermes report/CONCLUIDO qlink 5m "E2E staging: 148 ok, 2 falhas (frete grátis)" +evid
+N c47d0e11aa02 luiz question lagu 2m "a credencial de homologação chegou?"
+ACK 1 (claude)
+T 1e2b9c0d4f55 de=luiz lagu 14m "Migrar o webhook de pagamentos para a assinatura nova"
+M mb222288 lagu aberta 2/3 "Checkout novo pronto para produção"
+! ctx 82>=80: preparar handoff
+! bloqueado: aguardando credencial do banco de homologação
+```
+- **Cabeçalho:** `@agente estado ctx=<n|-> novas=<n> abertas=<n> aval=<n>` (estado e contexto do quadro; `stale` aparece como `unknown`). `novas` conta todas as não lidas (inclusive acks), `abertas` as linhas `T` e `aval` as linhas `M`.
+- **`N`** mensagem não lida para você (exceto ack), da mais antiga para a mais nova: `msg_id de tipo[/ESTADO] [projeto] idade "primeira linha"`; `+evid` se tem evidência. Passou de `--limit`, vem `… +K novas (a2a brief --limit 0 para todas)`.
+- **`ACK n (remetentes)`**: acks não lidos só contados (não se responde ack).
+- **`T`** tarefa aberta para você que você já leu (as não lidas já estão em `N`). Tasks de missão aparecem em `M`, não em `T`. Some quando você responde com `--reply-to` e `--state CONCLUIDO`/`CANCELADO`.
+- **`M`** missão em que você participa, ainda não concluída pelo humano, sem o seu `approve` como último veredito (some com `mission approve`, volta com `mission reject`).
+- **`!`** alertas seus: contexto ≥ 80%, `blocked` (com a nota), sem sinal (stale).
+- Nada pendente: só o cabeçalho e `(nada pendente)`.
+- **Lidas:** sem `--mark-read`, nada é marcado (como o `inbox`; duas chamadas seguidas mostram as mesmas linhas `N`). Com `--mark-read`, ficam lidas **só** as mensagens listadas em `N` e `ACK` (gravadas em `cursor/<agente>.json`, como o `read`); as que ficaram além do `--limit` continuam novas.
+- **Status:** renova o heartbeat como o `inbox` (não muda estado nem nota); `--no-auto-status` desliga. Nunca cria status para o humano.
+- Suas próprias mensagens nunca aparecem. Para o texto inteiro de uma mensagem: `a2a read <msg_id> --agent <você>`. `--json` dá a mesma informação numa linha de JSON compacto, sem campos vazios.
+- Quando usar: no começo da sessão e para se atualizar no meio do trabalho (`a2a brief --agent <você> --mark-read`). O `inbox`, `read`, `wait` e `mission list` continuam iguais.
+
 ## Modo herdr (estado dos agentes)
 Cada agente publica o próprio estado — `working`, `idle`, `blocked`, `done` ou `unknown` — em `~/.a2a/status/<agente>.json`. Assim você (ou outro agente) vê num quadro quem está trabalhando, quem travou e quem terminou.
 
@@ -116,9 +144,9 @@ O status se atualiza sozinho — o agente não precisa lembrar de publicar a cad
   | `CONCLUIDO`, `CANCELADO` | `done` |
   | outro / nenhum | só heartbeat |
 
-- `inbox`, `wait` e `ack` fazem **heartbeat**: renovam o horário do status (mantendo estado e nota), o que evita o `stale`. Se o agente ainda não tem status, ele nasce como `idle`.
+- `inbox`, `brief`, `wait` e `ack` fazem **heartbeat**: renovam o horário do status (mantendo estado e nota), o que evita o `stale`. Se o agente ainda não tem status, ele nasce como `idle`.
 - A nota existente é mantida; use `status --set ... --note` para notas ou bloqueios.
-- `--no-auto-status` (em `send`, `inbox`, `wait` e `ack`) desliga tudo isso naquele comando.
+- `--no-auto-status` (em `send`, `inbox`, `brief`, `wait` e `ack`) desliga tudo isso naquele comando.
 
 ## Log
 Feed em texto das mensagens recentes de todos os agentes, em ordem cronológica (mais nova por último). `--agent X` filtra mensagens de **ou** para X.
@@ -267,13 +295,14 @@ Mostra tarefas abertas (`task` sem resposta `CONCLUIDO`/`CANCELADO`, ligada por 
 | `agents` | lista agentes registrados |
 | `send ...` | envia uma mensagem |
 | `inbox --agent X` | lista mensagens não lidas de X |
+| `brief --agent X [--project P] [--mark-read] [--limit N] [--width W] [--json]` | resumo do que é de X: novas (N), acks, tarefas abertas (T), missões esperando aval (M), alertas (!); só marca lidas com `--mark-read` |
 | `read <id> --agent X` | mostra a mensagem e marca como lida |
 | `wait --agent X [--timeout S]` | bloqueia até chegar mensagem nova para X |
 | `ack <id> --from X` | responde um `ack` e marca como lida |
 | `status --agent X --set ESTADO [--note N] [--project P]` | publica o estado de X (working/idle/blocked/done/unknown) |
 | `status [--agent X] [--stale-minutes M]` | quadro de estado de todos os agentes (ou só de X) |
 | `wait --agent X --until ESTADO [--timeout S]` | bloqueia até o estado de X virar ESTADO |
-| `--no-auto-status` | em `send`/`inbox`/`wait`/`ack`: não mexe no status de quem roda o comando |
+| `--no-auto-status` | em `send`/`inbox`/`brief`/`wait`/`ack`: não mexe no status de quem roda o comando |
 | `log [--limit N] [--project P] [--agent X]` | feed das mensagens recentes de todos os agentes (mais nova por último) |
 | `status --agent X [--context N] [--model M]` | informa o contexto usado (0–100%) e o modelo |
 | `dove [--port 8765]` | abre o app no navegador (= `panel --open`) |
@@ -303,6 +332,7 @@ Mostra tarefas abertas (`task` sem resposta `CONCLUIDO`/`CANCELADO`, ligada por 
 ## Card de onboarding (cole no agente)
 ```
 Você é o agente "claude" no canal A2A local Dove (comando a2a, caixa global ~/.a2a).
+- Se atualizar:      a2a brief --agent claude --mark-read   (novas, tarefas, missões, alertas)
 - Ver o que chegou:  a2a inbox --agent claude
 - Esperar:           a2a wait --agent claude --timeout 300
 - Ler mensagem:      a2a read <msg_id> --agent claude

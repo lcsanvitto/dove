@@ -981,9 +981,139 @@ def git_fase():
     assert not any(c[0] == "reset" for c in calls)
     print(f"OK: {len(calls)} comandos git montados, nenhum com --force/reset/rebase/clean/branch -D")
 
+def brief_fase():
+    """a2a brief (item 1 da proposta de interface): saida exata, anti-loop, --mark-read, T, M, filtros, status."""
+    tmp = tempfile.mkdtemp()
+    env = dict(os.environ, A2A_HOME=tmp, PYTHONIOENCODING="utf-8")
+    for ag in ("claude", "codex", "hermes"): run(env, "join", "--agent", ag)
+    bus, base = os.path.join(tmp, "bus"), time.time() - 3600
+    def put(i, mid, frm, to, kind, body, project="lagu", state="", evidence="", reply="", task=""):
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(base + i * 60))
+        m = {"data": ts, "task_id": task, "msg_id": mid, "from": frm, "to": to, "project": project,
+             "in_reply_to": reply, "kind": kind, "state": state, "result": "", "evidence": evidence,
+             "pending": "", "next_action": "", "body": body}
+        with open(os.path.join(bus, ts.replace(":", "").replace("-", "") + "-" + mid + ".json"), "w", encoding="utf-8") as f:
+            json.dump(m, f, ensure_ascii=False)
+    def mission(mid, title, approvals, project="lagu", agents=("claude", "codex", "hermes"), human=None):
+        ap = {a: {"verdict": "approve", "ts": "x", "evidence": "ok", "reason": ""} for a in approvals}
+        m = {"id": mid, "project": project, "title": title, "description": "", "agents": list(agents), "created_by": "luiz",
+             "created": "2026-10-18T10:00:00Z", "approvals": ap, "history": [], "human": human}
+        with open(os.path.join(tmp, "missions", mid + ".json"), "w", encoding="utf-8") as f: json.dump(m, f, ensure_ascii=False)
+    # cenario do exemplo da proposta
+    put(1, "1e2b9c0d4f55", "luiz", "codex", "task", "Migrar o webhook de pagamentos para a assinatura nova\nComeçar pelo handler e pelos testes.")
+    put(2, "aa00000000a1", "codex", "claude", "question", "mensagem do proprio codex", project="lagu")  # nunca aparece
+    put(3, "3f9a1c2b7d10", "claude", "codex", "task", "cupom de frete grátis: aplicar regra acima de R$ 199")
+    put(4, "8b21e0f4a9c3", "hermes", "codex", "report", "E2E staging: 148 ok, 2 falhas (frete grátis)", project="qlink",
+        state="CONCLUIDO", evidence="e2e/report.html")
+    put(5, "c47d0e11aa02", "luiz", "codex", "question", "a credencial de homologação chegou?")
+    put(6, "bb00000000b2", "claude", "codex", "ack", "recebido", reply="aa00000000a1")
+    put(7, "cc00000000c3", "claude", "hermes", "task", "nao e para o codex")
+    mission("mb222288", "Checkout novo pronto para produção", ["claude", "hermes"])
+    mission("ma111111", "Ja aprovada pelo codex", ["codex"])
+    mission("mc333333", "Sem o codex", [], agents=("claude", "hermes"))
+    with open(os.path.join(tmp, "cursor", "codex.json"), "w") as f: json.dump(["1e2b9c0d4f55", "aa00000000a1"], f)
+    run(env, "status", "--agent", "codex", "--set", "blocked", "--note", "aguardando credencial do banco de homologação",
+        "--context", "82", "--project", "lagu")
+    norm = lambda s: re.sub(r" \d+[smhd] \"", ' AGE "', s)
+    expected = """@codex blocked ctx=82 novas=4 abertas=1 aval=1
+N 3f9a1c2b7d10 claude task lagu AGE "cupom de frete grátis: aplicar regra acima de R$ 199"
+N 8b21e0f4a9c3 hermes report/CONCLUIDO qlink AGE "E2E staging: 148 ok, 2 falhas (frete grátis)" +evid
+N c47d0e11aa02 luiz question lagu AGE "a credencial de homologação chegou?"
+ACK 1 (claude)
+T 1e2b9c0d4f55 de=luiz lagu AGE "Migrar o webhook de pagamentos para a assinatura nova"
+M mb222288 lagu aberta 2/3 "Checkout novo pronto para produção"
+! ctx 82>=80: preparar handoff
+! bloqueado: aguardando credencial do banco de homologação
+"""
+    st = lambda a: json.load(open(os.path.join(tmp, "status", a + ".json"), encoding="utf-8"))
+    snap = lambda: {c: run(env, *c.split()).stdout for c in
+                    ("inbox --agent codex --no-auto-status", "mission list", "summary", "log --limit 50",
+                     "read 3f9a1c2b7d10", "inbox --agent hermes --no-auto-status")}
+    seen0, before, st0 = open(os.path.join(tmp, "cursor", "codex.json")).read(), snap(), st("codex")
+    b1 = run(env, "brief", "--agent", "codex")
+    assert b1.returncode == 0 and norm(b1.stdout) == expected, b1.stdout + b1.stderr
+    b2 = run(env, "brief", "--agent", "codex")
+    assert [l for l in b2.stdout.splitlines() if l[:2] in ("N ", "AC")] == [l for l in b1.stdout.splitlines() if l[:2] in ("N ", "AC")]
+    assert open(os.path.join(tmp, "cursor", "codex.json")).read() == seen0, "sem --mark-read nada e marcado"
+    assert snap() == before, "brief nao pode mudar a saida de inbox/read/mission list/summary/log/status"
+    st1 = st("codex")
+    assert {k: v for k, v in st1.items() if k not in ("updated", "ts")} == {k: v for k, v in st0.items() if k not in ("updated", "ts")}
+    assert st1["ts"] >= st0["ts"], (st0, st1)  # heartbeat
+    raw = open(os.path.join(tmp, "status", "codex.json"), "rb").read()
+    run(env, "brief", "--agent", "codex", "--no-auto-status")
+    assert open(os.path.join(tmp, "status", "codex.json"), "rb").read() == raw, "--no-auto-status nao toca o status"
+    # proprias mensagens nunca aparecem (nem no --json, nem com --limit 0)
+    for args in ((), ("--json",), ("--limit", "0"), ("--project", "lagu")):
+        o = run(env, "brief", "--agent", "codex", *args).stdout
+        assert "aa00000000a1" not in o and "proprio codex" not in o and "cc00000000c3" not in o, o
+    # --project e --json
+    pl = run(env, "brief", "--agent", "codex", "--project", "qlink").stdout
+    assert "8b21e0f4a9c3" in pl and "3f9a1c2b7d10" not in pl and "mb222288" not in pl and "1e2b9c0d4f55" not in pl, pl
+    assert pl.splitlines()[0] == "@codex blocked ctx=82 novas=1 abertas=0 aval=0", pl
+    j = run(env, "brief", "--agent", "codex", "--json").stdout
+    assert j.count("\n") == 1 and "\n  " not in j, j
+    jd = json.loads(j)
+    assert jd["agent"] == "codex" and jd["novas"] == 4 and jd["abertas"] == 1 and jd["aval"] == 1 and jd["ctx"] == 82, jd
+    assert [n["id"] for n in jd["new"]] == ["3f9a1c2b7d10", "8b21e0f4a9c3", "c47d0e11aa02"] and jd["acks"] == {"n": 1, "from": ["claude"]}, jd
+    assert "state" not in jd["new"][0] and jd["new"][1]["evid"] is True and "evid" not in jd["new"][0], jd  # sem campos vazios
+    assert jd["missions"][0]["id"] == "mb222288" and len(jd["alerts"]) == 2, jd
+    # --limit e --width
+    lim = run(env, "brief", "--agent", "codex", "--limit", "1", "--width", "20").stdout.splitlines()
+    assert [l for l in lim if l.startswith("N ")] == ['N 3f9a1c2b7d10 claude task lagu ' + lim[1].split()[5] + ' "cupom de frete gr..."'], lim
+    assert "… +2 novas (a2a brief --limit 0 para todas)" in lim, lim
+    # --mark-read com --limit: marca so o listado (N e ACK); o resto continua novo
+    run(env, "brief", "--agent", "codex", "--mark-read", "--limit", "1")
+    s = json.load(open(os.path.join(tmp, "cursor", "codex.json")))
+    assert "3f9a1c2b7d10" in s and "bb00000000b2" in s and "8b21e0f4a9c3" not in s, s
+    run(env, "brief", "--agent", "codex", "--mark-read")
+    b3 = run(env, "brief", "--agent", "codex").stdout
+    assert not [l for l in b3.splitlines() if l.startswith(("N ", "ACK", "…"))], b3
+    assert "novas=0 abertas=2 aval=1" in b3 and "T 3f9a1c2b7d10 de=claude" in b3, b3  # task lida vira T
+    # tarefa some de T depois de um report CONCLUIDO com --reply-to
+    run(env, "send", "--from", "codex", "--to", "luiz", "--project", "lagu", "--reply-to", "1e2b9c0d4f55",
+        "--kind", "report", "--state", "CONCLUIDO", "--body", "feito", "--no-auto-status")
+    b4 = run(env, "brief", "--agent", "codex").stdout
+    assert "1e2b9c0d4f55" not in b4 and "abertas=1" in b4, b4
+    # ack de ack / anti-loop continua igual: o brief so conta o ack
+    r = run(env, "ack", "bb00000000b2", "--from", "codex", "--no-auto-status")
+    assert "anti-loop" in r.stdout, r.stdout
+    print("OK: brief (saida exata do exemplo, sem proprias msgs, --mark-read, --limit/--width, T some com CONCLUIDO, --project, --json, heartbeat, nada mais muda)")
+
+    # missao real: some de M com approve, volta com reject; task da missao nao vira T
+    r = run(env, "mission", "new", "--project", "dove", "--title", "Teste de M", "--agents", "codex,hermes", "--from", "luiz")
+    mid = re.search(r"missao (\w+) criada", r.stdout).group(1)
+    o = run(env, "brief", "--agent", "codex", "--project", "dove", "--mark-read").stdout
+    assert f"M {mid} dove aberta 0/2 \"Teste de M\"" in o and "novas=1" in o, o
+    o = run(env, "brief", "--agent", "codex", "--project", "dove").stdout
+    assert f"M {mid}" in o and not [l for l in o.splitlines() if l.startswith(("N ", "T "))], o
+    run(env, "mission", "approve", mid, "--agent", "codex", "--evidence", "conferi")
+    o = run(env, "brief", "--agent", "codex", "--project", "dove").stdout
+    assert mid not in o and "aval=0" in o, o
+    run(env, "mission", "reject", mid, "--agent", "codex", "--reason", "achei um bug")
+    o = run(env, "brief", "--agent", "codex", "--project", "dove").stdout
+    assert f"M {mid} dove reprovada 0/2" in o and "aval=1" in o, o
+    assert not os.path.exists(os.path.join(tmp, "status", "luiz.json"))
+    o = run(env, "brief", "--agent", "luiz")
+    assert o.returncode == 0 and not os.path.exists(os.path.join(tmp, "status", "luiz.json")), "humano nao ganha status"
+    print("OK: brief e missoes (some com approve, volta com reject, task da missao fora de T; humano sem status)")
+
+    # vazio: exatamente as duas linhas
+    tmp2 = tempfile.mkdtemp(); env2 = dict(os.environ, A2A_HOME=tmp2, PYTHONIOENCODING="utf-8")
+    run(env2, "join", "--agent", "codex")
+    o = run(env2, "brief", "--agent", "codex")
+    assert o.returncode == 0 and o.stdout == "@codex idle ctx=- novas=0 abertas=0 aval=0\n(nada pendente)\n", repr(o.stdout)
+    assert json.load(open(os.path.join(tmp2, "status", "codex.json")))["state"] == "idle"
+    assert json.loads(run(env2, "brief", "--agent", "codex", "--json").stdout) == \
+        {"agent": "codex", "state": "idle", "novas": 0, "abertas": 0, "aval": 0}
+    # onboard usa o brief
+    t = run(env2, "onboard", "--agent", "codex", "--project", "lagu").stdout
+    assert "a2a brief --agent codex --mark-read" in t and "a2a inbox" not in t and "a2a whereami --agent codex" in t, t
+    print("OK: brief vazio (duas linhas exatas, --json) e onboard com a2a brief")
+
 if __name__ == "__main__":
     main()
     fase1()
     robustez()
     fase2()
     git_fase()
+    brief_fase()

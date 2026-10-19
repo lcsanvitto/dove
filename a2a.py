@@ -1200,6 +1200,84 @@ def cmd_summary(a):
     print("Ultimas conclusoes:" + ("" if s["recent_done"] else " -"))
     for d in s["recent_done"]: print(f"  - [{d['when']}] {d['who']}: {short(d['text'], 80)}")
 
+# ---------------------------------------------------------------- brief (resumo unico para o agente se atualizar)
+def msg_age(m):
+    """Idade da mensagem (pelo campo data, ISO UTC) no formato do quadro: 2m, 3h..."""
+    try: ts = datetime.strptime(m.get("data") or "", "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+    except (TypeError, ValueError): return "-"
+    return fmt_age(ts)
+def brief_text(t, width):
+    """Primeira linha nao vazia do texto, cortada em width, sem aspas duplas (cabe entre aspas)."""
+    first = next((l for l in (t or "").splitlines() if l.strip()), "")
+    return short(first, max(width, 4)).replace('"', "'")
+def brief_data(agent, project=None, limit=20, width=100, stale_min=30):
+    """O que e de `agent`, so leitura. Reaproveita visible_for/load_seen (anti-loop e lidas), open_tasks,
+    mission_view e effective_status. Nao grava nada (marcar como lido e o heartbeat ficam no cmd_brief)."""
+    msgs, seen, missions = all_messages(), load_seen(agent), all_missions()
+    unread = [m for m in msgs if visible_for(m, agent, project) and m["msg_id"] not in seen]
+    new = [m for m in unread if m.get("kind") != "ack"]
+    acks = [m for m in unread if m.get("kind") == "ack"]
+    shown = new[:limit] if limit and limit > 0 else new
+    mids = {m["id"] for m in missions}  # tasks de missao aparecem em M, nao em T
+    tasks = [m for m in open_tasks(msgs) if m.get("to") == agent and visible_for(m, agent, project)
+             and m["msg_id"] in seen and m.get("task_id") not in mids]
+    mine = [mission_view(m) for m in missions if agent in (m.get("agents") or []) and not m.get("human")
+            and (not project or m.get("project") == project)
+            and ((m.get("approvals") or {}).get(agent) or {}).get("verdict") != "approve"]
+    e = effective_status(agent, load_status(agent), stale_min)
+    alerts = []
+    if e["context"] is not None and e["context"] >= CTX_HIGH:
+        alerts.append(f"ctx {e['context']}>={CTX_HIGH}: preparar handoff")
+    if e["state"] == "blocked": alerts.append("bloqueado: " + (e["note"] or "(sem nota)"))
+    if e["stale"]: alerts.append("sem sinal: " + e["note"])
+    return {"agent": agent, "state": e["state"], "ctx": e["context"],
+            "novas": len(unread), "abertas": len(tasks), "aval": len(mine),
+            "new": [{"id": m["msg_id"], "from": m.get("from", ""), "kind": m.get("kind", ""),
+                     "state": m.get("state", ""), "project": m.get("project", ""), "age": msg_age(m),
+                     "text": brief_text(m.get("body"), width), "evid": bool(m.get("evidence"))} for m in shown],
+            "more": len(new) - len(shown),
+            "acks": {"n": len(acks), "from": list(dict.fromkeys(m.get("from", "") for m in acks))},
+            "tasks": [{"id": m["msg_id"], "from": m.get("from", ""), "project": m.get("project", ""),
+                       "age": msg_age(m), "text": brief_text(m.get("body"), width)} for m in tasks],
+            "missions": [{"id": v["id"], "project": v.get("project", ""), "status": v["status"],
+                          "approved": v["approved"], "total": v["total"],
+                          "title": brief_text(v.get("title"), width)} for v in mine],
+            "alerts": alerts, "mark": [m["msg_id"] for m in shown + acks]}
+def brief_lines(b):
+    p = lambda x: x + " " if x else ""
+    out = [f"@{b['agent']} {b['state']} ctx={'-' if b['ctx'] is None else b['ctx']} "
+           f"novas={b['novas']} abertas={b['abertas']} aval={b['aval']}"]
+    for n in b["new"]:
+        out.append(f"N {n['id']} {n['from']} {n['kind']}{'/' + n['state'] if n['state'] else ''} "
+                   f"{p(n['project'])}{n['age']} \"{n['text']}\"" + (" +evid" if n["evid"] else ""))
+    if b["more"]: out.append(f"… +{b['more']} novas (a2a brief --limit 0 para todas)")
+    if b["acks"]["n"]: out.append(f"ACK {b['acks']['n']} ({', '.join(b['acks']['from'])})")
+    for t in b["tasks"]: out.append(f"T {t['id']} de={t['from']} {p(t['project'])}{t['age']} \"{t['text']}\"")
+    for m in b["missions"]:
+        out.append(f"M {m['id']} {p(m['project'])}{m['status']} {m['approved']}/{m['total']} \"{m['title']}\"")
+    out += ["! " + x for x in b["alerts"]]
+    if len(out) == 1: out.append("(nada pendente)")
+    return out
+def brief_json(b):
+    def prune(x):
+        if isinstance(x, dict):
+            x = {k: prune(v) for k, v in x.items()}
+            return {k: v for k, v in x.items() if not (v is None or v is False or v == "" or v == [] or v == {})}
+        if isinstance(x, list): return [prune(v) for v in x]
+        return x
+    d = prune({k: v for k, v in b.items() if k != "mark"})
+    if not b["acks"]["n"]: d.pop("acks", None)
+    d.update({k: b[k] for k in ("novas", "abertas", "aval")})  # contagens sempre presentes, mesmo 0
+    if not b["more"]: d.pop("more", None)
+    return json.dumps(d, ensure_ascii=False, separators=(",", ":"))
+def cmd_brief(a):
+    ensure_dirs()
+    if a.agent != human_name(): auto(a, a.agent)  # heartbeat como o inbox; o humano nunca ganha status
+    b = brief_data(a.agent, a.project, a.limit, a.width)
+    print(brief_json(b) if a.json else "\n".join(brief_lines(b)))
+    if a.mark_read:
+        for mid in b["mark"]: mark_seen(a.agent, mid)  # so o que foi listado (N e ACK), como o read
+
 # ---------------------------------------------------------------- painel web (app dove)
 TOKEN_GETS = ("/api/scan", "/api/doctor", "/api/fs/list", "/api/project/info", "/api/onboard", "/api/git/status", "/api/git/diff")
 FALLBACK_HTML = """<!doctype html><meta charset="utf-8"><title>Dove</title>
@@ -1562,11 +1640,12 @@ Este projeto é trabalhado por vários agentes ao mesmo tempo, que se coordenam 
 **Seu nome no canal:** Claude Code → `claude` · Codex → `codex` · Hermes → `hermes`.
 
 Ao começar uma sessão:
-1. `a2a inbox --agent <seu-nome>` — veja se há pedidos para você.
+1. `a2a brief --agent <seu-nome> --mark-read` — o que é seu: mensagens novas (N), tarefas abertas (T), missões esperando seu aval (M) e alertas (!). Use `a2a read <msg_id> --agent <seu-nome>` só quando precisar do texto inteiro de uma mensagem.
 2. `a2a status --agent <seu-nome> --set working --note "<o que vai fazer>" --project <projeto>`
 3. Se o Luiz criou uma cópia de trabalho para você, rode `a2a whereami --agent <seu-nome> --project <projeto>` e trabalhe nessa pasta.
 
 Durante o trabalho:
+- Para se atualizar no meio do trabalho, use `a2a brief --agent <seu-nome> --mark-read` (não `inbox` + `read` + `mission list`).
 - Pedir algo a outro agente: `a2a send --from <seu-nome> --to <agente> --project <projeto> --kind task --body "..."`
 - Responder: `a2a send --from <seu-nome> --to <agente> --project <projeto> --reply-to <msg_id> --kind report --state CONCLUIDO --body "..." --evidence "<commit/arquivo>"`
 - Travou: `a2a status --agent <seu-nome> --set blocked --note "<o que destrava>"`
@@ -1631,6 +1710,23 @@ def build_parser():
     i = sub.add_parser("inbox"); i.add_argument("--agent", required=True); i.add_argument("--project")
     i.add_argument("--no-auto-status", dest="no_auto_status", action="store_true"); i.set_defaults(func=cmd_inbox)
     r = sub.add_parser("read"); r.add_argument("msg_id"); r.add_argument("--agent"); r.set_defaults(func=cmd_read)
+    bf = sub.add_parser("brief", help="resumo do que e seu: novas (N), acks, tarefas (T), missoes (M), alertas (!)",
+        description="Resumo unico para o agente se atualizar (substitui inbox + read de cada mensagem + mission list). "
+        "Linhas: cabecalho @agente estado ctx novas abertas aval; N = mensagem nao lida (exceto ack, mais antiga primeiro); "
+        "ACK = acks nao lidos contados numa linha (nao se responde ack); T = tarefa aberta para voce ja lida; "
+        "M = missao em que voce participa, nao concluida, sem o seu aprovado; ! = alertas (contexto alto, bloqueado, stale). "
+        "Suas proprias mensagens nunca aparecem. Sem --mark-read nada e marcado como lido (como o inbox); "
+        "com --mark-read marca como lidas so as mensagens listadas em N e ACK (cursor/<agente>.json, como o read). "
+        "Renova o heartbeat como o inbox (nunca cria status para o humano); nao muda estado nem nota.")
+    bf.add_argument("--agent", required=True, help="de quem e o resumo")
+    bf.add_argument("--project", help="so mensagens, tarefas e missoes deste projeto")
+    bf.add_argument("--mark-read", dest="mark_read", action="store_true",
+                    help="marca como lidas as mensagens listadas em N e ACK (sem a flag, nada e marcado)")
+    bf.add_argument("--limit", type=int, default=20, help="maximo de linhas N (padrao 20; 0 = todas)")
+    bf.add_argument("--width", type=int, default=100, help="tamanho maximo do resumo de cada linha (padrao 100)")
+    bf.add_argument("--json", action="store_true", help="a mesma informacao em uma linha de JSON compacto")
+    bf.add_argument("--no-auto-status", dest="no_auto_status", action="store_true", help="nao renova o heartbeat")
+    bf.set_defaults(func=cmd_brief)
     w = sub.add_parser("wait"); w.add_argument("--agent", required=True); w.add_argument("--project")
     w.add_argument("--timeout", type=float, default=0); w.add_argument("--interval", type=float, default=2.0)
     w.add_argument("--until", choices=AGENT_STATES, help="espera o status do agente virar este estado")
