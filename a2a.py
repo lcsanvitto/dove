@@ -2193,13 +2193,14 @@ def loop_check(messages, runs=None, now=None, limits=None, *, missions=None, hum
     return {"findings": findings, "counts": counts, "total": len(findings), "limits": lim, "conversations": len(convs),
             "runs": len(runs) if runs is not None else None, "acted_on": sorted(acted)}
 def loop_runs():
-    """Registros do vigia em runs/AAAA-MM/*.json (so leitura). None se a pasta nao existe."""
+    """Registros do vigia em runs/AAAA-MM/*.json (so leitura), sem os `refused` (etapa 7: nada rodou, entao os
+    gatilhos deles nao contam como ja acionados). None se a pasta nao existe."""
     if not os.path.isdir(RUNS): return None
     out = []
     for f in sorted(glob.glob(os.path.join(RUNS, "*", "*.json"))):
         if MONTH_RE.match(os.path.basename(os.path.dirname(f))):
             r = read_json(f)
-            if isinstance(r, dict): out.append(r)
+            if isinstance(r, dict) and r.get("outcome") != "refused": out.append(r)
     return out
 def loop_inputs():
     """Mensagens e missoes sem gravar nada (nem o index.json: indice invalido e so relido do bus, nao salvo)."""
@@ -2710,7 +2711,7 @@ def onboard_text(agent=None, project=None):
     return t
 def utf8_stdout():
     if hasattr(sys.stdout, "reconfigure"):  # console do Windows (cp1252) nao quebra com acentos
-        try: sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        try: sys.stdout.reconfigure(encoding="utf-8", errors="replace", newline="\n")  # sem isto, o Windows traduz \n -> \r\n
         except Exception: pass
 def global_core(agent):
     """Nucleo para os arquivos globais de instrucoes (todos os projetos): o mesmo AGENTS_MD_CORE, com o nome do agente
@@ -3005,10 +3006,12 @@ def _watch_rules(shell):
 WATCH_CLAUDE_ALLOW = ("Read", "Grep", "Glob", "Edit", "Write") + _watch_rules("Bash") + _watch_rules("PowerShell")
 WATCH_RUNNERS = {
     "claude": {"exe": "claude", "enabled": True, "permission_mode": "dontAsk", "allow": WATCH_CLAUDE_ALLOW,
-               "argv": ("-p", "--output-format", "json", "--permission-mode", "dontAsk", "--permission-prompts", "none",
-                        "--max-turns", "30", "--allowedTools", "{allow}"),
+               "argv": ("-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk",
+                        "--permission-prompts", "none", "--allowedTools", "{allow}", "--max-turns", "30",
+                        "--max-budget-usd", "{budget}", "--session-id", "{run_id}"),
                "stdin": "prompt (a2a prompt --for claude)", "cwd": "{worktree}",
-               "note": "sem --bare: --bare exige ANTHROPIC_API_KEY (nao usa a assinatura); sandbox de SO so no macOS/Linux/WSL2"},
+               "note": "sem --bare: --bare exige ANTHROPIC_API_KEY (nao usa a assinatura); sandbox de SO so no macOS/Linux/WSL2; "
+                       "--session-id exige um UUID (etapa 7 deriva um de run_id com uuid5, so para esta flag)"},
     "codex": {"exe": "codex", "enabled": True, "permission_mode": "workspace-write", "allow": (),
               "argv": ("exec", "--json", "-s", "workspace-write", "-C", "{worktree}", "--add-dir", "{a2a_home}", "-"),
               "stdin": "prompt (a2a prompt --for codex)", "cwd": "{worktree}",
@@ -3032,11 +3035,13 @@ def watch_forbidden():
         for s in (r["exe"], r["permission_mode"], *r["argv"], *r["allow"]):
             if WATCH_FORBIDDEN.search(s): bad.append(f"{ag}: {s}")
     return bad
-def watch_argv(agent, worktree="", a2a_home="", run_dir=""):
-    """argv exato que o vigia usaria (o prompt vai pelo stdin)."""
+def watch_argv(agent, worktree="", a2a_home="", run_dir="", run_id="", budget=None):
+    """argv exato que o vigia usaria (o prompt vai pelo stdin). run_id/budget: so usados pelo claude (--session-id,
+    --max-budget-usd); sem eles (simulacao), mostram um texto-placeholder, como {worktree} sem copia registrada."""
     r = WATCH_RUNNERS[agent]
     sub = {"{allow}": ",".join(r["allow"]), "{worktree}": worktree or f"<copia de {agent}>",
-           "{a2a_home}": a2a_home or HOME, "{run_dir}": run_dir or os.path.join(HOME, "runs", "<run_id>")}
+           "{a2a_home}": a2a_home or HOME, "{run_dir}": run_dir or os.path.join(HOME, "runs", "<run_id>"),
+           "{run_id}": run_id or "<run_id>", "{budget}": f"{budget:.2f}" if isinstance(budget, (int, float)) else "<run_budget_cap>"}
     out = [r["exe"]]
     for x in r["argv"]:
         for k, v in sub.items(): x = x.replace(k, v)
@@ -3368,9 +3373,11 @@ def cmd_watch(a):
     if a.wcmd == "plan": return cmd_watch_plan(a)
     if a.wcmd is None:
         if a.dry_run and a.once: return cmd_watch_plan(a)  # alias de a2a watch plan
-        if a.dry_run: print("erro: --dry-run continuo chega com o executor (etapa 7); use a2a watch --dry-run --once "
-                            "(ou a2a watch plan)", file=sys.stderr); sys.exit(2)
-        print("executor real ainda nao habilitado (etapa 7); simulacao: a2a watch plan (ou a2a watch --dry-run --once)",
+        if a.dry_run:
+            print("erro: --dry-run continuo ainda nao existe; use a2a watch --dry-run --once (ou a2a watch plan)",
+                  file=sys.stderr); sys.exit(2)
+        if a.once: return cmd_watch_once(a)  # etapa 7: executor real, so com o claude, iniciado a mao
+        print("erro: vigia continuo ainda nao existe; use a2a watch --once (ou a2a watch plan)",
               file=sys.stderr); sys.exit(2)
     if a.wcmd != "check": return watch_supervisor(a)
     if a.show_command:
@@ -4043,18 +4050,30 @@ def stop_tree(tree, proc, grace=RUN_GRACE):
     except subprocess.TimeoutExpired: pass
 
 # ---- executor: qual programa roda para o agente
-def real_runner_argv(agent):
-    """Etapa 7 liga aqui a tabela revisada WATCH_RUNNERS (watch_argv, so os enabled). Ate la, nenhum executor real roda."""
-    raise DoveError(f"executor real ainda nao habilitado para {agent} (o vigia so roda o executor de teste nesta etapa)")
-def resolve_runner(agent):
-    """argv do executor do agente. Nesta etapa so o gancho de teste: A2A_RUNNER_OVERRIDE (caminho de um script),
-    lido SO com A2A_TESTING=1; senao recusa."""
+def real_runner_argv(agent, worktree="", run_id="", budget=None):
+    """Etapa 7: argv real a partir de WATCH_RUNNERS (watch_argv), so para o agente habilitado e nao pendente
+    (watch_disabled); o resto recusa, como antes. No Windows, um shim .cmd/.bat do npm (ex.: claude.cmd) precisa
+    passar pelo cmd.exe: CreateProcess nao executa .cmd/.bat diretamente (so .exe/.com)."""
+    import shutil
+    dis = watch_disabled(agent)
+    if agent not in WATCH_RUNNERS or dis:
+        raise DoveError(f"executor real ainda nao habilitado para {agent}" + (f" ({dis})" if dis else ""))
+    exe = shutil.which(WATCH_RUNNERS[agent]["exe"])
+    if not exe: raise DoveError(f"{WATCH_RUNNERS[agent]['exe']} nao encontrado no PATH")
+    argv = watch_argv(agent, worktree, run_id=run_id, budget=budget)
+    argv[0] = exe
+    if is_windows() and exe.lower().endswith((".cmd", ".bat")):
+        return [os.environ.get("ComSpec", "cmd.exe"), "/d", "/s", "/c", watch_quote(argv)]
+    return argv
+def resolve_runner(agent, worktree="", run_id="", budget=None):
+    """argv do executor do agente: com A2A_RUNNER_OVERRIDE (caminho de um script) e A2A_TESTING=1, o gancho de
+    teste (nunca cai no executor real); senao o executor real (etapa 7, so os habilitados)."""
     over = os.environ.get("A2A_RUNNER_OVERRIDE", "")
     if over and os.environ.get("A2A_TESTING") == "1":
         path = os.path.abspath(os.path.expanduser(over))
         if not os.path.isfile(path): raise DoveError(f"A2A_RUNNER_OVERRIDE nao e um arquivo: {path}")
         return [sys.executable, path] if path.lower().endswith(".py") else [path]
-    return real_runner_argv(agent)
+    return real_runner_argv(agent, worktree, run_id, budget)
 
 # ---- uma execucao
 class RunResult:
@@ -4065,21 +4084,25 @@ class RunResult:
         self.run_id, self.agent, self.outcome = record["run_id"], record["agent"], record["outcome"]
         self.exit_code, self.reason = record["exit_code"], record["reason"]
     def __repr__(self): return f"RunResult({self.run_id} {self.agent} {self.outcome} code={self.exit_code})"
-def run_agent(agent, project, argv, cwd, stdin_text="", timeout=900, env_extra=None, trigger_ids=(), grace=RUN_GRACE):
+def run_agent(agent, project, argv, cwd, stdin_text="", timeout=900, env_extra=None, trigger_ids=(), grace=RUN_GRACE,
+              run_id=None, mission="", usage_file=""):
     """Roda argv em cwd como execucao do vigia para `agent`: env A2A_RUNNER=watch e A2A_RUN_ID, o prompt pelo stdin,
-    stdout/stderr direto em runs/AAAA-MM/<run_id>.out|.err (sem guardar em memoria). Recusa com STOP ou com outra
-    execucao do mesmo agente (run/<agente>.json); para com timeout ou se STOP aparecer (conferido a cada 1s).
-    Sempre grava runs/AAAA-MM/<run_id>.json e solta a trava no finally."""
+    stdout/stderr direto em runs/AAAA-MM/<run_id>.out|.err (sem guardar em memoria). Recusa com STOP, com o
+    orcamento esgotado (etapa 7: run_budget_cap de project/mission <= 0) ou com outra execucao do mesmo agente
+    (run/<agente>.json); para com timeout ou se STOP aparecer (conferido a cada 1s). run_id: reusa o id do
+    chamador (etapa 7, para casar com o --session-id do argv) em vez de gerar um novo. mission/usage_file: so
+    gravados no registro (etapa 7/12; usage_file e o arquivo de uso do hermes). Sempre grava
+    runs/AAAA-MM/<run_id>.json e solta a trava no finally."""
     check_agent_name(agent)
-    t0 = time.time(); run_id = new_run_id(t0)
+    t0 = time.time(); run_id = run_id or new_run_id(t0)
     d = os.path.join(RUNS_DIR, time.strftime("%Y-%m", time.gmtime(t0))); os.makedirs(d, exist_ok=True)
     base = os.path.join(d, run_id); rec_p, out_p, err_p = base + ".json", base + ".out", base + ".err"
     prompt = stdin_text or ""
-    rec = {"v": 1, "run_id": run_id, "agent": agent, "project": project or "", "cwd": cwd,
+    rec = {"v": 1, "run_id": run_id, "agent": agent, "project": project or "", "mission": mission or "", "cwd": cwd,
            "argv": redact_argv(argv, prompt), "stdin": {"sha256": prompt_hash(prompt), "len": len(prompt)},
            "env_extra": sorted(env_extra or {}), "trigger_ids": list(trigger_ids or []), "host": HOST,
            "started": epoch_iso(t0), "ended": None, "duration_s": None, "timeout_s": timeout, "pid": None,
-           "exit_code": None, "outcome": "running", "reason": "",
+           "exit_code": None, "outcome": "running", "reason": "", "usage_file": usage_file or "",
            "stdout": os.path.relpath(out_p, HOME), "stderr": os.path.relpath(err_p, HOME), "stderr_tail": "", "usage": None}
     def finish(outcome, reason="", code=None):
         t1 = time.time()
@@ -4089,6 +4112,9 @@ def run_agent(agent, project, argv, cwd, stdin_text="", timeout=900, env_extra=N
         return RunResult(rec, rec_p, out_p, err_p)
     if os.path.exists(STOP_FILE):
         return finish("refused", f"{STOP_FILE} existe: nenhuma execucao nova (a2a watch resume --from {human_name()})")
+    if project or mission:
+        cap = run_budget_cap(project or None, mission or None, now=t0)
+        if cap <= 0: return finish("refused", "orcamento esgotado: nenhum valor disponivel para a proxima execucao")
     lock_p = os.path.join(RUN_DIR, agent + ".json")
     linfo = lock_info(kind="run", agent=agent, run_id=run_id, project=project or "")
     ok, cur = lock_acquire(lock_p, linfo)
@@ -4257,6 +4283,60 @@ def watch_supervisor(a):
             for _, i, stale in runs:
                 print(f"  {i.get('agent', '?'):<10} run {i.get('run_id', '?')} projeto {i.get('project') or '-'} "
                       f"pid {i.get('child_pid', '-')} ha {fmt_age(i.get('ts'))} ({'trava velha' if stale else 'rodando'})")
+    except DoveError as e: fail(f"erro: {e}")
+
+# ---- vigia real, so com o claude (etapa 7 da Fase 3; a2a watch --once, iniciado a mao)
+def watch_mission_for(task, missions):
+    """id da missao do gatilho escolhido (task_id dele), so se ela existir; senao ''."""
+    tid = (task or {}).get("task_id") or ""
+    return tid if tid in missions else ""
+def watch_job_for(d, msgs, missions):
+    """Job de run_agent (RunResult) a partir de uma decisao RODARIA do watch_plan: o mesmo prompt que a decisao usou
+    para o hash/tamanho, um run_id proprio (o --session-id do claude e um uuid5 derivado dele, nunca o run_id em si:
+    a flag exige um UUID), o orcamento da proxima execucao (run_budget_cap) e a missao do gatilho escolhido."""
+    task = find_message(d["prompt"]["task"])
+    mission = watch_mission_for(task, missions)
+    prefix = prompt_prefix(d["agent"], d["project"], d["agent"] if d["agent"] in PROMPT_RUNNERS else "")
+    text = prefix + prompt_tail(d["agent"], d["project"], task, msgs=msgs)
+    run_id = new_run_id()
+    session_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "dove-run:" + run_id))
+    cap = run_budget_cap(d["project"] or None, mission or None)
+    argv = resolve_runner(d["agent"], worktree=d["worktree"], run_id=session_id, budget=cap)
+    return {"agent": d["agent"], "project": d["project"], "argv": argv, "cwd": d["worktree"], "stdin_text": text,
+            "trigger_ids": d["triggers"], "run_id": run_id, "mission": mission}
+WATCH_ONCE_TAGS = {"ok": "rodou ", "error": "falhou", "timeout": "timeout", "stopped": "parou ", "refused": "recusou"}
+def watch_once_line(d, r):
+    out = f"{WATCH_ONCE_TAGS.get(r.outcome, r.outcome):<7} {r.agent} {d.get('project') or '-':<10} run {r.run_id}"
+    if r.exit_code is not None: out += f" codigo {r.exit_code}"
+    if r.reason: out += f" · {r.reason}"
+    return out
+def cmd_watch_once(a):
+    """a2a watch --once (sem --dry-run): roda de verdade as decisoes RODARIA do plano (hoje, so o claude). So o
+    humano (--from), nunca sob A2A_RUNNER (require_human); um vigia por maquina (WatchLock); sequencial
+    (max_parallel=1: nesta etapa so ha um agente habilitado). Por execucao: grava o consumo (watch_usage, ignorado
+    se a saida nao tiver uso reconhecivel) e, so entao, a pergunta unica de orcamento (budget_alert_notify)."""
+    try:
+        require_human(a._from)
+        with WatchLock():
+            now = time.time()
+            msgs, missions = loop_inputs()
+            ds = [d for d in watch_plan(now, a.project, a.agent, check_git=True) if d["action"] == "RODARIA"]
+            if not ds:
+                print("nada para rodar agora (a2a watch plan mostra o motivo de cada agente)"); return
+            jobs = [watch_job_for(d, msgs, missions) for d in ds]
+            results = run_jobs(jobs, max_parallel=1)
+            print(f"dove watch --once · {len(ds)} execucao(oes) - {now_iso()}")
+            alvos = set()
+            for d, j, r in zip(ds, jobs, results):
+                if isinstance(r, Exception): print(f"erro    {d['agent']} {d.get('project') or '-'}: {r}"); continue
+                print(watch_once_line(d, r))
+                if r.outcome == "ok":
+                    try: watch_usage(r.run_id)
+                    except DoveError: pass
+                alvos.add((d.get("project") or "", j.get("mission") or ""))
+            for proj, mission in alvos:
+                try: budget_alert_notify(project=proj or None, mission=mission or None, now=time.time())
+                except DoveError: pass
     except DoveError as e: fail(f"erro: {e}")
 
 # ---------------------------------------------------------------- consumo por execucao e orcamento (etapa 8 da Fase 3)
@@ -4605,6 +4685,31 @@ def budget_alerts(project=None, agent=None, now=None, missions=None, days=True):
         except DoveError: continue
         if st["has_budget"] and (st["warn"] or st["exceeded"]): out.append(budget_alert_line(st))
     return out
+BUDGET_ALERTS_LOG = os.path.join(HOME, "budget_alerts.json")  # chaves de alvo ja avisadas (etapa 7): nunca repete
+def budget_alert_key(st): return f"{st['scope']}:{st['id']}:{st['from']}"  # from = inicio da janela: distingue o dia/a missao
+def load_budget_alerts_log():
+    d = read_json(BUDGET_ALERTS_LOG, {}); d = d if isinstance(d, dict) else {}
+    if not isinstance(d.get("notified"), list): d["notified"] = []
+    return d
+def budget_alert_notify(project=None, mission=None, now=None, by="vigia"):
+    """Pergunta unica (de `by` para o humano) por alvo de orcamento (missao ou projeto/dia) em alerta/esgotado e
+    ainda nao avisado; chave = escopo+id+inicio da janela (nunca repete, mesmo quando a % sobe). Grava o aviso em
+    ~/.a2a/budget_alerts.json. Devolve as chaves novas avisadas nesta chamada (vazio = nada novo)."""
+    targets = [("missao", load_mission(mission))] if mission else budget_targets(project)
+    sent = []
+    os.makedirs(HOME, exist_ok=True)
+    with FileLock(BUDGET_ALERTS_LOG):
+        log = load_budget_alerts_log(); seen = set(log["notified"])
+        for kind, x in targets:
+            try: st = budget_status(mission=x, now=now) if kind == "missao" else budget_status(project=x, now=now)
+            except DoveError: continue
+            if not st["has_budget"] or not (st["warn"] or st["exceeded"]): continue
+            key = budget_alert_key(st)
+            if key in seen: continue
+            post_message(by, human_name(), budget_alert_line(st), kind="question", project=st.get("project") or "", auto_status=False)
+            seen.add(key); sent.append(key)
+        if sent: log["notified"] = sorted(seen); write_json(BUDGET_ALERTS_LOG, log)
+    return sent
 def cost_budget_lines(project=None, mission=None, now=None):
     if mission: targets = [("missao", load_mission(mission))]
     else: targets = budget_targets(project)
@@ -4873,15 +4978,17 @@ def build_parser():
     pm.add_argument("--max-tail-chars", dest="max_tail_chars", type=int, default=4000,
                     help="tamanho maximo da parte variavel (padrao 4000; 0 = sem corte)")
     pm.set_defaults(func=cmd_prompt)
-    wa = sub.add_parser("watch", help="vigia (Fase 3): pre-checagem, plano em simulacao, kill switch STOP, travas e registros",
-        description="watch check: pre-checagem so de leitura (veja a2a watch check --help). watch plan: o que o vigia rodaria "
-        "agora, em simulacao (nada e gravado nem executado); `a2a watch --dry-run --once` e o mesmo. Sem --dry-run o executor "
-        "real ainda nao existe (etapa 7): sai com codigo 2. Supervisor do vigia: cada execucao de agente roda com trava por agente (~/.a2a/run/<agente>.json), "
-        "timeout e controle da arvore de processos (Job Object no Windows, grupo de processos no POSIX), e deixa um registro "
-        "em ~/.a2a/runs/AAAA-MM/<run_id>.json (+ .out/.err). ~/.a2a/STOP e o kill switch: com ele nenhuma execucao nova "
-        "comeca e as em curso param em ate 1s (pedido educado, 5s de espera, depois a arvore inteira e morta). "
-        "O supervisor ainda nao roda executor real (claude/codex/hermes): so o executor de teste.", **ex(
-        "a2a watch plan", "a2a watch --dry-run --once --verbose",
+    wa = sub.add_parser("watch", help="vigia (Fase 3): pre-checagem, plano em simulacao, executor real (so claude), kill switch STOP",
+        description="watch check: pre-checagem so de leitura (veja a2a watch check --help). watch plan (ou a2a watch --dry-run "
+        "--once): o que o vigia rodaria agora, em simulacao (nada e gravado nem executado). a2a watch --once --from <humano>: "
+        "roda de verdade as decisoes RODARIA do plano (etapa 7: hoje so o claude; codex e hermes continuam recusados). Sem "
+        "--once, o vigia continuo ainda nao existe: sai com codigo 2. Cada execucao roda com trava por agente "
+        "(~/.a2a/run/<agente>.json), timeout, controle da arvore de processos (Job Object no Windows, grupo de processos no "
+        "POSIX) e orcamento (recusa se o restante for 0); deixa um registro em ~/.a2a/runs/AAAA-MM/<run_id>.json (+ .out/.err), "
+        "grava o consumo (a2a watch usage) e, so uma vez por alvo, uma pergunta ao humano quando o orcamento chega a 80%. "
+        "~/.a2a/STOP e o kill switch: com ele nenhuma execucao nova comeca e as em curso param em ate 1s (pedido educado, "
+        "5s de espera, depois a arvore inteira e morta).", **ex(
+        "a2a watch plan", "a2a watch --dry-run --once --verbose", "a2a watch --once --from luiz",
         "a2a watch check --project lagu", "a2a watch stop --from luiz", "a2a watch stop --from luiz --kill", "a2a watch resume --from luiz",
         "a2a watch status", "a2a watch runs --last 5", "a2a watch runs --agent codex --json",
         "a2a watch usage 20261019T153000Z-a1b2c3"))
@@ -4893,7 +5000,8 @@ def build_parser():
         x.add_argument("--check-git", dest="check_git", action="store_true",
                        help="confere se a copia esta limpa com `git status --porcelain` (unico processo que o plano roda)")
     wa.add_argument("--dry-run", dest="dry_run", action="store_true", help="com --once: o mesmo que a2a watch plan")
-    wa.add_argument("--once", action="store_true", help="processa a fila uma vez e sai (por enquanto so com --dry-run)")
+    wa.add_argument("--once", action="store_true", help="processa a fila uma vez e sai; sem --dry-run, roda de verdade (precisa de --from)")
+    wa.add_argument("--from", dest="_from", help="o humano (--once de verdade e so dele; ignorado com --dry-run)")
     plan_args(wa)
     was = wa.add_subparsers(dest="wcmd")
     x = was.add_parser("plan", help="o que o vigia rodaria agora, em simulacao: nada e gravado nem executado",
