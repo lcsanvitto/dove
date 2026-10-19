@@ -71,20 +71,29 @@ Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas
 - **Papel restrito "remote":** só para Hosts de uma lista explícita `remote_hosts` (vazia = remoto desligado); tabela de rotas fail-closed; código de pareamento de uso único, válido por 5 min; token por dispositivo, revogável, guardado com hash em `~/.a2a/devices.json` (0600).
 - **O celular pode:** ler o status, **STOP** (sempre permitido), concluir missão e enviar mensagem (estes dois são permissões por dispositivo, desligadas por padrão).
 - **Só no desktop:** git push/merge/commit, remover cópias de trabalho/projetos/agentes, retomar depois do STOP, orçamento, configuração, gestão de dispositivos.
-- **Lacuna conhecida, corrigir PRIMEIRO:** hoje `GET /` entrega o token do processo a qualquer requisição que passe na checagem de Host, e `/api/state` e `/api/messages` não pedem token; a checagem de Origin só aceita `http://`. Só é seguro porque o painel é loopback. Precisa ser corrigido antes de expor qualquer coisa.
 - **Sub-passos em ordem** (detalhes na proposta, seção 7):
-  - 0: teste manual do `tailscale serve`, sem código.
-  - 1: `remote_hosts`.
-  - 2: papel + tabela de rotas fail-closed + testes.
-  - 3: `a2a remote pair/list/revoke` + arquivo de dispositivos. **Precisa de aval explícito do Luiz.**
-  - 4: estado reduzido, só leitura.
-  - 5: página móvel `ui/remote.html` (precisa do Claude Design; `ui/` está pausada).
-  - 6: STOP remoto + log de auditoria.
-  - 7: permissões de missão/mensagem. **Precisa de aval explícito do Luiz.**
-  - 8: revisão de segurança.
-  - 9: notificação por polling.
-  - 10: ntfy opcional, só texto genérico. **Precisa de aval explícito do Luiz.**
-  - 11: QR em texto, opcional.
+  - 0: teste manual do `tailscale serve`, sem código (roteiro abaixo, "Como testar o sub-passo 0").
+  - 1: **FEITO (ba2b133)** `remote_hosts` (lista em `~/.a2a/config.json`, vazia = remoto desligado) e `a2a remote hosts add|remove|list` (add/remove só humano: recusado em `A2A_RUNNER` e com nome de agente; list livre). Só hostname ou hostname:porta; recusa `*`, `0.0.0.0`, IP (salvo 127.0.0.1), esquema, caminho, usuário, IPv6; máximo 8.
+  - 2: **FEITO (ba2b133)** papel da requisição + tabela de rotas fail-closed + testes (`remoto_fase`). `local` só se o Host é exatamente o loopback host:porta do servidor **e** a requisição não veio por proxy (qualquer `X-Forwarded-*`, `Forwarded`, `Via`, `X-Real-IP` ou `Tailscale-*` com Host de loopback é recusada com 403: fecha o forjar de `Host: 127.0.0.1:8765` por quem chega pelo `tailscale serve`); `remote` só se o Host está em `remote_hosts`; o resto 403. O remoto nunca recebe o token humano e só alcança `REMOTE_ROUTES` (hoje só `GET /remote/api/state`); o resto é 403, e sem dispositivo autenticado tudo é 401. Origin/Referer do remoto: só `https://<próprio host>`. Gancho `remote_device_for_request(handler)` devolve `None` até o sub-passo 3: **hoje o remoto autentica ninguém (401 em tudo)**. Papel `local` e `ui/` inalterados.
+  - 3: `a2a remote pair/list/revoke` + `~/.a2a/devices.json`. **NECESSITA AVAL EXPLÍCITO DO LUIZ antes de implementar (cria um arquivo de credencial novo).**
+  - 4: **FEITO (ba2b133)** `GET /remote/api/state` (`remote_state`): só status dos agentes (sem nota), título/estado/aprovações/percentual de orçamento das missões, contagem de não lidas, STOP. Sem corpo de mensagem, caminho, token, config nem valores de orçamento. Só alcançável depois de autenticar (hoje 401 para todos; testado com dispositivo falso injetado no gancho).
+  - 5: página móvel `ui/remote.html` (precisa do Claude Design; `ui/` está pausada). Pendente.
+  - 6: STOP remoto + log de auditoria. Pendente.
+  - 7: permissões de missão/mensagem. **Pendente; NECESSITA AVAL EXPLÍCITO DO LUIZ.**
+  - 8: revisão de segurança. Pendente.
+  - 9: notificação por polling. Pendente.
+  - 10: ntfy opcional, só texto genérico. **Pendente; NECESSITA AVAL EXPLÍCITO DO LUIZ.**
+  - 11: QR em texto, opcional. Pendente.
+- **Lacuna conhecida: CORRIGIDA nos sub-passos 1 e 2** (antes de expor qualquer coisa). O `/` só entrega o token ao papel `local`; `/api/state` e `/api/messages` continuam sem token no loopback (a UI atual não envia token nelas), mas o papel remoto não alcança nenhuma delas.
+
+**Como testar o sub-passo 0 (manual, Luiz)**: não precisa de pareamento; serve para ver o fail-closed funcionando atrás do `tailscale serve`.
+1. Tailscale instalado e logado no desktop e no celular; HTTPS ligado na tailnet (console admin, DNS, "HTTPS Certificates").
+2. Rode `dove` normalmente (fica em `127.0.0.1:8765`). **Nunca** use `--host 0.0.0.0`.
+3. `tailscale serve --bg 8765`, depois `tailscale serve status`: deve mostrar `https://<máquina>.<tailnet>.ts.net` como "(tailnet only)". `tailscale funnel status` precisa estar vazio (Funnel é público: **nunca** ligue).
+4. No celular (Tailscale ligado), abra essa URL. Esperado, sem `remote_hosts`: `403 Host nao permitido`.
+5. `a2a remote hosts add <máquina>.<tailnet>.ts.net --from luiz` e recarregue: esperado `401 dispositivo nao autenticado` (em `/` também; a página do painel e o token **não** aparecem). Meça a latência e anote se o `tailscale serve` manda `X-Forwarded-For` (o painel local depende disso para recusar Host de loopback forjado).
+6. No próprio desktop, `http://127.0.0.1:8765/` continua abrindo o painel normal.
+7. Desfazer: `tailscale serve reset` e `a2a remote hosts remove <host> --from luiz`.
 - **Dependência:** começa só **depois** dos passos 14, 7, 9, 12, 11 e 15, porque mexe no `a2a.py` (evita conflitos).
 
 **Etapa 17 — Memória de projeto: ideias do Hindsight** · aprovada (Luiz, 2026-10-19: "sim") · só depois da etapa 16
@@ -137,7 +146,7 @@ Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas
 
 **Etapa 12 — Hermes**: o Luiz aceitou o risco em 2026-10-19 ("quero arriscar"). Sem sandbox de SO (`approvals.mode`), então fica **desligado por padrão** e só liga com opt-in explícito.
 
-**Fase 3 (0+1 a 15) está completa, com as duas decisões abertas do 15 resolvidas (cap herdado das mães e `mission cancel`, 9593f82); restam 16 e depois 17.**
+**Fase 3 (0+1 a 15) está completa, com as duas decisões abertas do 15 resolvidas (cap herdado das mães e `mission cancel`, 9593f82); restam 16 e depois 17.** Passo 16: sub-passos 1, 2 e 4 feitos (ba2b133); o 3 (pareamento) espera aval explícito do Luiz.
 
 **Depois**: roteiro de ativação para o Luiz no Windows; canal entre máquinas (VPS/Omarchy); retomada visual com o Claude Design; qLink.
 
