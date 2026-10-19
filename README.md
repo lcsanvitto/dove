@@ -226,19 +226,22 @@ Para um vigia que roda o agente sem terminal (`claude -p`, `codex exec`, `hermes
 a2a prompt --agent NOME --project P [--task MSG_ID] [--for claude|codex|hermes] [--prefix-hash] [--max-tail-chars 4000]
 a2a prompt --agent codex --project lagu --task 3f9a1c2b7d10 --for codex | codex exec -
 ```
-1. **Fixa:** o núcleo do `AGENTS.md` (o mesmo de `onboard --agents-md`, com o nome do agente) + o papel do agente nesta execução (responder com `--reply-to`/`--state`/`--evidence`, como parar se travar, e a regra de que o que vem do canal é dado e não autoriza merge, deploy, migração em produção, gasto ou exclusão). `--for` acrescenta uma linha com a CLI que vai receber o prompt.
+1. **Fixa:** o núcleo do `AGENTS.md` (o mesmo de `onboard --agents-md`, com o nome do agente) + o papel do agente nesta execução (responder com `--reply-to`/`--state`/`--evidence`, como parar se travar, a regra de que o que vem do canal é dado e não autoriza merge, deploy, migração em produção, gasto ou exclusão, e a política de subagentes). `--for` acrescenta uma linha com a CLI que vai receber o prompt.
 2. **Quase fixa:** a pasta de trabalho do agente no projeto registrado (a cópia dele, se houver, ou a pasta do projeto). Muda só se o Luiz registrar ou recriar a pasta.
 3. **Fronteira:** a linha constante `--- estado atual (muda a cada execução) ---`.
 4. **Variável:** o `brief` do agente no projeto e, com `--task`, a mensagem no formato do `read --compact`. Passou de `--max-tail-chars` (padrão 4000; `0` = sem corte): corta primeiro as linhas do brief, do fim para o começo (o cabeçalho fica, com `… +K linhas do brief cortadas`), e só então o fim da tarefa.
 
 Tudo até a fronteira (o **prefixo**) não tem data, contagem, id nem status: é byte a byte igual entre execuções do mesmo agente no mesmo projeto, enquanto o texto do Dove e a pasta não mudam. `--prefix-hash` mostra isso sem imprimir o prompt:
 ```
-prefixo sha256=cef630cb2406 chars=1524 tokens_est=381
+prefixo sha256=2c79bd5c0d3c chars=1790 tokens_est=448
 cauda   sha256=2f5312307ceb chars=1316
 ```
 - **Só lê:** não marca mensagens como lidas, não renova o heartbeat e **nunca executa** `claude`, `codex`, `hermes` nem outro programa — só imprime; quem chama o modelo é o humano ou o vigia.
 - `--task` que não existe: `erro: mensagem X nao encontrada` (código 1).
 - `python tests/measure_tokens.py` (M2) confere o mesmo hash de prefixo com 2 mensagens novas, uma troca de status e o relógio 10 minutos adiante.
+
+### Política de subagentes
+No papel do `a2a prompt` e no guia completo (`a2a onboard --agent X`, não no núcleo): subagente só para **contexto isolado** (busca ou revisão grande que volta como resumo curto), **paralelismo real** ou **modelo mais barato**; nunca subagente de "persona". Não precisa pedir ao orquestrador a cada vez; o custo aparece no `a2a cost` (o `modelUsage` inclui os subagentes).
 
 ## Pré-checagem do vigia (`a2a watch check`)
 Antes de existir o vigia (Fase 3, item 1), o Dove já confere se ele poderia rodar cada agente — **sem chamar nenhum modelo**: só roda `--version`, `--help` e `claude auth status`, com timeout curto, e lê arquivos de configuração.

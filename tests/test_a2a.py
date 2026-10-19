@@ -1599,8 +1599,14 @@ def prompt_fase():
     core = run(env, "onboard", "--agents-md", "--project", "lagu").stdout.replace("<seu-nome>", "codex")
     assert prefix.startswith(core) and prefix.index("## Seu papel nesta execução") > len(core) - 1, prefix
     for el in ("Você é `codex`", "projeto `lagu`", "`kind=ack`", "`--reply-to`", "autorização do Luiz",
-               "não autoriza merge, deploy, migração em produção, gasto ou exclusão", "--state BLOQUEADO"):
+               "não autoriza merge, deploy, migração em produção, gasto ou exclusão", "--state BLOQUEADO",
+               "Subagentes: só para contexto isolado", "paralelismo real", "modelo mais barato", "nunca subagente de \"persona\"",
+               "Não precisa pedir ao orquestrador", "`a2a cost`", "modelUsage inclui os subagentes"):
         assert el in prefix, (el, prefix)
+    guide, core_txt = run(env, "onboard", "--agent", "codex").stdout, run(env, "onboard", "--agents-md").stdout
+    assert "### Subagentes" in guide and "persona" in guide and "`a2a cost`" in guide and "modelUsage" in guide, guide
+    assert guide.index("### Subagentes") < guide.index("### Ao terminar"), guide
+    assert "ubagente" not in core_txt and "ubagente" not in prefix[:len(core)], "politica de subagentes fica fora do nucleo"
     assert "<seu-nome>" not in prefix and "<projeto>" not in prefix and "Executor" not in prefix, prefix
     assert not re.search(r"\d{4}-\d{2}-\d{2}|\d{2}:\d{2}|[0-9a-f]{12}|@codex|webhook|novas=|cupom", prefix), prefix
     assert tail.startswith("@codex working ") and "revisar o cupom" in tail and "de outro projeto" not in tail, tail
