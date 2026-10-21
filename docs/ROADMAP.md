@@ -2,7 +2,7 @@
 
 > **Sessão nova? Comece por [`docs/HANDOFF.md`](HANDOFF.md)** — contexto, regras e próximos passos para retomar sem reexplicar.
 
-Estado em 2026-10-21 · base `main` em de52b99 · etapas 18, 19 e 20 aprovadas e pendentes.
+Estado em 2026-10-21 · base `main` em de52b99 · etapas 18, 19, 20 e 21 aprovadas e pendentes.
 
 ## 1. O que é o Dove
 Canal A2A local e global: os agentes (`claude`, `codex`, `hermes`) conversam e dividem trabalho por arquivos JSON em `~/.a2a`, sem nuvem.
@@ -69,10 +69,11 @@ Todos os passos têm aval do Luiz; o 12 foi aceito com risco em 2026-10-19 (desl
 | 18 | `a2a worktree create` copia arquivos ignorados listados num `.worktreeinclude` (só caminhos literais, stdlib) | **APROVADO** (Luiz, 2026-10-21: "sim") · pendente, só depois do 17 |
 | 19 | Nota de checkpoint por worktree (`a2a worktree set --comment`), reaproveitando o campo de status | **APROVADO** (Luiz, 2026-10-21: "sim") · pendente, só depois do 18 |
 | 20 | Painel em dois níveis de kanban, inspirado na interface do Orca (modelo de interação, não código) | **APROVADO** (Luiz, 2026-10-21: "sim" + nova direção para a interface) · **aguardando retomada da interface** |
+| 21 | Dove no Linux (Omarchy): checagem e migração | **APROVADO** (Luiz, 2026-10-21: "sim") · pendente, só depois do 20 · etapa de verificação, não bloqueia a Fase 3 |
 
 Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"). O passo 14 entrou depois (38d8b13) como **emenda** ao 7, não como pré-requisito: hoje o vigia acorda **só o `assignee`** quando ele está definido numa missão ou tarefa; sem o campo, continua acordando todo participante elegível, como antes. O passo 9 (96e904c) já usou a 7 atual para liberar o codex. O passo 12 (f95a7b0) acrescentou o opt-in do hermes, independente dos demais. O passo 11 (fc7eca4) só propõe e manda mensagem — não toca em missão nem em `parent` — então não precisou esperar a 15. O passo 15 (f48f101) fechou os passos da Fase 3 (0+1 a 15 **FEITOS**); restam 16 e 17.
 
-Ordem restante: **16 → 17 → 18 → 19 → 20** (17 só depois do 16; 18, 19 e 20 depois do 17, nessa ordem; o 20 também espera a retomada da `ui/`).
+Ordem restante: **16 → 17 → 18 → 19 → 20 → 21** (17 só depois do 16; 18, 19 e 20 depois do 17, nessa ordem; o 20 também espera a retomada da `ui/`; o 21 depois do 20).
 
 **Passo 9 — Codex no vigia** (**FEITO**, 96e904c):
 - `codex exec --json -s workspace-write -C <cópia> --add-dir <A2A_HOME> -` (já estava na tabela desde a etapa 7; só faltava liberar o gatilho).
@@ -163,6 +164,23 @@ Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas
 - **Subtrair antes de concluir o passo** (partes arriscadas do Orca): sem modos de bypass/yolo, sem confiança de workspace pré-autorizada, sem servidor HTTP local de hooks, sem relay, sem telemetria ligada por padrão.
 - **Dependências:** passo 16 (papel `remote`, para a visão do celular) e a `ui/` saindo da pausa.
 
+**Passo 21 — Dove no Linux (Omarchy): checagem e migração** (aprovado pelo Luiz em 2026-10-21: "sim") · pendente
+- **Objetivo:** rodar o Dove no Omarchy (Linux baseado em Arch) depois que a instalação no Windows estiver estável. O Luiz planeja mudar a máquina para o Omarchy porque o Orca roda bem lá.
+- **Portabilidade:** o Dove é só stdlib do Python, então o núcleo roda em qualquer Linux com Python 3. Não se aplicam as partes só do Windows: `install.ps1`, os shims `.cmd`, as regras de PowerShell na allowlist do vigia e o controle de processo por Job Object do Windows. O vigia no Linux precisa de um caminho próprio de controle de processo, **verificado** (testar, não presumir).
+- **Migração:** copiar a pasta inteira `~/.a2a` (bus, missões, memória, orçamentos, runs) e depois rodar `install.sh`. Manter os dados do Windows até a checagem no Linux passar.
+- **Checklist** (no Omarchy, **sem nenhum run real de agente**):
+  1. `which a2a` aponta para o Dove, não para outra ferramenta.
+  2. `python3 --version` é 3.8 ou superior.
+  3. `python3 a2a.py --version` imprime `dove 0.6.0`.
+  4. Suíte de testes passa: `python3 tests/test_a2a.py`.
+  5. `a2a watch check` reporta as flags de CLI do Claude Code, Codex e Hermes como descrito na documentação. Flags a verificar: `claude --permission-prompts` / `--permission-mode` / `--allowedTools`; configurações de sandbox do `codex exec`; `hermes chat --oneshot`.
+  6. Controle de processo do vigia verificado com um agente falso que dorme e é parado pelo STOP e pelo timeout.
+  7. Arquivo STOP bloqueia um run.
+  8. Comando só-humano é recusado sob `A2A_RUNNER`.
+- **Só depois do checklist passar:** primeiro run real, só com o `claude`, supervisionado, com o STOP à mão.
+- **Diferenças Windows/Linux:** permissões de arquivo, caminhos (barras invertidas) e finais de linha (CRLF, via `.gitattributes`) devem ser conferidos no clone do Linux.
+- **Dependências:** nenhum código da Fase 3 fica bloqueado por esta etapa; é uma etapa de verificação. Na ordem: 15 → 16 → 17 → 18 → 19 → 20 → 21.
+
 **Nota do passo 7 (implementado em 396cfd5)**:
 - `"mission"` e `"usage_file"` (Hermes) gravados nos registros de run.
 - `parse_run_usage()` chamado logo depois de `run_agent()`.
@@ -197,7 +215,7 @@ Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas
 - ~~Propagação do teto da mãe para a filha~~ e ~~`mission cancel`~~: feitos (9593f82), ver passo 15.
 - Rollup de gasto recursivo (neta na avó): hoje só 1 nível; se importar, tornar `mission_children` recursivo em `budget_status`/`cost_data`.
 - Primeira ativação no Windows: ver checklist no `docs/HANDOFF.md` (`a2a` do Dove no PATH, não o qlink; `a2a watch check`; sandbox `[windows]` do codex; primeiro run real só com o claude, PARAR na mão).
-- Falta rodar a fase 16, depois a 17, 18, 19 e 20 (ordem restante: 16 → 17 → 18 → 19 → 20; o 20 aguarda a retomada da `ui/`).
+- Falta rodar a fase 16, depois a 17, 18, 19, 20 e 21 (ordem restante: 16 → 17 → 18 → 19 → 20 → 21; o 20 aguarda a retomada da `ui/`; o 21 é a checagem no Omarchy, sem run real até o checklist passar).
 
 ## 6. Depois da Fase 3
 - Canal entre máquinas: VPS Ubuntu 24.04 + Omarchy + Windows.

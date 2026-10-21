@@ -7,7 +7,7 @@ Para uma sessão nova retomar sem reexplicar nada. Estado detalhado: [`docs/ROAD
 - Usuário: Luiz, no Windows (`C:\Users\Dell`); projetos em `C:\Users\Dell\Cowork\Codigo` (ex.: `lagu`).
 - Também usa uma VPS Ubuntu 24.04 e uma máquina com Omarchy (canal entre máquinas ainda não existe).
 - Agentes no canal: `claude` (Claude Code), `codex` (Codex), `hermes` (Hermes).
-- Fase atual: Fase 3 (orquestrador/vigia) — **completa**. Feitos 0+1, 2, 3 (75c979d), 4, 5, 6, 7 (396cfd5), 8 (7fca4c3), 9 (`codex` no vigia, 96e904c), 10, 11 (orquestrador, fc7eca4), 12 (hermes no vigia, opt-in, f95a7b0), 13, 14 (`assignee`, 38d8b13 — emenda ao 7), 15 (`parent`, f48f101). O 7 foi feito **sem** esperar o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"); o 14 entrou depois como emenda — o vigia agora acorda só o `assignee` quando ele está definido, e todo participante elegível quando não está (como antes). O 11 saiu sem esperar o 15 (só propõe e manda mensagem, não toca em missão/`parent`). Aprovados também: 16 (controle remoto pelo celular), só depois de todos esses; e 17 (memória de projeto, ideias do Hindsight), só depois do 16. Ordem restante: 16 → 17 → 18 → 19 → 20. Aprovadas em 2026-10-21: 18 (`.worktreeinclude`), 19 (nota de checkpoint) e 20 (kanban em dois níveis, inspirado no Orca; aguarda a retomada da `ui/`).
+- Fase atual: Fase 3 (orquestrador/vigia) — **completa**. Feitos 0+1, 2, 3 (75c979d), 4, 5, 6, 7 (396cfd5), 8 (7fca4c3), 9 (`codex` no vigia, 96e904c), 10, 11 (orquestrador, fc7eca4), 12 (hermes no vigia, opt-in, f95a7b0), 13, 14 (`assignee`, 38d8b13 — emenda ao 7), 15 (`parent`, f48f101). O 7 foi feito **sem** esperar o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"); o 14 entrou depois como emenda — o vigia agora acorda só o `assignee` quando ele está definido, e todo participante elegível quando não está (como antes). O 11 saiu sem esperar o 15 (só propõe e manda mensagem, não toca em missão/`parent`). Aprovados também: 16 (controle remoto pelo celular), só depois de todos esses; e 17 (memória de projeto, ideias do Hindsight), só depois do 16. Ordem restante: 16 → 17 → 18 → 19 → 20 → 21. Aprovadas em 2026-10-21: 18 (`.worktreeinclude`), 19 (nota de checkpoint), 20 (kanban em dois níveis, inspirado no Orca; aguarda a retomada da `ui/`) e 21 (Dove no Omarchy: checagem e migração, depois do 20).
 
 ## Regras do projeto
 - Só stdlib.
@@ -118,6 +118,23 @@ Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas
 - **Subtrair antes de concluir o passo:** sem modos de bypass/yolo, sem confiança de workspace pré-autorizada, sem servidor HTTP local de hooks, sem relay, sem telemetria ligada por padrão.
 - **Dependências:** etapa 16 (papel `remote`, para a visão do celular) e a `ui/` saindo da pausa.
 
+**Etapa 21 — Dove no Linux (Omarchy): checagem e migração** · aprovada (Luiz, 2026-10-21: "sim") · pendente, só depois da etapa 20
+- **Objetivo:** rodar o Dove no Omarchy (Linux baseado em Arch) depois que a instalação no Windows estiver estável. O Luiz planeja mudar a máquina para o Omarchy porque o Orca roda bem lá.
+- **Portabilidade:** o Dove é só stdlib do Python, então o núcleo roda em qualquer Linux com Python 3. Não se aplicam as partes só do Windows: `install.ps1`, os shims `.cmd`, as regras de PowerShell na allowlist do vigia e o controle de processo por Job Object do Windows. O vigia no Linux precisa de um caminho próprio de controle de processo, **verificado** (testar, não presumir).
+- **Migração:** copiar a pasta inteira `~/.a2a` (bus, missões, memória, orçamentos, runs) e depois rodar `install.sh`. Manter os dados do Windows até a checagem no Linux passar.
+- **Checklist** (no Omarchy, **sem nenhum run real de agente**):
+  1. `which a2a` aponta para o Dove, não para outra ferramenta.
+  2. `python3 --version` é 3.8 ou superior.
+  3. `python3 a2a.py --version` imprime `dove 0.6.0`.
+  4. Suíte de testes passa: `python3 tests/test_a2a.py`.
+  5. `a2a watch check` reporta as flags de CLI do Claude Code, Codex e Hermes como descrito na documentação. Flags a verificar: `claude --permission-prompts` / `--permission-mode` / `--allowedTools`; configurações de sandbox do `codex exec`; `hermes chat --oneshot`.
+  6. Controle de processo do vigia verificado com um agente falso que dorme e é parado pelo STOP e pelo timeout.
+  7. Arquivo STOP bloqueia um run.
+  8. Comando só-humano é recusado sob `A2A_RUNNER`.
+- **Só depois do checklist passar:** primeiro run real, só com o `claude`, supervisionado, com o STOP à mão.
+- **Diferenças Windows/Linux:** permissões de arquivo, caminhos (barras invertidas) e finais de linha (CRLF, via `.gitattributes`) devem ser conferidos no clone do Linux.
+- **Dependências:** nenhum código da Fase 3 fica bloqueado por esta etapa; é uma etapa de verificação.
+
 **Etapa 12 — Hermes**: o Luiz aceitou o risco em 2026-10-19 ("quero arriscar"). Sem sandbox de SO (`approvals.mode`), então fica **desligado por padrão** e só liga com opt-in explícito.
 
 **Fase 3 (0+1 a 15) está completa, com as duas decisões abertas do 15 resolvidas (cap herdado das mães e `mission cancel`, 9593f82); restam 16 e depois 17.**
@@ -154,6 +171,7 @@ dove   # painel
 - `a2a map` adiado até medir com `a2a cost`.
 - Instruções globais (`a2a instructions`) em vez de AGENTS.md por repositório (PR lagu #38 fechado).
 - Hermes sem instruções globais por padrão.
+- Etapa 21 (Dove no Omarchy: checagem e migração) aprovada pelo Luiz em 2026-10-21 ("sim"): só checagem antes de qualquer run real; primeiro run só com o `claude`, supervisionado.
 - Hermes no vigia (12, **FEITO**, f95a7b0): risco aceito pelo Luiz (2026-10-19); desligado por padrão, liga só com `a2a watch hermes --enable --from <humano>`.
 - Orquestrador (11, **FEITO**, fc7eca4): agente comum, restrito a leitura + `a2a send/brief/read/status/fact`; nunca vota/aprova/conclui missão nem merge/deploy/gasto/exclusão; pasta própria, sem cópia de projeto.
 - TOON, memória vetorial/GraphRAG, SupervisorAgent e mcp-compressor não adotados.
