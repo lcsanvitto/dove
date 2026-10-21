@@ -2,7 +2,7 @@
 
 > **Sessão nova? Comece por [`docs/HANDOFF.md`](HANDOFF.md)** — contexto, regras e próximos passos para retomar sem reexplicar.
 
-Estado em 2026-10-19 · base `main` em f48f101.
+Estado em 2026-10-21 · base `main` em de52b99 · etapas 18, 19 e 20 aprovadas e pendentes.
 
 ## 1. O que é o Dove
 Canal A2A local e global: os agentes (`claude`, `codex`, `hermes`) conversam e dividem trabalho por arquivos JSON em `~/.a2a`, sem nuvem.
@@ -66,10 +66,13 @@ Todos os passos têm aval do Luiz; o 12 foi aceito com risco em 2026-10-19 (desl
 | 15 | `parent` (missão-mãe) em missões | **FEITO** · f48f101 |
 | 16 | Controle remoto pelo celular (`tailscale serve`, papel `remote`) | **APROVADO** (Luiz, 2026-10-19: "Sim", MUITO IMPORTANTE) · só depois de 14, 7, 9, 12, 11 e 15 |
 | 17 | Memória de projeto: ideias do Hindsight (`a2a fact`/`brief`) | **APROVADO** (Luiz, 2026-10-19: "sim") · só depois do 16 |
+| 18 | `a2a worktree create` copia arquivos ignorados listados num `.worktreeinclude` (só caminhos literais, stdlib) | **APROVADO** (Luiz, 2026-10-21: "sim") · pendente, só depois do 17 |
+| 19 | Nota de checkpoint por worktree (`a2a worktree set --comment`), reaproveitando o campo de status | **APROVADO** (Luiz, 2026-10-21: "sim") · pendente, só depois do 18 |
+| 20 | Painel em dois níveis de kanban, inspirado na interface do Orca (modelo de interação, não código) | **APROVADO** (Luiz, 2026-10-21: "sim" + nova direção para a interface) · **aguardando retomada da interface** |
 
 Ordem de dependência (revista em 396cfd5): o passo 7 foi feito **sem esperar** o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"). O passo 14 entrou depois (38d8b13) como **emenda** ao 7, não como pré-requisito: hoje o vigia acorda **só o `assignee`** quando ele está definido numa missão ou tarefa; sem o campo, continua acordando todo participante elegível, como antes. O passo 9 (96e904c) já usou a 7 atual para liberar o codex. O passo 12 (f95a7b0) acrescentou o opt-in do hermes, independente dos demais. O passo 11 (fc7eca4) só propõe e manda mensagem — não toca em missão nem em `parent` — então não precisou esperar a 15. O passo 15 (f48f101) fechou os passos da Fase 3 (0+1 a 15 **FEITOS**); restam 16 e 17.
 
-Ordem restante: **16 → 17** (17 só depois do 16).
+Ordem restante: **16 → 17 → 18 → 19 → 20** (17 só depois do 16; 18, 19 e 20 depois do 17, nessa ordem; o 20 também espera a retomada da `ui/`).
 
 **Passo 9 — Codex no vigia** (**FEITO**, 96e904c):
 - `codex exec --json -s workspace-write -C <cópia> --add-dir <A2A_HOME> -` (já estava na tabela desde a etapa 7; só faltava liberar o gatilho).
@@ -141,6 +144,25 @@ Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas
 - **Reabrir só se** a memória chegar a milhares de fatos e o filtro por tipo/tag deixar de bastar; aí testar o Hindsight isolado como serviço opcional (modo chunks sem LLM, `max_tokens` baixo, medir antes).
 - **Dependência:** começa só **depois** do passo 16, porque mexe no `a2a.py` (evita conflitos).
 
+**Passo 18 — `a2a worktree create` copia arquivos ignorados** (aprovado pelo Luiz em 2026-10-21: "sim")
+- **Ideia (Orca, `.worktreeinclude`, MIT):** um arquivo `.worktreeinclude` na raiz do projeto lista arquivos ignorados pelo git (ex.: configs locais) que `a2a worktree create` copia para a cópia de trabalho nova.
+- **Escopo:** só caminhos literais, um por linha; sem globs, sem scripts, sem comandos. Só stdlib, sem tokens extras. Sem o arquivo, nada muda.
+- **Esforço:** pequeno. Não conflita com nenhum princípio do projeto.
+- **Dependência:** começa só **depois** do passo 17, porque mexe no `a2a.py` (evita conflitos).
+
+**Passo 19 — Nota de checkpoint por worktree** (aprovado pelo Luiz em 2026-10-21: "sim")
+- **Ideia:** `a2a worktree set --comment "<texto>"` grava uma nota de checkpoint na cópia de trabalho, reaproveitando o campo de status que já existe, **sem mudar o envelope**.
+- **Já coberto em parte:** `a2a status --note` faz o registro por agente; o que falta é a nota presa à cópia de trabalho.
+- **Esforço:** pequeno.
+- **Dependência:** começa só **depois** do passo 18.
+
+**Passo 20 — Painel em dois níveis de kanban, inspirado na interface do Orca** (aprovado pelo Luiz em 2026-10-21: "sim" + nova direção para a interface) · **aguardando retomada da interface**
+- **Decisão:** copiar o **modelo de interação** do Orca (dois níveis de kanban, navegação, estados), **não o código**. O Orca é Electron/React/TypeScript e traria uma stack inteira para um projeto de stdlib e arquivo único.
+- **Implementação:** HTML puro dentro do `ui/` existente, quando o trabalho visual for retomado; a estética fica com o Claude Design.
+- **Licença:** se algum código do Orca for copiado um dia, manter o aviso de copyright MIT no cabeçalho do arquivo e no `NOTICE`.
+- **Subtrair antes de concluir o passo** (partes arriscadas do Orca): sem modos de bypass/yolo, sem confiança de workspace pré-autorizada, sem servidor HTTP local de hooks, sem relay, sem telemetria ligada por padrão.
+- **Dependências:** passo 16 (papel `remote`, para a visão do celular) e a `ui/` saindo da pausa.
+
 **Nota do passo 7 (implementado em 396cfd5)**:
 - `"mission"` e `"usage_file"` (Hermes) gravados nos registros de run.
 - `parse_run_usage()` chamado logo depois de `run_agent()`.
@@ -165,6 +187,7 @@ Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas
 - Controle remoto pelo celular (passo 16): aprovado pelo Luiz em 2026-10-19 ("Sim", MUITO IMPORTANTE), nos termos acima; `tailscale serve`, nunca Funnel/túnel público.
 - Memória de projeto (passo 17): aprovado pelo Luiz em 2026-10-19 ("sim"); só ideias do Hindsight, produto não adotado; só depois do 16.
 - **Descartados** explicitamente: prioridade, tags, dependências entre tarefas e qualquer coisa que o agente já leia no texto da missão.
+- 2026-10-21: UI do Orca como inspiração (kanban em dois níveis); copiar o modelo de interação, não o código Electron; subtrair modos de bypass, relay e telemetria antes de qualquer uso.
 
 **Pendentes**
 - Teste manual do vigia (passo 7) com o `claude` real, acompanhado pelo Luiz (os testes automáticos usam executor falso).
@@ -174,7 +197,7 @@ Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas
 - ~~Propagação do teto da mãe para a filha~~ e ~~`mission cancel`~~: feitos (9593f82), ver passo 15.
 - Rollup de gasto recursivo (neta na avó): hoje só 1 nível; se importar, tornar `mission_children` recursivo em `budget_status`/`cost_data`.
 - Primeira ativação no Windows: ver checklist no `docs/HANDOFF.md` (`a2a` do Dove no PATH, não o qlink; `a2a watch check`; sandbox `[windows]` do codex; primeiro run real só com o claude, PARAR na mão).
-- Falta rodar a fase 16, depois a 17 (ordem restante: 16 → 17).
+- Falta rodar a fase 16, depois a 17, 18, 19 e 20 (ordem restante: 16 → 17 → 18 → 19 → 20; o 20 aguarda a retomada da `ui/`).
 
 ## 6. Depois da Fase 3
 - Canal entre máquinas: VPS Ubuntu 24.04 + Omarchy + Windows.

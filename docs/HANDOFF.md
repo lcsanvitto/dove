@@ -1,4 +1,4 @@
-# Handoff do Dove — 2026-10-19
+# Handoff do Dove — 2026-10-21
 
 Para uma sessão nova retomar sem reexplicar nada. Estado detalhado: [`docs/ROADMAP.md`](ROADMAP.md).
 
@@ -7,7 +7,7 @@ Para uma sessão nova retomar sem reexplicar nada. Estado detalhado: [`docs/ROAD
 - Usuário: Luiz, no Windows (`C:\Users\Dell`); projetos em `C:\Users\Dell\Cowork\Codigo` (ex.: `lagu`).
 - Também usa uma VPS Ubuntu 24.04 e uma máquina com Omarchy (canal entre máquinas ainda não existe).
 - Agentes no canal: `claude` (Claude Code), `codex` (Codex), `hermes` (Hermes).
-- Fase atual: Fase 3 (orquestrador/vigia) — **completa**. Feitos 0+1, 2, 3 (75c979d), 4, 5, 6, 7 (396cfd5), 8 (7fca4c3), 9 (`codex` no vigia, 96e904c), 10, 11 (orquestrador, fc7eca4), 12 (hermes no vigia, opt-in, f95a7b0), 13, 14 (`assignee`, 38d8b13 — emenda ao 7), 15 (`parent`, f48f101). O 7 foi feito **sem** esperar o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"); o 14 entrou depois como emenda — o vigia agora acorda só o `assignee` quando ele está definido, e todo participante elegível quando não está (como antes). O 11 saiu sem esperar o 15 (só propõe e manda mensagem, não toca em missão/`parent`). Aprovados também: 16 (controle remoto pelo celular), só depois de todos esses; e 17 (memória de projeto, ideias do Hindsight), só depois do 16. Ordem restante: 16 → 17.
+- Fase atual: Fase 3 (orquestrador/vigia) — **completa**. Feitos 0+1, 2, 3 (75c979d), 4, 5, 6, 7 (396cfd5), 8 (7fca4c3), 9 (`codex` no vigia, 96e904c), 10, 11 (orquestrador, fc7eca4), 12 (hermes no vigia, opt-in, f95a7b0), 13, 14 (`assignee`, 38d8b13 — emenda ao 7), 15 (`parent`, f48f101). O 7 foi feito **sem** esperar o 14 (decisão do Luiz, 2026-10-19: "Comitar a 7 como está agora"); o 14 entrou depois como emenda — o vigia agora acorda só o `assignee` quando ele está definido, e todo participante elegível quando não está (como antes). O 11 saiu sem esperar o 15 (só propõe e manda mensagem, não toca em missão/`parent`). Aprovados também: 16 (controle remoto pelo celular), só depois de todos esses; e 17 (memória de projeto, ideias do Hindsight), só depois do 16. Ordem restante: 16 → 17 → 18 → 19 → 20. Aprovadas em 2026-10-21: 18 (`.worktreeinclude`), 19 (nota de checkpoint) e 20 (kanban em dois níveis, inspirado no Orca; aguarda a retomada da `ui/`).
 
 ## Regras do projeto
 - Só stdlib.
@@ -100,6 +100,24 @@ Proposta: [`docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`](propostas
 - **Reabrir só se** a memória chegar a milhares de fatos e o filtro por tipo/tag deixar de bastar; aí testar o Hindsight isolado como serviço opcional (modo chunks sem LLM, `max_tokens` baixo, medir antes).
 - **Dependência:** começa só **depois** do passo 16, porque mexe no `a2a.py` (evita conflitos).
 
+**Etapa 18 — `a2a worktree create` copia arquivos ignorados** · aprovada (Luiz, 2026-10-21: "sim") · só depois da etapa 17
+- **Ideia (Orca, `.worktreeinclude`, MIT):** um `.worktreeinclude` na raiz do projeto lista arquivos ignorados pelo git (ex.: configs locais) que `a2a worktree create` copia para a cópia de trabalho nova.
+- **Escopo:** só caminhos literais, um por linha; sem globs, sem scripts, sem comandos. Só stdlib, sem tokens extras. Sem o arquivo, nada muda.
+- **Esforço:** pequeno. Não conflita com nenhum princípio do projeto.
+- **Dependência:** começa só depois da etapa 17 (mexe no `a2a.py`).
+
+**Etapa 19 — Nota de checkpoint por worktree** · aprovada (Luiz, 2026-10-21: "sim") · só depois da etapa 18
+- **Ideia:** `a2a worktree set --comment "<texto>"` grava uma nota de checkpoint na cópia de trabalho, reaproveitando o campo de status existente, **sem mudar o envelope**.
+- **Já coberto em parte:** `a2a status --note` faz o registro por agente; falta a nota presa à cópia de trabalho.
+- **Esforço:** pequeno.
+
+**Etapa 20 — Painel em dois níveis de kanban, inspirado no Orca** · aprovada (Luiz, 2026-10-21: "sim" + nova direção para a interface) · **aguardando retomada da interface**
+- **Decisão:** copiar o **modelo de interação** do Orca (dois níveis de kanban, navegação, estados), **não o código**. O Orca é Electron/React/TypeScript e traria uma stack inteira para um projeto de stdlib e arquivo único.
+- **Implementação:** HTML puro dentro do `ui/` existente, quando o trabalho visual for retomado; a estética fica com o Claude Design.
+- **Licença:** se algum código do Orca for copiado um dia, manter o aviso MIT no cabeçalho do arquivo e no `NOTICE`.
+- **Subtrair antes de concluir o passo:** sem modos de bypass/yolo, sem confiança de workspace pré-autorizada, sem servidor HTTP local de hooks, sem relay, sem telemetria ligada por padrão.
+- **Dependências:** etapa 16 (papel `remote`, para a visão do celular) e a `ui/` saindo da pausa.
+
 **Etapa 12 — Hermes**: o Luiz aceitou o risco em 2026-10-19 ("quero arriscar"). Sem sandbox de SO (`approvals.mode`), então fica **desligado por padrão** e só liga com opt-in explícito.
 
 **Fase 3 (0+1 a 15) está completa, com as duas decisões abertas do 15 resolvidas (cap herdado das mães e `mission cancel`, 9593f82); restam 16 e depois 17.**
@@ -144,6 +162,7 @@ dove   # painel
 - `assignee` (14, FEITO 38d8b13) e `parent` (15, FEITO f48f101) aprovados pelo Luiz em 2026-10-19 ("sim"). Descartados: prioridade, tags, dependências entre tarefas e qualquer coisa que o agente já leia no texto da missão.
 - Etapa 7 comitada sem esperar a 14 (Luiz, 2026-10-19: "Comitar a 7 como está agora"): o vigia acorda todos os participantes elegíveis até a 14 entrar como emenda.
 - Etapa 14 (`assignee`) feita (38d8b13): restrição de estado (`EM_EXECUCAO`/`AGUARDANDO_APROVACAO`) e filtro do vigia ligados só quando o campo está definido; sem ele, nada muda. Uma mensagem do humano endereçada a um participante que não é o `assignee` de uma conversa com responsável definido não aciona esse participante (leitura literal do pedido do Luiz: "só o assignee marca/é acionado").
+- 2026-10-21: UI do Orca como inspiração (kanban em dois níveis); copiar o modelo de interação, não o código Electron; subtrair modos de bypass, relay e telemetria antes de qualquer uso.
 
 ## Onde estão as coisas
 - Propostas: `docs/propostas/` (controle remoto mobile: `docs/propostas/2026-10-19-orca-controle-remoto-mobile.md`).
