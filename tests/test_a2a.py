@@ -4143,6 +4143,181 @@ def remoto_fase():
           "reduzido (sem corpo, caminho, token, config, valores), Origin/Referer https so do proprio host, todas as rotas de escrita 403 sem efeito, "
           "HEAD/OPTIONS/PUT/DELETE/PATCH, linha absoluta, traversal; local inalterado")
 
+def pareamento_fase():
+    """Etapa 16, sub-passo 3: pareamento de dispositivos (dispositivos FALSOS, sem agente real). Codigo de uso unico, 5 min,
+    so humano, mostrado uma vez; resgate pelo papel remoto (rota publica so com Host em remote_hosts); token por dispositivo
+    guardado so como hash salgado em devices.json (0600 em POSIX); list/revoke so humano; 5 falhas em 10 min bloqueiam a
+    origem por 10 min. Servidor REAL (subprocesso) para o papel remoto e a rota de resgate."""
+    import importlib, stat
+    tmp = tempfile.mkdtemp()
+    base = {k: v for k, v in os.environ.items() if k not in ("A2A_RUNNER", "A2A_RUN_ID", "A2A_AGENT", "A2A_TESTING", "A2A_RUNNER_OVERRIDE")}
+    env = dict(base, A2A_HOME=tmp, PYTHONIOENCODING="utf-8", DOVE_NO_BROWSER="1")
+    renv = dict(env, A2A_RUNNER="watch")
+    def a2a(*args, code=0, e=None):
+        r = run(e or env, *args)
+        assert r.returncode == code, (args, r.returncode, r.stdout, r.stderr)
+        return r.stdout + r.stderr
+    DEV = os.path.join(tmp, "devices.json")
+    HOST = "celular-teste.tailnet.ts.net"
+    R = "/remote/api/pair"
+    devs_text = lambda: open(DEV, encoding="utf-8").read()
+    devs = lambda: json.load(open(DEV, encoding="utf-8"))
+    code_of = lambda out: re.search(r"codigo de pareamento: (\S+)", out).group(1)
+    def raw_post(port, path, data, ctype, host):
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        c.putrequest("POST", path, skip_host=True, skip_accept_encoding=True)
+        c.putheader("Host", host); c.putheader("Content-Type", ctype); c.putheader("Content-Length", str(len(data)))
+        c.endheaders(); c.send(data)
+        r = c.getresponse(); raw = r.read(); c.close()
+        return r.status, json.loads(raw.decode("utf-8"))
+    a2a("init"); a2a("join", "--agent", "claude"); a2a("join", "--agent", "codex")
+
+    # ---- CLI: so o humano; agentes recusados (codigo 1) e A2A_RUNNER recusado (codigo 2), sem gravar nada
+    for args in (("pair",), ("list",), ("revoke", "d-000000")):
+        assert "so o humano" in a2a("remote", *args, "--from", "claude", code=1), args
+        assert "so o humano" in a2a("remote", *args, "--from", "codex", code=1), args
+        assert "reservada ao humano" in a2a("remote", *args, "--from", "luiz", code=2, e=renv), args
+        assert "identidade do executor" in a2a("remote", *args, "--from", "luiz", code=2, e=dict(env, A2A_AGENT="claude", A2A_RUNNER="watch")), args
+    r = run(env, "remote", "pair"); assert r.returncode == 2 and "--from" in r.stderr, (r.returncode, r.stderr)  # --from obrigatorio
+    assert not os.path.exists(DEV), "recusa nao pode criar devices.json"
+    assert "nenhum dispositivo" in a2a("remote", "list", "--from", "luiz")
+    assert "nao encontrado" in a2a("remote", "revoke", "d-000000", "--from", "luiz", code=1)
+
+    # ---- gerar codigo: uma vez na saida, validade 5 min, nada em texto puro no arquivo
+    out = a2a("remote", "pair", "--from", "luiz")
+    code1 = code_of(out)
+    assert re.fullmatch(r"[A-Za-z0-9_-]{22}", code1), code1  # secrets.token_urlsafe(16)
+    assert "AVISO: remote_hosts esta vazio" in out  # sem host, o remoto segue desligado (so avisa)
+    d = devs(); assert d["devices"] == [] and set(d["pairing"]) == {"salt", "hash", "created", "expires", "by"} and d["pairing"]["by"] == "luiz"
+    assert code1 not in devs_text(), "codigo em texto puro no devices.json"
+    assert time.time() + 290 < d["pairing"]["expires"] <= time.time() + 301
+    assert code1 not in a2a("remote", "list", "--from", "luiz") and code1 not in a2a("remote", "hosts", "list")  # mostrado so uma vez
+    a2a("remote", "hosts", "add", HOST, "--from", "luiz")
+
+    port = free_port(); p, T = start_panel(env, port); H = f"127.0.0.1:{port}"
+    try:
+        # ---- rota publica: so com Host em remote_hosts; fora da lista 403 e o codigo NAO e consumido
+        body = {"code": code1, "name": "Celular Luiz"}
+        assert req(port, "POST", R, body, host="evil.com")[0] == 403
+        assert req(port, "POST", R, body, headers={"Origin": "https://evil.com"}, host=HOST)[0] == 403
+        code, j = req(port, "POST", R, body, host=H); assert code in (403, 404) and "token" not in j, (code, j)  # local: sem rota
+        assert "pairing" in devs() and devs()["pairing"] is not None, "codigo consumido por Host errado"
+        # formato errado nao conta e nao consome o codigo
+        assert req(port, "POST", R, {"code": code1, "name": "x" * 41}, host=HOST)[0] == 400
+        assert req(port, "POST", R, {"code": code1, "name": "nome\u0007"}, host=HOST)[0] == 400
+        assert req(port, "POST", R, {"code": code1, "name": "açao"}, host=HOST)[0] == 400  # so ASCII imprimivel
+        assert req(port, "POST", R, ["lista"], host=HOST)[0] == 400
+        assert raw_post(port, R, b"{nao json", "application/json", HOST)[0] == 400
+        assert raw_post(port, R, b'{"code":"x"}', "text/plain", HOST)[0] == 415
+        assert req(port, "GET", "/remote/api/state", host=HOST)[0] == 401  # sem credencial: 401, nao conta
+        assert req(port, "GET", R, host=HOST)[0] == 401  # so POST e a rota publica
+        assert req(port, "POST", R + "?x=1", body, host=HOST)[0] == 401  # query nao e a rota publica (fail-closed)
+        # ---- resgate valido: token mostrado uma vez, codigo consumido
+        code, j = req(port, "POST", R, body, host=HOST)
+        assert code == 200 and j["ok"] is True and j["device"]["name"] == "Celular Luiz", (code, j)
+        tok1, dev1 = j["token"], j["device"]["id"]
+        assert re.fullmatch(r"[A-Za-z0-9_-]{43}", tok1) and re.fullmatch(r"d-[0-9a-f]{6}", dev1), (tok1, dev1)
+        assert devs()["pairing"] is None
+        assert tok1 not in devs_text() and code1 not in devs_text()
+        assert set(devs()["devices"][0]) == {"id", "name", "created", "last_used", "last_used_ts", "salt", "hash", "revoked"}
+        D1 = {"Authorization": "Bearer " + tok1}
+        code, j = req(port, "GET", "/remote/api/state", headers=D1, host=HOST); assert code == 200 and j["ok"] is True, (code, j)
+        assert tok1 not in json.dumps(j) and code1 not in json.dumps(j)
+        assert devs()["devices"][0]["last_used"] is not None  # uso registrado
+        # ---- uso unico: o mesmo codigo de novo = 401 (falha 1 da origem)
+        code, j = req(port, "POST", R, {"code": code1, "name": "Outro"}, host=HOST); assert code == 401 and "expirado" in j["error"], (code, j)
+        # ---- token errado = 401 (falha 2). Sem o cabecalho Authorization nao e tentativa (nao conta)
+        assert req(port, "GET", "/remote/api/state", headers={"Authorization": "Bearer nope"}, host=HOST)[0] == 401
+        assert req(port, "GET", "/remote/api/state", headers={"X-Dove-Token": tok1}, host=HOST)[0] == 401  # so Authorization vale
+        # ---- codigo errado = 401 (falha 3)
+        assert req(port, "POST", R, {"code": "errado"}, host=HOST)[0] == 401
+        assert req(port, "POST", R, {}, host=HOST)[0] == 401  # codigo ausente: tentativa recusada (falha 4)
+        # ---- revogacao: token deixa de valer na hora (401), registro sem hash/salt
+        a2a("remote", "revoke", dev1, "--from", "luiz")
+        assert "ja esta revogado" in a2a("remote", "revoke", dev1, "--from", "luiz", code=1)
+        dd = devs()["devices"][0]; assert dd["revoked"] and "salt" not in dd and "hash" not in dd
+        code, j = req(port, "GET", "/remote/api/state", headers=D1, host=HOST); assert code == 401, (code, j)  # falha 5: responde 401 e bloqueia
+        # ---- origem bloqueada: 429 para qualquer pedido remoto, inclusive dispositivo valido e resgate com codigo valido
+        c2 = code_of(a2a("remote", "pair", "--from", "luiz"))
+        code, j = req(port, "POST", R, {"code": c2, "name": "Tablet"}, host=HOST); assert code == 429 and "aguarde" in j["error"], (code, j)
+        code, j = req(port, "GET", "/remote/api/state", headers=D1, host=HOST); assert code == 429, (code, j)
+        # o local nao e afetado (sem limite no papel local) e o 429 nao conta de novo
+        assert req(port, "GET", "/api/state")[0] == 200 and req(port, "GET", "/api/ping")[0] == 200
+        assert req(port, "GET", "/api/state", headers={"Authorization": "Bearer x"})[0] == 200  # local ignora Authorization
+        assert "pairing" in devs() and devs()["pairing"] is not None  # codigo c2 segue valido (nao consumido pelo 429)
+    finally:
+        p.terminate(); p.communicate(timeout=5)
+
+    # ---- o bloqueio vale para a origem no processo: reinicia o painel (memoria zera) e segue tudo certo com o arquivo
+    port = free_port(); p, T = start_panel(env, port); H = f"127.0.0.1:{port}"
+    try:
+        code, j = req(port, "POST", R, {"code": c2, "name": "Tablet"}, host=HOST); assert code == 200, (code, j)
+        tok2, dev2 = j["token"], j["device"]["id"]; D2 = {"Authorization": "Bearer " + tok2}
+        assert req(port, "GET", "/remote/api/state", headers=D2, host=HOST)[0] == 200  # sobrevive ao reinicio (hash no disco)
+        assert tok2 not in devs_text() and c2 not in devs_text()
+        # host saiu de remote_hosts: dispositivo valido vira 403 (Host), volta quando o host volta
+        a2a("remote", "hosts", "remove", HOST, "--from", "luiz")
+        code, j = req(port, "GET", "/remote/api/state", headers=D2, host=HOST); assert code == 403 and "Host" in j["error"], (code, j)
+        assert req(port, "POST", R, {"code": "x"}, host=HOST)[0] == 403
+        a2a("remote", "hosts", "add", HOST, "--from", "luiz")
+        assert req(port, "GET", "/remote/api/state", headers=D2, host=HOST)[0] == 200
+        # ---- codigo expirado: validade vencida (editada no arquivo) = 401, e o codigo fica consumido
+        c3 = code_of(a2a("remote", "pair", "--from", "luiz"))
+        d = devs(); d["pairing"]["expires"] = time.time() - 1; json.dump(d, open(DEV, "w", encoding="utf-8"))
+        code, j = req(port, "POST", R, {"code": c3, "name": "Tarde"}, host=HOST); assert code == 401 and "expirado" in j["error"], (code, j)
+        assert devs()["pairing"] is None and "Tarde" not in devs_text()
+        # ---- novo codigo substitui o pendente: o anterior deixa de valer
+        c4a = code_of(a2a("remote", "pair", "--from", "luiz")); c4b = code_of(a2a("remote", "pair", "--from", "luiz"))
+        assert req(port, "POST", R, {"code": c4a}, host=HOST)[0] == 401  # falha: o substituido nao vale mais
+        code, j = req(port, "POST", R, {"code": c4b}, host=HOST)  # sem nome: 'celular'
+        assert code == 200 and j["device"]["name"] == "celular", (code, j)
+        tok3 = j["token"]
+        # ---- lista: sem token, sem hash, sem salt, sem codigo
+        out = a2a("remote", "list", "--from", "luiz")
+        for secret in (tok2, tok3, c4b):
+            assert secret not in out, "token/codigo na lista"
+        for h in (x.get("hash") for x in devs()["devices"] if x.get("hash")):
+            assert h not in out
+        assert "Tablet" in out and "celular" in out and "revogado em" in out and "ativo" in out and "nunca" in out  # celular nunca usado
+        # ---- revogar por nome (unico ativo): o token do Tablet deixa de valer; o da 'celular' segue
+        a2a("remote", "revoke", "Tablet", "--from", "luiz")
+        assert req(port, "GET", "/remote/api/state", headers=D2, host=HOST)[0] == 401
+        assert req(port, "GET", "/remote/api/state", headers={"Authorization": "Bearer " + tok3}, host=HOST)[0] == 200
+        assert "nao encontrado" in a2a("remote", "revoke", "Tablet", "--from", "luiz", code=1)  # so ativo conta para nome
+        # ---- local inalterado no mesmo processo
+        assert req(port, "GET", "/", host=H)[0] == 200 and tok3 not in req(port, "GET", "/", host=H)[1]
+        assert req(port, "POST", "/api/send", {"to": "codex", "body": "local"}, dict(T, Origin="http://" + H))[0] == 200
+        assert req(port, "GET", "/remote/api/state", headers=dict(T))[0] == 404  # rota remota so existe para o papel remoto
+        assert p.poll() is None
+    finally:
+        p.terminate(); p.communicate(timeout=5)
+
+    # ---- arquivo: sem texto puro em nenhum momento (lido agora), permissao 0600 onde o SO aplica
+    final = devs_text()
+    for secret in (tok1, tok2, tok3, c2, c3, c4a, c4b, code1): assert secret not in final
+    if os.name == "posix": assert stat.S_IMODE(os.stat(DEV).st_mode) == 0o600, oct(os.stat(DEV).st_mode)
+    assert not [f for f in os.listdir(tmp) if f.endswith(".tmp")], "arquivo temporario sobrou"
+    # ---- limite de tentativas (puro, sem arquivo): 5 falhas em 10 min bloqueiam 10 min; janela; outras origens intactas
+    sys.path.insert(0, str(ROOT)); mod = importlib.import_module("a2a")
+    s = "10.9.9.9"
+    for i in range(4): mod.remote_note_failure(s, now=1000 + i)
+    assert mod.remote_block_left(s, now=1004) == 0  # 4 falhas: ainda nao bloqueia
+    mod.remote_note_failure(s, now=1004)  # 5a falha em 10 min
+    assert mod.remote_block_left(s, now=1005) > 0 and mod.remote_block_left(s, now=1603) > 0
+    assert mod.remote_block_left(s, now=1605) == 0  # 10 min depois, libera
+    s2 = "10.9.9.8"
+    for i in range(6): mod.remote_note_failure(s2, now=i * 700)  # espacadas (> 10 min): nunca acumulam 5 numa janela
+    assert mod.remote_block_left(s2, now=4200) == 0
+    assert mod.remote_block_left("10.9.9.10", now=1005) == 0
+    assert mod.remote_device_for_request(None) is None
+    assert mod.REMOTE_PUBLIC_ROUTES == {("POST", "/remote/api/pair")} and mod.REMOTE_ROUTES == {("GET", "/remote/api/state")}
+    assert mod.clean_device_name(None) == "celular" and mod.clean_device_name("  Celular   do Luiz ") == "Celular do Luiz"
+    print("OK: pareamento - codigo so humano (agentes e A2A_RUNNER recusados, --from obrigatorio), uso unico, 5 min, substituido "
+          "por novo, mostrado uma vez e fora do arquivo; resgate so com Host em remote_hosts (fora da lista 403, codigo nao "
+          "consumido); token por dispositivo (so hash salgado, 0600), revogado = 401 na hora, Bearer obrigatorio; falhas (token, "
+          "codigo, reuso, revogado) contam; 5 em 10 min bloqueiam a origem 10 min (429 mesmo com dispositivo valido), janela "
+          "respeitada; list sem token/hash; local inalterado; sobrevive a reinicio; expirado recusado")
+
 if __name__ == "__main__":
     main()
     fase1()
@@ -4171,3 +4346,4 @@ if __name__ == "__main__":
     parent_fase()
     cancel_fase()
     remoto_fase()
+    pareamento_fase()

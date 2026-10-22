@@ -2395,13 +2395,166 @@ def cmd_remote(a):
             else:
                 hs = remote_hosts_list()
                 print("\n".join(hs) if hs else "(nenhum: acesso remoto desligado)")
+        elif a.rcmd == "pair":
+            code, expires = pair_create(a._from)
+            print(f"codigo de pareamento: {code}")
+            print(f"valido ate {time.strftime('%H:%M:%S', time.localtime(expires))} (5 min), uso unico. Mostrado so esta vez: "
+                  "nao fica salvo em texto puro. Ao resgatar, o celular recebe um token proprio.")
+            if not remote_hosts_list():
+                print("AVISO: remote_hosts esta vazio, entao o remoto continua desligado. "
+                      "Adicione o host: a2a remote hosts add <host> --from " + a._from)
+        elif a.rcmd == "list":
+            devs = device_list(a._from)
+            if not devs: print("(nenhum dispositivo pareado)"); return
+            print(f"{'id':<10} {'nome':<20} {'criado':<21} {'ultimo uso':<21} situacao")
+            for x in devs:
+                sit = f"revogado em {x['revoked']}" if x.get("revoked") else "ativo"
+                print(f"{x['id'] or '':<10} {x['name']:<20} {x['created'] or '':<21} {x['last_used'] or 'nunca':<21} {sit}")
+        elif a.rcmd == "revoke":
+            x = device_revoke(a._from, a.device)
+            print(f"dispositivo revogado: {x['id']} ({x['name']}). O token dele deixa de valer agora.")
     except DoveError as e: fail(f"erro: {e}")
+# ---- pareamento de dispositivos (etapa 16, sub-passo 3). ~/.a2a/devices.json guarda o codigo de pareamento pendente (so o
+# hash salgado, validade de 5 min, uso unico) e os dispositivos (so o hash salgado do token; nunca o token nem o codigo).
+# O token aparece UMA vez, na resposta do resgate. Arquivo 0600 em POSIX; no Windows as ACLs nao sao aplicadas pelo codigo.
+DEVICES = os.path.join(HOME, "devices.json")
+PAIR_TTL = 300              # s: codigo de pareamento valido por 5 min
+PAIR_NAME_MAX = 40          # nome do dispositivo: ASCII imprimivel, 1 a 40 caracteres
+DEVICE_TOUCH = 60           # s: last_used so e regravado a cada 60 s (nao escreve a cada pedido)
+AUTH_FAIL_MAX = 5           # falhas de autenticacao ou resgate de uma origem...
+AUTH_FAIL_WINDOW = 600      # ...em 10 min...
+AUTH_BLOCK = 600            # ...bloqueiam essa origem por 10 min (todo pedido remoto dela recebe 429)
+REMOTE_PAIR_PATH = "/remote/api/pair"
+_auth_fails, _auth_blocked, _auth_lock = {}, {}, threading.Lock()  # memoria do processo do painel (zera ao reiniciar)
+def _salted_hash(salt_hex, value):
+    return hmac.new(bytes.fromhex(salt_hex), value.encode("utf-8", "replace"), hashlib.sha256).hexdigest()
+def _num(v):
+    try: return float(v)
+    except (TypeError, ValueError): return 0.0
+def _matches(salt_hex, value, digest_hex):
+    """Compara em tempo constante; registro corrompido ou sem campos = nao confere."""
+    try: return hmac.compare_digest(_salted_hash(salt_hex, value).encode(), str(digest_hex).encode())
+    except (ValueError, TypeError): return False
+def write_private_json(p, obj):
+    """Grava atomico (tmp 0600 + replace): o arquivo final nunca fica com permissao mais aberta que 0600 (POSIX)."""
+    tmp = f"{p}.{os.getpid()}.{uuid.uuid4().hex[:6]}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f: json.dump(obj, f, ensure_ascii=False, indent=2)
+        delay = 0.02
+        for i in range(10):  # Windows: replace falha se outro processo (ou o antivirus) esta com o arquivo aberto
+            try: os.replace(tmp, p); break
+            except PermissionError:
+                if i == 9: raise DoveError(f"nao consegui gravar {p} (arquivo em uso por outro programa/antivirus?)")
+                time.sleep(delay); delay = min(delay * 2, 0.5)
+    except BaseException:
+        try: os.remove(tmp)
+        except OSError: pass
+        raise
+    if os.name == "posix": os.chmod(p, 0o600)
+def devices_load():
+    d = read_json(DEVICES, None)
+    d = d if isinstance(d, dict) else {}
+    devs = d.get("devices") if isinstance(d.get("devices"), list) else []
+    pairing = d.get("pairing") if isinstance(d.get("pairing"), dict) else None
+    return {"devices": [x for x in devs if isinstance(x, dict)], "pairing": pairing}
+def clean_device_name(v):
+    if v is None or v == "": return "celular"
+    if not isinstance(v, str): raise DoveError("nome do dispositivo invalido")
+    s = " ".join(v.split())
+    if not s or len(s) > PAIR_NAME_MAX or not s.isascii() or not s.isprintable():
+        raise DoveError(f"nome do dispositivo invalido (1 a {PAIR_NAME_MAX} caracteres ASCII imprimiveis)")
+    return s
+class AuthFail(DoveError):
+    """Credencial ou codigo apresentado e recusado: conta no limite de tentativas da origem."""
+def pair_create(who):
+    """Gera o codigo de pareamento (so humano). Substitui um codigo pendente. Devolve (codigo, expira_em_epoch)."""
+    require_human(who)  # antes de qualquer gravacao; recusado em A2A_RUNNER e para nome de agente
+    ensure_dirs()
+    code, salt, expires = secrets.token_urlsafe(16), secrets.token_hex(16), time.time() + PAIR_TTL
+    with FileLock(DEVICES):
+        d = devices_load()
+        d["pairing"] = {"salt": salt, "hash": _salted_hash(salt, code), "created": now_iso(), "expires": expires, "by": who}
+        write_private_json(DEVICES, d)
+    return code, expires
+def pair_redeem(code, name):
+    """Resgate do codigo pelo dispositivo: uso unico (apaga o pendente ao usar ou ao expirar), validade de 5 min.
+    Devolve (id, nome, token). O token e gerado aqui e so o hash salgado vai para o arquivo."""
+    name = clean_device_name(name)
+    if not isinstance(code, str) or not code or len(code) > 128: raise AuthFail("codigo invalido ou expirado")
+    with FileLock(DEVICES):
+        d = devices_load(); p = d["pairing"] or {}
+        if not _matches(p.get("salt", ""), code, p.get("hash", "")): raise AuthFail("codigo invalido ou expirado")
+        d["pairing"] = None  # uso unico: confirmado o codigo, ele deixa de valer (mesmo se expirado, abaixo)
+        if time.time() > _num(p.get("expires")):
+            write_private_json(DEVICES, d); raise AuthFail("codigo invalido ou expirado")
+        ids = {x.get("id") for x in d["devices"]}
+        dev_id = next(i for i in (f"d-{secrets.token_hex(3)}" for _ in range(100)) if i not in ids)
+        token, salt = secrets.token_urlsafe(32), secrets.token_hex(16)
+        d["devices"].append({"id": dev_id, "name": name, "created": now_iso(), "last_used": None, "last_used_ts": None,
+                             "salt": salt, "hash": _salted_hash(salt, token), "revoked": None})
+        write_private_json(DEVICES, d)
+    return dev_id, name, token
+def device_for_token(token):
+    """Dispositivo ATIVO dono do token (ou None). Token revogado nao tem hash guardado: nunca confere."""
+    if not isinstance(token, str) or not token or len(token) > 256: return None
+    hit = None
+    for x in devices_load()["devices"]:  # percorre todos (sem early exit) para nao vazar a posicao pelo tempo
+        if x.get("revoked") is None and _matches(x.get("salt", ""), token, x.get("hash", "")): hit = x
+    if hit is None: return None
+    now = time.time()
+    if now - _num(hit.get("last_used_ts")) >= DEVICE_TOUCH:
+        with FileLock(DEVICES):
+            d = devices_load()
+            for x in d["devices"]:
+                if x.get("id") == hit["id"] and x.get("revoked") is None:
+                    x["last_used"], x["last_used_ts"] = now_iso(), now
+            write_private_json(DEVICES, d)
+    return {"id": hit["id"], "name": hit.get("name", "")}
+def device_revoke(who, ref):
+    """Revoga um dispositivo (so humano). Apaga salt e hash: o token deixa de valer na hora. Ref = id ou nome ativo unico."""
+    require_human(who)
+    with FileLock(DEVICES):
+        d = devices_load()
+        cands = [x for x in d["devices"] if x.get("id") == ref] or [x for x in d["devices"] if x.get("name") == ref and x.get("revoked") is None]
+        if not cands: raise DoveError(f"dispositivo '{ref}' nao encontrado (veja: a2a remote list)")
+        if len(cands) > 1: raise DoveError(f"nome '{ref}' ambiguo: use o id (veja: a2a remote list)")
+        x = cands[0]
+        if x.get("revoked") is not None: raise DoveError(f"dispositivo {x.get('id')} ja esta revogado")
+        x["revoked"] = now_iso()
+        for k in ("salt", "hash", "last_used_ts"): x.pop(k, None)
+        write_private_json(DEVICES, d)
+    return {"id": x.get("id"), "name": x.get("name", ""), "created": x.get("created"), "last_used": x.get("last_used"), "revoked": x["revoked"]}
+def device_list(who):
+    """Lista (so humano). So campos publicos: nunca salt, hash nem token."""
+    require_human(who)
+    return [{"id": x.get("id"), "name": x.get("name", ""), "created": x.get("created"), "last_used": x.get("last_used"),
+             "revoked": x.get("revoked")} for x in devices_load()["devices"]]
+def remote_block_left(src, now=None):
+    """Segundos restantes do bloqueio da origem (0 = pode tentar)."""
+    now = time.time() if now is None else now
+    with _auth_lock:
+        until = _auth_blocked.get(src, 0)
+        if until > now: return int(until - now) + 1
+        _auth_blocked.pop(src, None)
+        return 0
+def remote_note_failure(src, now=None):
+    """Conta uma falha de autenticacao/resgate da origem; a 5a em 10 min bloqueia a origem por 10 min."""
+    now = time.time() if now is None else now
+    with _auth_lock:
+        if len(_auth_fails) > 1000: _auth_fails.clear()  # limite de memoria (origens do tailnet sao poucas)
+        recent = [t for t in _auth_fails.get(src, []) if now - t < AUTH_FAIL_WINDOW] + [now]
+        if len(recent) >= AUTH_FAIL_MAX:
+            _auth_blocked[src] = now + AUTH_BLOCK; _auth_fails.pop(src, None)
+        else: _auth_fails[src] = recent
 def remote_device_for_request(handler):
-    """GANCHO do sub-passo 3 (pareamento de dispositivos, ainda NAO implementado e que depende de aval do Luiz): devolve o
-    dispositivo pareado dono do token da requisicao, ou None. Enquanto nao existir, o papel remoto nao autentica ninguem
-    (toda requisicao remota recebe 401)."""
-    return None
+    """Dispositivo pareado dono de `Authorization: Bearer <token>` (ou None: sem cabecalho, token errado ou revogado)."""
+    if handler is None: return None
+    scheme, _, value = (handler.headers.get("Authorization") or "").partition(" ")
+    if scheme.lower() != "bearer": return None
+    return device_for_token(value.strip())
 REMOTE_ROUTES = frozenset({("GET", "/remote/api/state")})  # tabela fail-closed do papel remoto: so leitura reduzida, nada que grave
+REMOTE_PUBLIC_ROUTES = frozenset({("POST", REMOTE_PAIR_PATH)})  # unica rota sem dispositivo: resgate do codigo (exato, sem query)
 PROXY_HEADERS = ("x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port", "forwarded", "via", "x-real-ip")
 def proxy_forwarded(headers):
     """True se a requisicao veio de um proxy reverso (ex.: tailscale serve manda X-Forwarded-* e Tailscale-*): nunca e
@@ -2692,22 +2845,44 @@ def cmd_panel(a):
             if host and host in remote_hosts_list(): return "remote"
             self.reply(403, {"ok": False, "error": "Host nao permitido"}); return None
         def remote_gate(self, method):
-            """Papel remoto, fail-closed: Origin/Referer https do proprio host -> dispositivo autenticado (401) -> tabela de
-            rotas (403 para tudo que nao esta nela). -> rota (path) liberada, ou None se ja respondeu."""
+            """Papel remoto, fail-closed: Origin/Referer https do proprio host -> origem bloqueada por tentativas (429) ->
+            rota publica de resgate (so o codigo) -> dispositivo autenticado (401) -> tabela de rotas (403 para tudo que
+            nao esta nela). -> rota (path) liberada, ou None se ja respondeu."""
             host = (self.headers.get("Host") or "").lower()
             origin, referer = self.headers.get("Origin"), self.headers.get("Referer")
             if (origin is not None and origin.lower() != "https://" + host) or \
                (referer is not None and not (referer.lower() == "https://" + host or referer.lower().startswith("https://" + host + "/"))):
                 self.reply(403, {"ok": False, "error": "Origin nao permitida"}); return None
+            src = self.client_address[0]
+            left = remote_block_left(src)
+            if left:
+                self.reply(429, {"ok": False, "error": f"muitas tentativas; aguarde {left} s"}); return None
+            raw = self.path
+            if (method, raw) in REMOTE_PUBLIC_ROUTES: return raw  # resgate do codigo: sem dispositivo, sem query
             try: device = remote_device_for_request(self)
             except Exception: device = None  # falha do gancho = ninguem autenticado
             if not device:
+                if self.headers.get("Authorization") is not None: remote_note_failure(src)  # credencial apresentada e recusada
                 self.reply(401, {"ok": False, "error": "dispositivo nao autenticado"}); return None
-            raw = self.path
             path = raw.split("?", 1)[0]
             if not path.startswith("/") or path.startswith("//") or "\\" in raw or "%" in path or (method, path) not in REMOTE_ROUTES:
                 self.reply(403, {"ok": False, "error": "rota nao permitida para o papel remoto"}); return None
             return path
+        def remote_pair(self, n, raw):
+            """Resgate do codigo de pareamento: unica rota do papel remoto sem dispositivo. Codigo errado/expirado/usado conta
+            no limite de tentativas da origem; erro de formato nao conta."""
+            if n < 0: self.reply(411, {"ok": False, "error": "Content-Length obrigatorio"}); return
+            if n > 65536: self.reply(413, {"ok": False, "error": "corpo grande demais (max 64 KB)"}); return
+            if (self.headers.get("Content-Type") or "").split(";")[0].strip().lower() != "application/json":
+                self.reply(415, {"ok": False, "error": "Content-Type deve ser application/json"}); return
+            try: d = json.loads(raw.decode("utf-8") or "{}")
+            except (ValueError, UnicodeDecodeError): d = None
+            if not isinstance(d, dict): self.reply(400, {"ok": False, "error": "esperado objeto JSON com code e name"}); return
+            try: dev_id, dev_name, token = pair_redeem(d.get("code"), d.get("name"))
+            except AuthFail as e:
+                remote_note_failure(self.client_address[0])
+                self.reply(401, {"ok": False, "error": str(e)}); return
+            self.reply(200, {"ok": True, "device": {"id": dev_id, "name": dev_name}, "token": token})  # o token aparece so aqui
         def token_ok(self):
             if hmac.compare_digest(self.headers.get("X-Dove-Token") or "", token): return True
             self.reply(403, {"ok": False, "error": "token invalido - recarregue a pagina do Dove (F5)"}); return False
@@ -2787,8 +2962,11 @@ def cmd_panel(a):
             n, raw = self.read_body()
             r = self.role()
             if r is None: return
-            if r == "remote":  # sem rota POST na tabela remota: 401/403, nunca chega ao api_post
-                if self.remote_gate("POST") is not None: self.reply(403, {"ok": False, "error": "rota nao permitida para o papel remoto"})
+            if r == "remote":  # nunca chega ao api_post: so o resgate do codigo (rota publica) ou 401/403
+                path = self.remote_gate("POST")
+                if path is None: return
+                if ("POST", path) in REMOTE_PUBLIC_ROUTES: self.remote_pair(n, raw)
+                else: self.reply(403, {"ok": False, "error": "rota nao permitida para o papel remoto"})
                 return
             origin = self.headers.get("Origin")
             if origin is not None and origin.lower() != "http://" + (self.headers.get("Host") or "").lower():
@@ -5578,12 +5756,22 @@ def build_parser():
                        description="remote_hosts em ~/.a2a/config.json. Vazia (padrao) = acesso remoto desligado. So hostname ou "
                                    "hostname:porta (sem esquema, caminho, curinga nem IP, salvo 127.0.0.1/localhost). add/remove so o "
                                    "humano (recusado em A2A_RUNNER e com nome de agente); list e livre. Sozinho nao libera nada: "
-                                   "o painel ainda exige dispositivo pareado (sub-passo 3, ainda nao implementado).")
+                                   "o painel ainda exige dispositivo pareado (a2a remote pair).")
     rhs = rh.add_subparsers(dest="hcmd", required=True)
     for nm in ("add", "remove"):
         x = rhs.add_parser(nm, help=f"{nm} um host (so o humano)"); x.add_argument("host")
         x.add_argument("--from", dest="_from", required=True, help="o humano (acao so do humano)")
     rhs.add_parser("list", help="mostra os hosts (qualquer um pode)")
+    rp = rs.add_parser("pair", help="gera o codigo de pareamento de um celular (so o humano; uso unico, 5 min)",
+                       description="Mostra o codigo UMA vez. O celular resgata em POST /remote/api/pair com {\"code\", \"name\"} "
+                                   "(so com o host em remote_hosts) e recebe o token do dispositivo, mostrado uma vez. Um codigo "
+                                   "pendente e substituido. So o humano (recusado em A2A_RUNNER e com nome de agente).")
+    rp.add_argument("--from", dest="_from", required=True, help="o humano (acao so do humano)")
+    rl = rs.add_parser("list", help="dispositivos pareados (so o humano; nunca mostra token nem hash)")
+    rl.add_argument("--from", dest="_from", required=True, help="o humano (acao so do humano)")
+    rv = rs.add_parser("revoke", help="revoga um dispositivo (so o humano)")
+    rv.add_argument("device", help="id (d-xxxxxx, veja a2a remote list) ou nome ativo unico")
+    rv.add_argument("--from", dest="_from", required=True, help="o humano (acao so do humano)")
     rm.set_defaults(func=cmd_remote)
     return p
 
